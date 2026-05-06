@@ -1,0 +1,124 @@
+; ROUNDTABLE NLE — Inno Setup Installer
+; Build with: ISCC.exe installer.iss
+
+#define MyAppName "ROUNDTABLE NLE"
+#define MyAppPublisher "Roundtable"
+#define MyAppURL "https://github.com/ROUNDTABLE-TALK/roundtable"
+#define MyAppExeName "roundtable.exe"
+#ifndef MyAppVersion
+  #define MyAppVersion "0.0.0"
+#endif
+; NOTE: Override via: ISCC.exe /DMyAppVersion=x.xx installer.iss
+
+[Setup]
+AppId={{B8A7C3D1-2E5F-4A9C-8B7D-6F1E3A2C5D8B}
+AppName={#MyAppName}
+AppVersion={#MyAppVersion}
+AppPublisher={#MyAppPublisher}
+AppPublisherURL={#MyAppURL}
+AppSupportURL={#MyAppURL}
+AppUpdatesURL={#MyAppURL}
+DefaultDirName={autopf64}\{#MyAppName}
+DefaultGroupName={#MyAppName}
+AllowNoIcons=yes
+OutputDir=.\dist
+OutputBaseFilename=Roundtable-NLE-v{#MyAppVersion}-Setup
+Compression=lzma2/ultra64
+SolidCompression=yes
+SetupIconFile=icon.ico
+WizardStyle=modern
+UninstallDisplayIcon={app}\{#MyAppExeName}
+; Silent install support for auto-update
+DisableProgramGroupPage=yes
+CloseApplications=force
+; Check for VC++ redist (requires Inno Setup 6.8+ for PrerequisitesCheck directive)
+; Manual check done via [Code] section below
+
+[Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Tasks]
+Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional icons:"
+
+[Dirs]
+; Writable data directories — these must be user-writable so the app can
+; save projects and download runtime assets (characters, backgrounds,
+; fonts, etc.) even when installed under Program Files.
+; Subdirectories created inside these will inherit the permissions.
+Name: "{app}\assets"; Permissions: users-modify
+Name: "{app}\projects"; Permissions: users-modify
+
+[Files]
+; Main executable
+Source: "build\bin\Release\roundtable.exe"; DestDir: "{app}"; Flags: ignoreversion
+
+; Runtime DLLs
+Source: "build\bin\Release\*.dll"; DestDir: "{app}"; Flags: ignoreversion
+
+; Qt deployment configuration (overrides hardcoded plugin path)
+Source: "qt.conf"; DestDir: "{app}"; Flags: ignoreversion
+
+; Qt plugins (must preserve directory structure)
+Source: "build\bin\Release\platforms\*"; DestDir: "{app}\platforms"; Flags: ignoreversion recursesubdirs
+Source: "build\bin\Release\styles\*"; DestDir: "{app}\styles"; Flags: ignoreversion recursesubdirs
+Source: "build\bin\Release\iconengines\*"; DestDir: "{app}\iconengines"; Flags: ignoreversion recursesubdirs
+Source: "build\bin\Release\imageformats\*"; DestDir: "{app}\imageformats"; Flags: ignoreversion recursesubdirs
+Source: "build\bin\Release\networkinformation\*"; DestDir: "{app}\networkinformation"; Flags: ignoreversion recursesubdirs
+Source: "build\bin\Release\tls\*"; DestDir: "{app}\tls"; Flags: ignoreversion recursesubdirs
+
+; Compiled shaders (required by Vulkan compositor)
+Source: "build\shaders\*"; DestDir: "{app}\shaders"; Flags: ignoreversion recursesubdirs
+
+; Runtime assets (presets, libs, and config — NOT development assets)
+Source: "assets\presets\*"; DestDir: "{app}\assets\presets"; Flags: ignoreversion recursesubdirs skipifsourcedoesntexist
+Source: "assets\lib\*"; DestDir: "{app}\assets\lib"; Flags: ignoreversion recursesubdirs skipifsourcedoesntexist
+Source: "assets\character_metadata.json"; DestDir: "{app}\assets"; Flags: ignoreversion
+Source: "assets\audio_folder.txt"; DestDir: "{app}\assets"; Flags: ignoreversion
+Source: "icon.png"; DestDir: "{app}"; Flags: ignoreversion
+
+; Launcher
+Source: "launch.vbs"; DestDir: "{app}"; Flags: ignoreversion
+
+[Icons]
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+
+[Run]
+; Launch app after install (unless silent update)
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: postinstall nowait skipifsilent
+
+[UninstallRun]
+; Clean up cache on uninstall (optional)
+Filename: "{sys}\cmd.exe"; Parameters: "/c rmdir /s /q ""{localappdata}\ROUNDTABLE\cache"""; Flags: runhidden
+
+[Code]
+{ Check for NVIDIA GPU during install }
+function IsNvidiaGpuPresent: Boolean;
+begin
+  Result := False;
+  { Note: GPU detection disabled - NVIDIA check is advisory only }
+end;
+
+{ Check for VC++ Redistributable }
+function IsVCRedistInstalled: Boolean;
+var
+  Installed: Boolean;
+begin
+  Installed := RegKeyExists(HKLM, 'SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64');
+  if not Installed then
+    Installed := RegKeyExists(HKLM, 'SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\x64');
+  Result := Installed;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssDone then
+  begin
+    if not IsVCRedistInstalled then
+      MsgBox('Microsoft Visual C++ Redistributable not found.' #13#13
+             'You may need to install it manually from:' #13
+             'https://aka.ms/vs/17/release/vc_redist.x64.exe',
+             mbInformation, MB_OK);
+  end;
+end;

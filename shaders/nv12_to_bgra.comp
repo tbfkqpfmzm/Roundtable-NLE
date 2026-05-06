@@ -1,0 +1,62 @@
+#version 450
+// NV12 → BGRA color-space conversion compute shader.
+//
+// Takes NV12 video frames (separate Y and UV planes) and converts
+// them to BGRA in a single GPU dispatch, eliminating the need for
+// CPU-side sws_scale.
+//
+// NV12 layout:
+//   Plane 0 (Y):  W × H  bytes, one luma sample per pixel (R8)
+//   Plane 1 (UV): W/2 × H/2 interleaved chroma pairs (RG8)
+//
+// BT.709 color matrix (HD video standard):
+//   R = Y + 1.5748 * Cr
+//   G = Y - 0.1873 * Cb - 0.4681 * Cr
+//   B = Y + 1.8556 * Cb
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// Input planes
+layout(binding = 0) uniform sampler2D yPlane;   // R8, full resolution
+layout(binding = 1) uniform sampler2D uvPlane;  // RG8, half resolution
+
+// Output BGRA image
+layout(binding = 2, rgba8) uniform writeonly image2D outputImage;
+
+// Push constants
+layout(push_constant) uniform PushConstants {
+    int width;
+    int height;
+} pc;
+
+void main()
+{
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= pc.width || pixel.y >= pc.height) return;
+
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(pc.width, pc.height);
+
+    // Sample Y (luma) at full resolution
+    float y = texture(yPlane, uv).r;
+
+    // Sample UV (chroma) at half resolution — hardware bilinear filtering
+    // gives us free chroma upsampling
+    vec2 cbcr = texture(uvPlane, uv).rg;
+
+    // NV12 stores U (Cb) in first channel, V (Cr) in second
+    float cb = cbcr.r - 0.5;  // Center around 0 (was 0–1 from unorm)
+    float cr = cbcr.g - 0.5;
+
+    // BT.709 YCbCr → RGB conversion (HDTV standard)
+    // For studio-swing (16–235 luma, 16–240 chroma), scale Y:
+    //   y_scaled = (y - 16/255) * (255 / (235 - 16))
+    // Most NVDEC output uses studio swing, so apply the scaling.
+    float y_scaled = clamp((y - 0.0627) * 1.1644, 0.0, 1.0);
+
+    float r = clamp(y_scaled + 1.5748 * cr,                        0.0, 1.0);
+    float g = clamp(y_scaled - 0.1873 * cb - 0.4681 * cr,          0.0, 1.0);
+    float b = clamp(y_scaled + 1.8556 * cb,                        0.0, 1.0);
+
+    // Output as BGRA (matches Qt ARGB32 byte order on little-endian)
+    imageStore(outputImage, pixel, vec4(b, g, r, 1.0));
+}

@@ -1,0 +1,68 @@
+{
+  "name": "TRONY (Default)",
+  "cameraZoom": 1.000000,
+  "cameraX": 0.000000,
+  "cameraY": 0.000000,
+  "backgrounds": [
+    {
+      "path": "MARIAN_WALL_HD.png",
+      "posX": 0.500000,
+      "posY": 0.500000,
+      "scale": 1.000000,
+      "opacity": 1.000000,
+      "nativeWidth": 0,
+      "nativeHeight": 0,
+      "visible": true,
+      "layerType": "image",
+      "inPoint": 0.000000,
+      "outPoint": 0.000000,
+      "cropLeft": 0.000000,
+      "cropRight": 0.000000,
+      "cropTop": 0.000000,
+      "cropBottom": 0.000000
+    }
+  ],
+  "characters": [
+    {
+      "characterName": "Kilo",
+      "outfit": "default",
+      "stance": "default",
+      "animation": "idle",
+      "isTalking": false,
+      "posX": 0.794000,
+      "posY": 0.723000,
+      "scale": 1.216000,
+      "rotation": 0.000000,
+      "flipX": false,
+      "opacity": 1.000000,
+      "cropLeft": 0.000000,
+      "cropRight": 0.000000,
+      "cropTop": 0.000000,
+      "cropBottom": 0.000000,
+      "visible": true
+    },
+    {
+      "characterName": "Trony",
+      "outfit": "default",
+      "stance": "default",
+      "animation": "idle",
+      "isTalking": true,
+      "posX": 0.329000,
+      "posY": 0.822000,
+      "scale": 1.472000,
+      "rotation": 0.000000,
+      "flipX": false,
+      "opacity": 1.000000,
+      "cropLeft": 0.000000,
+      "cropRight": 0.000000,
+      "cropTop": 0.000000,
+      "cropBottom": 0.000000,
+      "visible": true
+    }
+  ],
+  "layerOrder": [
+    {"type": "ch", "index": 0},
+    {"type": "ch", "index": 1},
+    {"type": "bg", "index": 0}
+  ]
+}

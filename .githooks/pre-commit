@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Pre-commit hook: auto-bump version in src/version.h on every commit.
+#
+# Reads the last git tag (e.g. v0.49), increments minor by 1 (→ v0.50),
+# writes it into src/version.h, and stages the file.
+#
+# Install: git config core.hooksPath .githooks
+
+set -e
+
+VERSION_H="src/version.h"
+
+# Get the last tag, strip the leading 'v'
+LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0")
+LAST_VER="${LAST_TAG#v}"  # remove 'v' prefix
+
+# Split into major.minor
+IFS='.' read -ra PARTS <<< "$LAST_VER"
+MAJOR="${PARTS[0]}"
+MINOR="${PARTS[1]}"
+
+if [ -z "$MINOR" ]; then
+    # No minor part — start at 0.1
+    MAJOR="0"
+    MINOR="1"
+else
+    MINOR=$((MINOR + 1))
+fi
+
+NEW_VERSION="${MAJOR}.${MINOR}"
+
+# Write version.h
+cat > "$VERSION_H" <<EOF
+// ROUNDTABLE version — auto-updated by pre-commit hook.
+// This file is committed so the version is permanent for each checkout/tag.
+#pragma once
+
+#define ROUNDTABLE_VERSION "${NEW_VERSION}"
+EOF
+
+# Stage it so the version bump is part of this commit
+git add "$VERSION_H"
+
+# (Optional) print what happened
+echo "pre-commit: version bumped to ${NEW_VERSION} (last tag was ${LAST_TAG})"

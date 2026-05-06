@@ -1,0 +1,67 @@
+{
+  "name": "Doroth (Close-Up)",
+  "cameraZoom": 1.000000,
+  "cameraX": 0.000000,
+  "cameraY": 0.000000,
+  "backgrounds": [
+    {
+      "path": "TABLE_OVERLAY.png",
+      "posX": -0.534786,
+      "posY": 0.816524,
+      "scale": 3.793492,
+      "opacity": 1.000000,
+      "nativeWidth": 0,
+      "nativeHeight": 0,
+      "visible": true,
+      "layerType": "image",
+      "inPoint": 0.000000,
+      "outPoint": 0.000000,
+      "cropLeft": 0.000000,
+      "cropRight": 0.000000,
+      "cropTop": 0.000000,
+      "cropBottom": 0.000000
+    },
+    {
+      "path": "TABLE_LARGE_FINAL.png",
+      "posX": -0.534786,
+      "posY": 0.816524,
+      "scale": 3.793492,
+      "opacity": 1.000000,
+      "nativeWidth": 0,
+      "nativeHeight": 0,
+      "visible": true,
+      "layerType": "image",
+      "inPoint": 0.000000,
+      "outPoint": 0.000000,
+      "cropLeft": 0.000000,
+      "cropRight": 0.000000,
+      "cropTop": 0.000000,
+      "cropBottom": 0.000000
+    }
+  ],
+  "characters": [
+    {
+      "characterName": "Crown",
+      "outfit": "default",
+      "stance": "default",
+      "animation": "idle",
+      "isTalking": true,
+      "posX": 0.380195,
+      "posY": 1.174502,
+      "scale": 2.787565,
+      "rotation": 0.000000,
+      "flipX": false,
+      "opacity": 1.000000,
+      "cropLeft": 25.091801,
+      "cropRight": 0.000000,
+      "cropTop": 0.000000,
+      "cropBottom": 36.951984,
+      "visible": true
+    }
+  ],
+  "layerOrder": [
+    {"type": "bg", "index": 0},
+    {"type": "ch", "index": 0},
+    {"type": "bg", "index": 1}
+  ]
+}

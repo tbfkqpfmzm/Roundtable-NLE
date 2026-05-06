@@ -1,0 +1,38 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0, rgba8) uniform writeonly image2D outputImage;
+layout(binding = 1)        uniform sampler2D inputImage;
+
+// 3D LUT texture (uploaded by EffectProcessor as a 3D sampler)
+layout(binding = 2) uniform sampler3D lutTexture;
+
+layout(push_constant) uniform PushConstants {
+    int   width;
+    int   height;
+    int   paramCount;
+    int   _pad;
+    float params[16];
+    // params[0] = intensity (0–1, blend between original and graded)
+} pc;
+
+void main()
+{
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= pc.width || pixel.y >= pc.height) return;
+
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(pc.width, pc.height);
+    vec4 color = texture(inputImage, uv);
+
+    float intensity = pc.params[0];
+
+    // Sample 3D LUT using the pixel's RGB as coordinates
+    // LUT stored as size^3 texture, trilinear filtering handles interpolation
+    vec3 graded = texture(lutTexture, color.rgb).rgb;
+
+    // Blend between original and graded based on intensity
+    color.rgb = mix(color.rgb, graded, intensity);
+
+    imageStore(outputImage, pixel, color);
+}

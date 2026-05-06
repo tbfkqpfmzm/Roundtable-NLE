@@ -1,0 +1,99 @@
+#version 450
+/*
+ * ultra_key_cleanup.comp — Ultra Key Pass 2: Matte cleanup.
+ *
+ * Reads the alpha channel from Pass 1 and applies:
+ *   1. Choke — min-filter erosion to shrink the matte edge
+ *   2. Soften — weighted blur to smooth matte edges
+ *   3. Contrast + Mid Point — sigmoid curve to sharpen transparency
+ *
+ * RGB passes through unchanged; only alpha is modified.
+ *
+ * Performance: kernel radii are clamped to small values (max 3 for choke,
+ * max 3 for soften) to keep per-pixel work bounded.
+ */
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0, rgba8) uniform writeonly image2D outputImage;
+layout(binding = 1)        uniform sampler2D        inputImage;
+
+layout(push_constant) uniform PushConstants {
+    int   width;
+    int   height;
+    int   paramCount;
+    int   _pad;
+    float params[28];
+} pc;
+
+// Param indices (same as ChromaKey::Param enum, full 21 params passed)
+#define CHOKE     pc.params[10]
+#define SOFTEN    pc.params[11]
+#define CONTRAST  pc.params[12]
+#define MID_POINT pc.params[13]
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= pc.width || pixel.y >= pc.height) return;
+
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(pc.width, pc.height);
+    vec2 texelSize = 1.0 / vec2(pc.width, pc.height);
+
+    // Read source
+    vec4 color = texture(inputImage, uv);
+
+    // ── Step 1: Choke (morphological erosion) ───────────────────────────
+    // Radius 0–3 pixels based on Choke (0–100)
+    int chokeRadius = int(CHOKE / 100.0 * 3.0 + 0.5);
+    float alpha = color.a;
+
+    if (chokeRadius > 0) {
+        float minAlpha = alpha;
+        // Cross-shaped kernel — standard morphological erosion (4 taps per radius)
+        for (int d = 1; d <= chokeRadius; d++) {
+            float fd = float(d);
+            minAlpha = min(minAlpha, texture(inputImage, uv + vec2( fd, 0.0) * texelSize).a);
+            minAlpha = min(minAlpha, texture(inputImage, uv + vec2(-fd, 0.0) * texelSize).a);
+            minAlpha = min(minAlpha, texture(inputImage, uv + vec2(0.0,  fd) * texelSize).a);
+            minAlpha = min(minAlpha, texture(inputImage, uv + vec2(0.0, -fd) * texelSize).a);
+        }
+        alpha = minAlpha;
+    }
+
+    // ── Step 2: Soften (weighted blur on alpha) ─────────────────────────
+    // Radius 0–3 pixels based on Soften (0–100)
+    int softenRadius = int(SOFTEN / 100.0 * 3.0 + 0.5);
+
+    if (softenRadius > 0) {
+        float sum = alpha;   // center pixel weight = 1.0
+        float wt  = 1.0;
+        for (int d = 1; d <= softenRadius; d++) {
+            float fd = float(d);
+            float w = 1.0 / (1.0 + fd);  // simple distance weight
+            // 4-tap cross
+            sum += texture(inputImage, uv + vec2( fd, 0.0) * texelSize).a * w;
+            sum += texture(inputImage, uv + vec2(-fd, 0.0) * texelSize).a * w;
+            sum += texture(inputImage, uv + vec2(0.0,  fd) * texelSize).a * w;
+            sum += texture(inputImage, uv + vec2(0.0, -fd) * texelSize).a * w;
+            wt += 4.0 * w;
+        }
+        float blurred = sum / wt;
+        // Mix choked alpha with blurred for controlled softening
+        alpha = mix(alpha, blurred, SOFTEN / 100.0);
+    }
+
+    // ── Step 3: Contrast + Mid Point ────────────────────────────────────
+    // Apply a sigmoid-like contrast curve centered on midpoint
+    float contrastStr = CONTRAST / 100.0;
+    float midPt       = MID_POINT / 100.0;
+
+    if (contrastStr > 0.001) {
+        // Sigmoid centered on midPt
+        float gain = 1.0 + contrastStr * 6.0;
+        float shifted = alpha - midPt;
+        alpha = 1.0 / (1.0 + exp(-gain * shifted * 10.0));
+    }
+
+    alpha = clamp(alpha, 0.0, 1.0);
+
+    imageStore(outputImage, pixel, vec4(color.rgb, alpha));
+}

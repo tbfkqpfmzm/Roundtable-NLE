@@ -1,0 +1,297 @@
+/*
+ * SourceMonitor — Source clip preview panel.
+ *
+ * Step 15: Source & Program Monitors
+ *
+ * The Source Monitor loads a single media clip for preview:
+ *   - Viewport displays the current frame
+ *   - MiniTimeline scrub bar below shows clip duration + playhead
+ *   - I/O point buttons to mark in/out on the source clip
+ *   - Drag from source to timeline (insert/overwrite edit)
+ *   - Internal PlaybackController manages independent transport (play/pause/scrub)
+ *
+ * Layout:
+ *   ┌─────────────────────────────────┐
+ *   │  Clip name label               │
+ *   ├─────────────────────────────────┤
+ *   │                                 │
+ *   │         Viewport                │
+ *   │       (frame display)           │
+ *   │                                 │
+ *   ├─────────────────────────────────┤
+ *   │  [MiniTimeline scrub bar]       │
+ *   ├─────────────────────────────────┤
+ *   │  ◀I  ▶O  ⏮ ◀ ▶⏸ ▶ ⏭  TC      │
+ *   └─────────────────────────────────┘
+ */
+
+#pragma once
+
+#include <QComboBox>
+#include <QLabel>
+#include <QLineEdit>
+#include <QPushButton>
+#include <QTimer>
+#include <QWidget>
+
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <string>
+#include <vector>
+
+class QStackedLayout;
+
+namespace rt {
+
+class AudioEngine;
+class AVSyncClock;
+class TransportButton;
+class Viewport;
+class MiniTimeline;
+class PlaybackController;
+class MediaPool;
+class MediaSourceService;
+class WaveformDisplayWidget;
+class SpineClip;
+class CompositeService;
+struct CachedFrame;
+
+/// Source monitor panel — loads and previews a single media clip.
+class SourceMonitor : public QWidget
+{
+    Q_OBJECT
+
+public:
+    explicit SourceMonitor(QWidget* parent = nullptr);
+    ~SourceMonitor() override;
+
+    // ── Media loading ───────────────────────────────────────────────────
+
+    /// Set the shared AudioEngine for source clip playback.
+    void setAudioEngine(AudioEngine* engine);
+
+    /// Callback type for rendering a nested sequence frame.
+    using SequenceFrameProvider = std::function<
+        std::shared_ptr<CachedFrame>(int64_t tick, uint32_t w, uint32_t h, bool scrub)>;
+
+    /// Load a sequence for preview (renders via compositeFrame callback).
+    void loadSequence(size_t sequenceIndex, const QString& name,
+                      int64_t durationTicks, double fps,
+                      SequenceFrameProvider frameProvider);
+
+    /// Load a SpineClip for live preview (renders with SpineRenderer).
+    /// @param spineClip  The SpineClip to preview (non-owning).
+    /// @param compositeService  For renderSpineClip() access.
+    void loadSpineClip(SpineClip* spineClip, CompositeService* compositeService);
+
+    /// Is the currently loaded source a sequence (not a media clip)?
+    [[nodiscard]] bool isSequenceLoaded() const noexcept { return m_isSequence; }
+
+    /// Get the loaded sequence index (valid only when isSequenceLoaded()).
+    [[nodiscard]] size_t sequenceIndex() const noexcept { return m_sequenceIndex; }
+
+    /// Load a clip by media handle + pool reference.
+    /// Sets up the viewport, scrub bar, and internal transport for the clip.
+    void loadClip(uint64_t mediaHandle, MediaPool* pool);
+
+    /// Clear the current clip from the monitor.
+    void clearClip();
+
+    /// Is a clip currently loaded?
+    [[nodiscard]] bool hasClip() const noexcept { return m_hasClip; }
+
+    /// Get the currently loaded media handle.
+    [[nodiscard]] uint64_t mediaHandle() const noexcept { return m_mediaHandle; }
+
+    // ── In / Out points ─────────────────────────────────────────────────
+
+    /// Mark the in-point at the current playhead position.
+    void markIn();
+
+    /// Mark the out-point at the current playhead position.
+    void markOut();
+
+    /// Clear both in and out points.
+    void clearInOut();
+
+    /// Get in/out points in ticks.
+    [[nodiscard]] int64_t inPoint()  const noexcept;
+    [[nodiscard]] int64_t outPoint() const noexcept;
+    [[nodiscard]] bool hasInPoint()  const noexcept;
+    [[nodiscard]] bool hasOutPoint() const noexcept;
+
+    /// Duration of the selected region for drag-to-timeline.
+    [[nodiscard]] int64_t selectedDuration() const noexcept;
+
+    // ── Transport controls ──────────────────────────────────────────────
+
+    /// Get the internal playback controller (for external wiring).
+    [[nodiscard]] PlaybackController* controller() const noexcept { return m_controller.get(); }
+
+    /// Current playhead position in ticks.
+    [[nodiscard]] int64_t currentTick() const noexcept;
+
+    /// Scrub to a specific tick position.
+    void scrubTo(int64_t tick);
+
+    /// Scrub to a specific frame number.
+    void scrubToFrame(int64_t frameNumber);
+
+    // ── Frame access ────────────────────────────────────────────────────
+
+    /// Get the total number of frames in the loaded clip.
+    [[nodiscard]] int64_t frameCount() const noexcept { return m_frameCount; }
+
+    /// Get the framerate of the loaded clip.
+    [[nodiscard]] double frameRate() const noexcept { return m_fps; }
+
+    /// Get the clip duration in ticks.
+    [[nodiscard]] int64_t clipDuration() const noexcept { return m_clipDuration; }
+
+    // ── Source info for timeline insertion ───────────────────────────────
+
+    /// Data describing a source region, used when dragging to timeline.
+    struct SourceRegion
+    {
+        uint64_t mediaHandle{0};
+        int64_t  sourceIn{0};    ///< Source start tick
+        int64_t  sourceOut{0};   ///< Source end tick
+        int64_t  duration{0};    ///< Duration in ticks
+        double   fps{24.0};
+    };
+
+    /// Get the current source region (in/out or full clip).
+    [[nodiscard]] SourceRegion sourceRegion() const;
+
+    // ── Display label ───────────────────────────────────────────────────
+
+    void setClipName(const QString& name);
+
+    QSize sizeHint() const override;
+
+signals:
+    /// Emitted when the user wants to insert the source region into the timeline.
+    void insertRequested(SourceRegion region);
+
+    /// Emitted when the user wants to overwrite the source region into the timeline.
+    void overwriteRequested(SourceRegion region);
+
+    /// Emitted when the playhead changes in the source monitor.
+    void playheadChanged(int64_t tick);
+
+    /// Emitted when in/out points change.
+    void inOutChanged();
+
+    /// Emitted when a clip is dropped but no pool is set (MainWindow should handle).
+    void dropReceived(uint64_t mediaHandle);
+
+    /// Emitted when a sequence is dropped and should be loaded for preview.
+    void sequenceDropReceived(size_t sequenceIndex);
+
+    /// Emitted when source audio playback starts (for mutual exclusion with timeline).
+    void playbackStarted();
+
+public:
+    /// Set the MediaPool reference for drag-drop loading.
+    void setMediaPool(MediaPool* pool) noexcept { m_pool = pool; }
+
+    /// Set the shared MediaSourceService for frame access.
+    void setMediaSourceService(MediaSourceService* service) noexcept { m_mediaSources = service; }
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override;
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dragMoveEvent(QDragMoveEvent* event) override;
+    void dropEvent(QDropEvent* event) override;
+
+private slots:
+    void onScrub(int64_t tick);
+    void onPollTimer();
+
+private:
+    void setupUI();
+    void updateFrameDisplay();
+    void updateTimecodeDisplay();
+    void loadWaveformAsync();
+    bool ensureSourceAudioLoaded();
+    void requestSourceAudioLoadAsync();
+    void loadSourceAudio();
+    void startSourceAudio();
+    void stopSourceAudio();
+    bool ensureScrubAudioLoaded(int64_t frame, int64_t durationFrames);
+    void scrubAudioAt(int64_t tick);
+
+    // Widgets
+    QLabel*           m_clipLabel{nullptr};
+    Viewport*         m_viewport{nullptr};
+    WaveformDisplayWidget* m_waveformWidget{nullptr};
+    QStackedLayout*   m_viewStack{nullptr};
+    MiniTimeline*     m_miniTimeline{nullptr};
+    QLabel*           m_timecodeLabel{nullptr};
+    QLineEdit*        m_timecodeEdit{nullptr};
+    QLabel*           m_durationLabel{nullptr};
+    QLabel*           m_zoomLabel{nullptr};
+    QLabel*           m_shuttleSpeedLabel{nullptr};
+    TransportButton*  m_btnGoStart{nullptr};
+    TransportButton*  m_btnStepBack{nullptr};
+    TransportButton*  m_btnPlayPause{nullptr};
+    TransportButton*  m_btnStop{nullptr};
+    TransportButton*  m_btnStepForward{nullptr};
+    TransportButton*  m_btnGoEnd{nullptr};
+    TransportButton*  m_btnScreenshot{nullptr};
+    QPushButton*      m_btnLoop{nullptr};
+    QPushButton*      m_btnExportFrame{nullptr};
+    QComboBox*        m_playbackResCombo{nullptr};
+    QComboBox*        m_fitModeCombo{nullptr};
+    QPushButton*      m_btnSafeArea{nullptr};
+
+    QTimer*           m_pollTimer{nullptr};
+
+    // Scrub coalescing — store the latest pending scrub tick and only
+    // decode it on the next poll tick.  Without this, every mouse-move
+    // event during a drag-scrub forces a precise seek + inline decode of
+    // a fresh frame; on long-GOP H.264 sources that's 100-300ms each and
+    // the UI feels molasses.  Mirrors ProgramMonitor's pattern.
+    bool              m_scrubPending{false};
+    int64_t           m_pendingScrubTick{0};
+
+    // Internal transport & media
+    std::unique_ptr<PlaybackController> m_controller;
+    AudioEngine*      m_audioEngine{nullptr};
+    MediaPool*        m_pool{nullptr};
+    MediaSourceService* m_mediaSources{nullptr};
+    uint64_t          m_mediaHandle{0};
+    bool              m_hasClip{false};
+    bool              m_audioOnly{false};
+    int64_t           m_frameCount{0};
+    int64_t           m_clipDuration{0};
+    double            m_fps{24.0};
+
+    // Decoded audio buffer for playback
+    std::shared_ptr<std::vector<float>> m_audioSamples;
+    uint32_t          m_audioChannels{0};
+    bool              m_audioLoadFailed{false};
+    bool              m_audioLoadInFlight{false};
+    uint64_t          m_audioLoadGeneration{0};
+    uint64_t          m_waveformLoadGeneration{0};
+
+    std::shared_ptr<std::vector<float>> m_scrubAudioSamples;
+    uint32_t          m_scrubAudioChannels{0};
+    int64_t           m_scrubAudioStartFrame{0};
+    int               m_scrubSettleCounter{0}; ///< Post-scrub poll countdown
+
+    // Audio engine state management
+    AVSyncClock*      m_savedSyncClock{nullptr};
+    bool              m_sourceAudioActive{false};
+
+    // Drag-out support (drag from viewport to timeline)
+    QPoint            m_dragStartPos;
+
+    // Sequence preview state
+    bool              m_isSequence{false};
+    size_t            m_sequenceIndex{0};
+    SequenceFrameProvider m_seqFrameProvider;
+};
+
+} // namespace rt

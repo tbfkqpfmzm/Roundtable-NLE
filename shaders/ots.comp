@@ -1,0 +1,91 @@
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(binding = 0, rgba8) uniform writeonly image2D outputImage;
+layout(binding = 1)        uniform sampler2D inputImage;
+layout(push_constant) uniform PushConstants {
+    int   width;
+    int   height;
+    int   paramCount;
+    int   _pad;
+    float params[16];
+} pc;
+float sdBox(vec2 p, vec2 b) {
+    vec2 d = abs(p) - b;
+    return max(d.x, d.y);
+}
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= pc.width || pixel.y >= pc.height) return;
+    float side          = pc.params[ 0];
+    float posX          = pc.params[ 1];
+    float posY          = pc.params[ 2];
+    float scale         = clamp(pc.params[ 3], 0.001, 1.0);
+    float strokePx1080  = max(pc.params[ 4], 0.0);
+    vec3  strokeColor   = vec3(pc.params[5], pc.params[6], pc.params[7]);
+    float shadowDX1080  = pc.params[ 8];
+    float shadowDY1080  = pc.params[ 9];
+    float shadowBlur1080= max(pc.params[10], 0.0);
+    float shadowOpacity = clamp(pc.params[11], 0.0, 1.0);
+    float radiusPx1080  = max(pc.params[12], 0.0);
+    float aspectMode    = pc.params[13];
+    float focusX        = clamp(pc.params[14], 0.0, 1.0);
+    float focusY        = clamp(pc.params[15], 0.0, 1.0);
+    float refScale  = float(pc.height) / 1080.0;
+    float strokePx  = strokePx1080  * refScale;
+    float shadowDX  = shadowDX1080  * refScale;
+    float shadowDY  = shadowDY1080  * refScale;
+    float shadowBlur= shadowBlur1080* refScale;
+    float radiusPx  = radiusPx1080  * refScale;
+    float boxW = scale * float(pc.width);
+    float srcAspect = float(textureSize(inputImage, 0).x) / max(1.0, float(textureSize(inputImage, 0).y));
+    float boxAspect = (aspectMode < 0.5) ? (16.0 / 9.0) : srcAspect;
+    float boxH = boxW / max(boxAspect, 0.001);
+    float insetX = posX * float(pc.width);
+    float insetY = posY * float(pc.height);
+    float boxLeft, boxTop;
+    if (side < 0.5) { boxLeft = insetX; }
+    else { boxLeft = float(pc.width) - insetX - boxW; }
+    boxTop = insetY;
+    vec2 boxCenter = vec2(boxLeft + boxW * 0.5, boxTop + boxH * 0.5);
+    vec2 boxHalf   = vec2(boxW * 0.5, boxH * 0.5);
+    vec2 strokeHalf= boxHalf + vec2(strokePx);
+    vec2 p = vec2(pixel) + 0.5;
+    vec4 shadowLayer = vec4(0.0);
+    if (shadowOpacity > 0.0) {
+        vec2 sp = p - boxCenter - vec2(shadowDX, shadowDY);
+        float d = sdBox(sp, strokeHalf);
+        float a = 1.0 - smoothstep(0.0, max(shadowBlur, 0.5), d);
+        shadowLayer = vec4(0.0, 0.0, 0.0, a * shadowOpacity);
+    }
+    vec2 cp = p - boxCenter;
+    float dStroke = sdBox(cp, strokeHalf);
+    float dImage  = sdBox(cp, boxHalf);
+    float aStroke = 1.0 - smoothstep(-0.5, 0.5, dStroke);
+    float aImage  = 1.0 - smoothstep(-0.5, 0.5, dImage);
+    vec4 imageLayer = vec4(0.0);
+    if (aImage > 0.0) {
+        vec2 boxUV = (p - vec2(boxLeft, boxTop)) / vec2(boxW, boxH);
+        vec2 srcUV;
+        if (aspectMode < 0.5) {
+            float boxA = boxAspect;
+            if (srcAspect > boxA) {
+                float visU = boxA / srcAspect;
+                float u0   = (1.0 - visU) * focusX;
+                srcUV = vec2(u0 + boxUV.x * visU, boxUV.y);
+            } else if (srcAspect < boxA) {
+                float visV = srcAspect / boxA;
+                float v0   = (1.0 - visV) * focusY;
+                srcUV = vec2(boxUV.x, v0 + boxUV.y * visV);
+            } else { srcUV = boxUV; }
+        } else { srcUV = boxUV; }
+        vec4 src = texture(inputImage, srcUV);
+        imageLayer = vec4(src.rgb, src.a * aImage);
+    }
+    float aStrokeBand = clamp(aStroke - aImage, 0.0, 1.0);
+    vec4 strokeLayer = vec4(strokeColor, aStrokeBand);
+    vec4 outc = vec4(0.0);
+    { float a = shadowLayer.a; outc.rgb = outc.rgb * (1.0 - a) + shadowLayer.rgb * a; outc.a = outc.a * (1.0 - a) + a; }
+    { float a = strokeLayer.a; outc.rgb = outc.rgb * (1.0 - a) + strokeLayer.rgb * a; outc.a = outc.a * (1.0 - a) + a; }
+    { float a = imageLayer.a; outc.rgb = outc.rgb * (1.0 - a) + imageLayer.rgb * a; outc.a = outc.a * (1.0 - a) + a; }
+    imageStore(outputImage, pixel, outc);
+}

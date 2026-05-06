@@ -1,0 +1,90 @@
+{
+  "name": "Arcana: Fortune Mate (Wide)",
+  "cameraZoom": 1.000000,
+  "cameraX": 0.000000,
+  "cameraY": 0.000000,
+  "backgrounds": [
+    {
+      "path": "TABLE_OVERLAY.png",
+      "posX": 0.499734,
+      "posY": 0.494975,
+      "scale": 1.020703,
+      "opacity": 1.000000,
+      "nativeWidth": 0,
+      "nativeHeight": 0,
+      "visible": true,
+      "layerType": "image",
+      "inPoint": 0.000000,
+      "outPoint": 0.000000,
+      "cropLeft": 0.000000,
+      "cropRight": 0.000000,
+      "cropTop": 0.000000,
+      "cropBottom": 0.000000,
+      "blur": 0.000000
+    },
+    {
+      "path": "TABLE_LARGE_FINAL.png",
+      "posX": 0.499734,
+      "posY": 0.494975,
+      "scale": 1.020703,
+      "opacity": 1.000000,
+      "nativeWidth": 0,
+      "nativeHeight": 0,
+      "visible": true,
+      "layerType": "image",
+      "inPoint": 0.000000,
+      "outPoint": 0.000000,
+      "cropLeft": 0.000000,
+      "cropRight": 0.000000,
+      "cropTop": 0.000000,
+      "cropBottom": 0.000000,
+      "blur": 0.000000
+    }
+  ],
+  "characters": [
+    {
+      "characterName": "Arcana_ Fortune Mate",
+      "outfit": "default",
+      "stance": "default",
+      "animation": "idle",
+      "isTalking": true,
+      "posX": 0.323473,
+      "posY": 0.573729,
+      "scale": 0.754462,
+      "rotation": 0.000000,
+      "flipX": false,
+      "opacity": 1.000000,
+      "cropLeft": 0.000000,
+      "cropRight": 0.000000,
+      "cropTop": 0.000000,
+      "cropBottom": 0.000000,
+      "blur": 0.000000,
+      "visible": true
+    },
+    {
+      "characterName": "Yan",
+      "outfit": "default",
+      "stance": "default",
+      "animation": "idle",
+      "isTalking": true,
+      "posX": 0.768130,
+      "posY": 0.602542,
+      "scale": 0.691541,
+      "rotation": 0.000000,
+      "flipX": false,
+      "opacity": 1.000000,
+      "cropLeft": 0.000000,
+      "cropRight": 0.000000,
+      "cropTop": 0.000000,
+      "cropBottom": 0.000000,
+      "blur": 0.000000,
+      "visible": true
+    }
+  ],
+  "layerOrder": [
+    {"type": "bg", "index": 0},
+    {"type": "ch", "index": 1},
+    {"type": "ch", "index": 0},
+    {"type": "bg", "index": 1}
+  ]
+}

@@ -1,0 +1,94 @@
+#version 450
+// Swap transition — A and B swap positions with scaling motion.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0, rgba8) uniform writeonly image2D outputImage;
+layout(binding = 1) uniform sampler2D sourceA;
+layout(binding = 2) uniform sampler2D sourceB;
+
+layout(push_constant) uniform PushConstants {
+    int   width;
+    int   height;
+    float progress;
+    int   direction;
+    float softness;
+    float param2;
+    float param3;    // sourceA packed-alpha flag
+    float param4;    // sourceB packed-alpha flag
+} pc;
+
+
+// Per-source transform and packed-alpha data (SSBO from TransitionRenderer)
+layout(std430, binding = 3) readonly buffer SourceParams {
+    mat4 transformA;
+    mat4 transformB;
+    vec4 cropA;       // (L, R, T, B)
+    vec4 cropB;
+    int  isPackedA;
+    int  isPackedB;
+} sp;
+
+// Sample a source texture with viewport transform, crop, and packed-alpha support.
+// 'uv' is the transition-effect UV (in viewport space [0,1]).
+vec4 sampleSrc(sampler2D tex, vec2 uv, mat4 xform, vec4 crop, int packed) {
+    // Map from viewport UV to source texture UV
+    vec4 t = xform * vec4(uv, 0.0, 1.0);
+    if (t.w == 0.0) return vec4(0.0);
+    vec2 srcUV = t.xy / t.w;
+
+    // Out-of-bounds = transparent
+    if (srcUV.x < 0.0 || srcUV.x > 1.0 || srcUV.y < 0.0 || srcUV.y > 1.0)
+        return vec4(0.0);
+
+    // Crop check
+    if (srcUV.x < crop.x || srcUV.x > (1.0 - crop.y) ||
+        srcUV.y < crop.z || srcUV.y > (1.0 - crop.w))
+        return vec4(0.0);
+
+    // Packed-alpha: top half = RGB, bottom half = alpha greyscale
+    if (packed > 0) {
+        vec2 rgbUV   = vec2(srcUV.x, srcUV.y * 0.5);
+        vec2 alphaUV = vec2(srcUV.x, srcUV.y * 0.5 + 0.5);
+        vec3 rgb     = texture(tex, rgbUV).rgb;
+        float a      = texture(tex, alphaUV).r;
+        return vec4(rgb, a);
+    }
+    return texture(tex, srcUV);
+}
+void main()
+{
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= pc.width || pixel.y >= pc.height) return;
+
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(pc.width, pc.height);
+    float p = pc.progress;
+
+    // Smooth ease for more natural motion
+    float t = smoothstep(0.0, 1.0, p);
+
+    // A slides to the right and shrinks; B slides from left and grows
+    float scaleA = mix(1.0, 0.6, t);
+    float scaleB = mix(0.6, 1.0, t);
+    float offsetA = t; // A moves right
+    float offsetB = t - 1.0; // B moves from left
+
+    // Transform UVs for A
+    vec2 uvA = (uv - vec2(0.5 + offsetA * 0.5, 0.5)) / scaleA + 0.5;
+    vec2 uvB = (uv - vec2(0.5 + offsetB * 0.5, 0.5)) / scaleB + 0.5;
+
+    bool inBoundsA = all(greaterThanEqual(uvA, vec2(0.0))) && all(lessThanEqual(uvA, vec2(1.0)));
+    bool inBoundsB = all(greaterThanEqual(uvB, vec2(0.0))) && all(lessThanEqual(uvB, vec2(1.0)));
+
+    vec4 color = vec4(0.0, 0.0, 0.0, 1.0);
+    // B is drawn on top for the second half, A on top for the first half
+    if (p < 0.5) {
+        if (inBoundsB) color = sampleSrc(sourceB, uvB, sp.transformB, sp.cropB, (pc.param4 > 0.5 ? 1 : 0));
+        if (inBoundsA) color = sampleSrc(sourceA, uvA, sp.transformA, sp.cropA, (pc.param3 > 0.5 ? 1 : 0));
+    } else {
+        if (inBoundsA) color = sampleSrc(sourceA, uvA, sp.transformA, sp.cropA, (pc.param3 > 0.5 ? 1 : 0));
+        if (inBoundsB) color = sampleSrc(sourceB, uvB, sp.transformB, sp.cropB, (pc.param4 > 0.5 ? 1 : 0));
+    }
+
+    imageStore(outputImage, pixel, color);
+}

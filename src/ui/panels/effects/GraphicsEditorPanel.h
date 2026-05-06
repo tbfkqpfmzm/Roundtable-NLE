@@ -1,0 +1,170 @@
+/*
+ * GraphicsEditorPanel Ã¢â‚¬â€ Ã¢â‚¬â€œstyle Essential Graphics panel.
+ *
+ * Matches the 2024/2026 layout:
+ * 1. Clip title bar
+ * 2. Layer list (with eye/lock icons, reorderable)
+ * 3. Text section (font, style buttons, size, alignment, spacing)
+ * 4. Appearance section (Fill, Stroke, Shadow)
+ * 5. Align and Transform section (position, anchor, scale, rotation, opacity)
+ *
+ * Supports editing the currently-selected layer within a GraphicClip.
+ */
+
+#pragma once
+
+#include <QWidget>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QCheckBox>
+#include <QComboBox>
+#include <QPushButton>
+#include <QToolButton>
+#include <QPlainTextEdit>
+#include <QScrollArea>
+#include <QSlider>
+#include <QListWidget>
+
+#include <memory>
+#include <vector>
+
+#include "timeline/GraphicLayer.h"
+
+namespace rt {
+
+class Clip;
+class Track;
+class GraphicClip;
+class TextLayer;
+class CommandStack;
+class Timeline;
+class ScrubbySpinBox;
+
+class GraphicsEditorPanel : public QWidget
+{
+ Q_OBJECT
+
+public:
+ explicit GraphicsEditorPanel(QWidget* parent = nullptr);
+ ~GraphicsEditorPanel() override = default;
+
+ void setClip(Clip* clip, Track* track = nullptr);
+ [[nodiscard]] Clip* clip() const noexcept { return m_clip; }
+ [[nodiscard]] GraphicClip* graphicClip() const noexcept { return m_graphicClip; }
+ [[nodiscard]] GraphicLayer* selectedLayer() const noexcept { return m_selectedLayer; }
+ [[nodiscard]] int selectedLayerIndex() const noexcept { return m_selectedLayerIdx; }
+
+ void refresh();
+ void clearClip();
+
+ /// Programmatically select a layer by stack index (0 = bottom).
+ void selectLayerByStackIndex(int stackIdx);
+
+ void copySelectedLayer();
+ void pasteLayer();
+ void deleteSelectedLayer();
+
+ void setCommandStack(CommandStack* stack) noexcept { m_commandStack = stack; }
+ void setTimeline(Timeline* tl) noexcept { m_timeline = tl; }
+
+signals:
+ void propertyChanged();
+ /// Emitted when the user selects a different layer in the layer list.
+ void layerSelected(GraphicLayer* layer, int layerIndex);
+
+private:
+ void setupUI();
+ void rebuildLayerList();
+ void selectLayer(int index);
+ void buildEditControls();
+ void clearEditControls();
+ void populateFromLayer();
+ void applyTextProperties();
+ void applyAppearance();
+ void applyLayerTransform();
+
+ // Helpers
+ ScrubbySpinBox* makeScrubby(double min, double max, double step,
+ int decimals, const QString& suffix = {});
+ QToolButton* makeStyleButton(const QString& text, const QString& tooltip);
+
+ // Ã¢â€â‚¬Ã¢â€â‚¬ State Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+ Clip* m_clip{nullptr};
+ Track* m_track{nullptr};
+ GraphicClip* m_graphicClip{nullptr};
+ GraphicLayer* m_selectedLayer{nullptr};
+ int m_selectedLayerIdx{-1};
+ CommandStack* m_commandStack{nullptr};
+ Timeline* m_timeline{nullptr};
+ bool m_updating{false};
+ std::unique_ptr<GraphicLayer> m_copiedLayer; ///< Clipboard for layer copy/paste
+
+ // Ã¢â€â‚¬Ã¢â€â‚¬ Top-level layout Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+ QLabel* m_clipNameLabel{nullptr};
+ QLabel* m_typeBadge{nullptr};
+ QLabel* m_emptyLabel{nullptr};
+ QLabel* m_statusLabel{nullptr};
+ QListWidget* m_layerList{nullptr};
+ QScrollArea* m_scrollArea{nullptr};
+ QWidget* m_editContainer{nullptr};
+ QVBoxLayout* m_editLayout{nullptr};
+
+ // Ã¢â€â‚¬Ã¢â€â‚¬ Text section Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+ QWidget* m_textSection{nullptr};
+ QComboBox* m_fontCombo{nullptr};
+ QComboBox* m_weightCombo{nullptr};
+ QToolButton* m_boldBtn{nullptr};
+ QToolButton* m_italicBtn{nullptr};
+ QToolButton* m_allCapsBtn{nullptr};
+ QToolButton* m_smallCapsBtn{nullptr};
+ QSlider* m_fontSizeSlider{nullptr};
+ ScrubbySpinBox* m_fontSizeSpin{nullptr};
+
+ // Alignment buttons
+ QToolButton* m_alignLeftBtn{nullptr};
+ QToolButton* m_alignCenterBtn{nullptr};
+ QToolButton* m_alignRightBtn{nullptr};
+ QToolButton* m_alignJustifyBtn{nullptr};
+ QToolButton* m_valignTopBtn{nullptr};
+ QToolButton* m_valignMiddleBtn{nullptr};
+ QToolButton* m_valignBottomBtn{nullptr};
+
+ // Spacing
+ ScrubbySpinBox* m_trackingSpin{nullptr};
+ ScrubbySpinBox* m_leadingSpin{nullptr};
+ ScrubbySpinBox* m_baselineShiftSpin{nullptr};
+
+ // Ã¢â€â‚¬Ã¢â€â‚¬ Appearance section Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+ QWidget* m_appearanceSection{nullptr};
+ QCheckBox* m_fillCheck{nullptr};
+ QPushButton* m_fillColorBtn{nullptr};
+ QCheckBox* m_strokeCheck{nullptr};
+ QPushButton* m_strokeColorBtn{nullptr};
+ ScrubbySpinBox* m_strokeWidthSpin{nullptr};
+ QComboBox* m_strokePosCombo{nullptr};
+ QCheckBox* m_shadowCheck{nullptr};
+ QPushButton* m_shadowColorBtn{nullptr};
+
+ // Ã¢â€â‚¬Ã¢â€â‚¬ Align and Transform section Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+ QWidget* m_transformSection{nullptr};
+ ScrubbySpinBox* m_posXSpin{nullptr};
+ ScrubbySpinBox* m_posYSpin{nullptr};
+ ScrubbySpinBox* m_anchorXSpin{nullptr};
+ ScrubbySpinBox* m_anchorYSpin{nullptr};
+ ScrubbySpinBox* m_scaleXSpin{nullptr};
+ ScrubbySpinBox* m_scaleYSpin{nullptr};
+ QCheckBox* m_uniformScaleCheck{nullptr};
+ ScrubbySpinBox* m_rotationSpin{nullptr};
+ ScrubbySpinBox* m_opacitySpin{nullptr};
+
+ // Ã¢â€â‚¬Ã¢â€â‚¬ Collapsible sections Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+ struct SectionInfo {
+ QWidget* header{nullptr};
+ QToolButton* arrow{nullptr};
+ std::vector<QWidget*> children;
+ };
+ std::vector<SectionInfo> m_sectionArrows;
+};
+
+} // namespace rt

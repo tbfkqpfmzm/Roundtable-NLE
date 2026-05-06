@@ -1,0 +1,313 @@
+/*
+ * ROUNDTABLE NLE v2 — Timeline unit tests
+ * Step 3: Core data model validation
+ */
+
+#include <gtest/gtest.h>
+#include "Constants.h"
+#include "timeline/Timeline.h"
+#include "timeline/Track.h"
+#include "timeline/Clip.h"
+#include "timeline/SpineClip.h"
+#include "timeline/VideoClip.h"
+#include "timeline/AudioClip.h"
+#include "timeline/TitleClip.h"
+#include "timeline/AdjustmentClip.h"
+#include "timeline/TimelineObserver.h"
+
+using namespace rt;
+
+// ── Test observer to capture callbacks ──────────────────────────────────────
+
+class TestObserver : public TimelineObserver
+{
+public:
+    int trackAddedCount{0};
+    int trackRemovedCount{0};
+    int trackMovedCount{0};
+    int markerChangedCount{0};
+    int playheadChangedCount{0};
+    int inOutChangedCount{0};
+    int structureChangedCount{0};
+
+    void onTrackAdded(size_t) override      { ++trackAddedCount; }
+    void onTrackRemoved(size_t) override    { ++trackRemovedCount; }
+    void onTrackMoved(size_t, size_t) override { ++trackMovedCount; }
+    void onMarkerChanged() override         { ++markerChangedCount; }
+    void onPlayheadChanged(int64_t) override { ++playheadChangedCount; }
+    void onInOutChanged() override          { ++inOutChangedCount; }
+    void onTimelineStructureChanged() override { ++structureChangedCount; }
+};
+
+// ── Timeline fixture ────────────────────────────────────────────────────────
+
+class TimelineTest : public ::testing::Test
+{
+protected:
+    void SetUp() override
+    {
+        timeline = std::make_unique<Timeline>();
+    }
+
+    std::unique_ptr<Timeline> timeline;
+};
+
+// ── Track management ────────────────────────────────────────────────────────
+
+TEST_F(TimelineTest, StartsEmpty)
+{
+    EXPECT_EQ(timeline->trackCount(), 0u);
+    EXPECT_EQ(timeline->duration(), 0);
+}
+
+TEST_F(TimelineTest, AddVideoTrack)
+{
+    auto* track = timeline->addVideoTrack("V1");
+    ASSERT_NE(track, nullptr);
+    EXPECT_EQ(timeline->trackCount(), 1u);
+    EXPECT_EQ(track->name(), "V1");
+    EXPECT_EQ(track->type(), TrackType::Video);
+}
+
+TEST_F(TimelineTest, AddAudioTrack)
+{
+    auto* track = timeline->addAudioTrack("A1");
+    ASSERT_NE(track, nullptr);
+    EXPECT_EQ(track->type(), TrackType::Audio);
+}
+
+TEST_F(TimelineTest, AddMultipleTracks)
+{
+    timeline->addVideoTrack("V1");
+    timeline->addVideoTrack("V2");
+    timeline->addAudioTrack("A1");
+    EXPECT_EQ(timeline->trackCount(), 3u);
+}
+
+TEST_F(TimelineTest, RemoveTrack)
+{
+    timeline->addVideoTrack("V1");
+    EXPECT_EQ(timeline->trackCount(), 1u);
+    timeline->removeTrack(0);
+    EXPECT_EQ(timeline->trackCount(), 0u);
+}
+
+TEST_F(TimelineTest, MoveTrack)
+{
+    timeline->addVideoTrack("V1");
+    timeline->addVideoTrack("V2");
+    timeline->addVideoTrack("V3");
+    timeline->moveTrack(0, 2);
+    EXPECT_EQ(timeline->track(0)->name(), "V2");
+    EXPECT_EQ(timeline->track(2)->name(), "V1");
+}
+
+TEST_F(TimelineTest, AccessTrackByIndex)
+{
+    timeline->addVideoTrack("V1");
+    timeline->addAudioTrack("A1");
+    EXPECT_EQ(timeline->track(0)->name(), "V1");
+    EXPECT_EQ(timeline->track(1)->name(), "A1");
+}
+
+TEST_F(TimelineTest, AccessOutOfBoundsReturnsNull)
+{
+    EXPECT_EQ(timeline->track(0), nullptr);
+    EXPECT_EQ(timeline->track(99), nullptr);
+}
+
+// ── Playhead ────────────────────────────────────────────────────────────────
+
+TEST_F(TimelineTest, PlayheadStartsAtZero)
+{
+    EXPECT_EQ(timeline->playheadPosition(), 0);
+}
+
+TEST_F(TimelineTest, SetPlayhead)
+{
+    timeline->setPlayheadPosition(kTicksPerSecond); // 1 second
+    EXPECT_EQ(timeline->playheadPosition(), kTicksPerSecond);
+}
+
+// ── Markers ─────────────────────────────────────────────────────────────────
+
+TEST_F(TimelineTest, AddMarker)
+{
+    timeline->addMarker(kTicksPerSecond, "Chapter 1");
+    EXPECT_EQ(timeline->markers().size(), 1u);
+    EXPECT_EQ(timeline->markers()[0].label, "Chapter 1");
+}
+
+TEST_F(TimelineTest, MarkersAreSortedByTime)
+{
+    timeline->addMarker(96000, "C");
+    timeline->addMarker(24000, "A");
+    timeline->addMarker(48000, "B");
+    ASSERT_EQ(timeline->markers().size(), 3u);
+    EXPECT_EQ(timeline->markers()[0].label, "A");
+    EXPECT_EQ(timeline->markers()[1].label, "B");
+    EXPECT_EQ(timeline->markers()[2].label, "C");
+}
+
+TEST_F(TimelineTest, RemoveMarker)
+{
+    timeline->addMarker(kTicksPerSecond, "Chapter 1");
+    timeline->removeMarker(0);
+    EXPECT_TRUE(timeline->markers().empty());
+}
+
+// ── In/Out Points ───────────────────────────────────────────────────────────
+
+TEST_F(TimelineTest, InOutPointsDefault)
+{
+    EXPECT_EQ(timeline->inPoint(), -1);
+    EXPECT_EQ(timeline->outPoint(), -1);
+}
+
+TEST_F(TimelineTest, SetInOutPoints)
+{
+    timeline->setInPoint(24000);
+    timeline->setOutPoint(96000);
+    EXPECT_EQ(timeline->inPoint(), 24000);
+    EXPECT_EQ(timeline->outPoint(), 96000);
+}
+
+TEST_F(TimelineTest, ClearInOutPoints)
+{
+    timeline->setInPoint(24000);
+    timeline->setOutPoint(96000);
+    timeline->clearInOutPoints();
+    EXPECT_EQ(timeline->inPoint(), -1);
+    EXPECT_EQ(timeline->outPoint(), -1);
+}
+
+// ── Name ────────────────────────────────────────────────────────────────────
+
+TEST_F(TimelineTest, DefaultName)
+{
+    EXPECT_EQ(timeline->name(), "Sequence 1");
+}
+
+TEST_F(TimelineTest, SetName)
+{
+    timeline->setName("My Sequence");
+    EXPECT_EQ(timeline->name(), "My Sequence");
+}
+
+// ── Duration ────────────────────────────────────────────────────────────────
+
+TEST_F(TimelineTest, DurationReflectsClips)
+{
+    auto* track = timeline->addVideoTrack("V1");
+    auto clip = std::make_unique<SpineClip>();
+    clip->setTimelineIn(0);
+    clip->setDuration(48000); // 1 second
+    track->addClip(std::move(clip));
+    EXPECT_EQ(timeline->duration(), 48000);
+}
+
+TEST_F(TimelineTest, DurationIsMaxAcrossTracks)
+{
+    auto* v1 = timeline->addVideoTrack("V1");
+    auto* v2 = timeline->addVideoTrack("V2");
+
+    auto c1 = std::make_unique<SpineClip>();
+    c1->setDuration(48000);
+    v1->addClip(std::move(c1));
+
+    auto c2 = std::make_unique<SpineClip>();
+    c2->setTimelineIn(0);
+    c2->setDuration(96000);
+    v2->addClip(std::move(c2));
+
+    EXPECT_EQ(timeline->duration(), 96000);
+}
+
+// ── Observer callbacks ──────────────────────────────────────────────────────
+
+TEST_F(TimelineTest, ObserverTrackAdded)
+{
+    TestObserver obs;
+    timeline->addObserver(&obs);
+    timeline->addVideoTrack("V1");
+    EXPECT_EQ(obs.trackAddedCount, 1);
+}
+
+TEST_F(TimelineTest, ObserverTrackRemoved)
+{
+    TestObserver obs;
+    timeline->addVideoTrack("V1");
+    timeline->addObserver(&obs);
+    timeline->removeTrack(0);
+    EXPECT_EQ(obs.trackRemovedCount, 1);
+}
+
+TEST_F(TimelineTest, ObserverTrackMoved)
+{
+    TestObserver obs;
+    timeline->addVideoTrack("V1");
+    timeline->addVideoTrack("V2");
+    timeline->addObserver(&obs);
+    timeline->moveTrack(0, 1);
+    EXPECT_EQ(obs.trackMovedCount, 1);
+}
+
+TEST_F(TimelineTest, ObserverMarkerChanged)
+{
+    TestObserver obs;
+    timeline->addObserver(&obs);
+    timeline->addMarker(48000, "M1");
+    EXPECT_EQ(obs.markerChangedCount, 1);
+    timeline->removeMarker(0);
+    EXPECT_EQ(obs.markerChangedCount, 2);
+}
+
+TEST_F(TimelineTest, ObserverPlayheadChanged)
+{
+    TestObserver obs;
+    timeline->addObserver(&obs);
+    timeline->setPlayheadPosition(48000);
+    EXPECT_EQ(obs.playheadChangedCount, 1);
+    // Setting same position doesn't fire again
+    timeline->setPlayheadPosition(48000);
+    EXPECT_EQ(obs.playheadChangedCount, 1);
+}
+
+TEST_F(TimelineTest, ObserverInOutChanged)
+{
+    TestObserver obs;
+    timeline->addObserver(&obs);
+    timeline->setInPoint(24000);
+    EXPECT_EQ(obs.inOutChangedCount, 1);
+    timeline->setOutPoint(96000);
+    EXPECT_EQ(obs.inOutChangedCount, 2);
+    timeline->clearInOutPoints();
+    EXPECT_EQ(obs.inOutChangedCount, 3);
+}
+
+TEST_F(TimelineTest, RemoveObserverStopsCallbacks)
+{
+    TestObserver obs;
+    timeline->addObserver(&obs);
+    timeline->addVideoTrack("V1");
+    EXPECT_EQ(obs.trackAddedCount, 1);
+    timeline->removeObserver(&obs);
+    timeline->addVideoTrack("V2");
+    EXPECT_EQ(obs.trackAddedCount, 1); // No change
+}
+
+// ── Time conversion ─────────────────────────────────────────────────────────
+
+TEST(TimeConversion, SecondsToTicks)
+{
+    EXPECT_EQ(secondsToTicks(1.0), 48000);
+    EXPECT_EQ(secondsToTicks(0.5), 24000);
+    EXPECT_EQ(secondsToTicks(0.0), 0);
+}
+
+TEST(TimeConversion, TicksToSeconds)
+{
+    EXPECT_DOUBLE_EQ(ticksToSeconds(48000), 1.0);
+    EXPECT_DOUBLE_EQ(ticksToSeconds(24000), 0.5);
+    EXPECT_DOUBLE_EQ(ticksToSeconds(0), 0.0);
+}

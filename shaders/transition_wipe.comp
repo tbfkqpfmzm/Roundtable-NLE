@@ -1,0 +1,95 @@
+#version 450
+// Directional wipe transition compute shader.
+// Step 10: GPU transitions.
+//
+// Wipes from source A to source B in a specified direction
+// with optional soft edge.
+//
+// Direction: 0=left, 1=right, 2=up, 3=down
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0, rgba8) uniform writeonly image2D outputImage;
+layout(binding = 1) uniform sampler2D sourceA;
+layout(binding = 2) uniform sampler2D sourceB;
+
+layout(push_constant) uniform PushConstants {
+    int   width;
+    int   height;
+    float progress;
+    int   direction;
+    float softness;
+    float param2;
+    float param3;    // sourceA packed-alpha flag
+    float param4;    // sourceB packed-alpha flag
+} pc;
+
+
+// Per-source transform and packed-alpha data (SSBO from TransitionRenderer)
+layout(std430, binding = 3) readonly buffer SourceParams {
+    mat4 transformA;
+    mat4 transformB;
+    vec4 cropA;       // (L, R, T, B)
+    vec4 cropB;
+    int  isPackedA;
+    int  isPackedB;
+} sp;
+
+// Sample a source texture with viewport transform, crop, and packed-alpha support.
+// 'uv' is the transition-effect UV (in viewport space [0,1]).
+vec4 sampleSrc(sampler2D tex, vec2 uv, mat4 xform, vec4 crop, int packed) {
+    // Map from viewport UV to source texture UV
+    vec4 t = xform * vec4(uv, 0.0, 1.0);
+    if (t.w == 0.0) return vec4(0.0);
+    vec2 srcUV = t.xy / t.w;
+
+    // Out-of-bounds = transparent
+    if (srcUV.x < 0.0 || srcUV.x > 1.0 || srcUV.y < 0.0 || srcUV.y > 1.0)
+        return vec4(0.0);
+
+    // Crop check
+    if (srcUV.x < crop.x || srcUV.x > (1.0 - crop.y) ||
+        srcUV.y < crop.z || srcUV.y > (1.0 - crop.w))
+        return vec4(0.0);
+
+    // Packed-alpha: top half = RGB, bottom half = alpha greyscale
+    if (packed > 0) {
+        vec2 rgbUV   = vec2(srcUV.x, srcUV.y * 0.5);
+        vec2 alphaUV = vec2(srcUV.x, srcUV.y * 0.5 + 0.5);
+        vec3 rgb     = texture(tex, rgbUV).rgb;
+        float a      = texture(tex, alphaUV).r;
+        return vec4(rgb, a);
+    }
+    return texture(tex, srcUV);
+}
+void main()
+{
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= pc.width || pixel.y >= pc.height) return;
+
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(pc.width, pc.height);
+
+    vec4 colorA = sampleSrc(sourceA, uv, sp.transformA, sp.cropA, (pc.param3 > 0.5 ? 1 : 0));
+    vec4 colorB = sampleSrc(sourceB, uv, sp.transformB, sp.cropB, (pc.param4 > 0.5 ? 1 : 0));
+
+    // Calculate wipe position along the axis
+    float pos;
+    switch (pc.direction)
+    {
+        case 0: pos = 1.0 - uv.x; break;  // Wipe left (reveal B from right)
+        case 1: pos = uv.x;       break;  // Wipe right (reveal B from left)
+        case 2: pos = 1.0 - uv.y; break;  // Wipe up (reveal B from bottom)
+        case 3: pos = uv.y;       break;  // Wipe down (reveal B from top)
+        default: pos = uv.x;      break;
+    }
+
+    // Soft edge: smoothstep between A and B
+    float edge = pc.progress;
+    float soft = max(pc.softness, 0.001);
+    float t = smoothstep(edge - soft, edge + soft, pos);
+
+    // t=0 means show B (already past the wipe), t=1 means show A (not yet wiped)
+    vec4 result = mix(colorB, colorA, t);
+
+    imageStore(outputImage, pixel, result);
+}

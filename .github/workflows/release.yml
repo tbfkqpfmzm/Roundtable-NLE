@@ -1,0 +1,87 @@
+# ROUNDTABLE — CI Build on Tag Push
+#
+# Trigger: push a tag like v0.50 or v0.51
+#
+# What it does:
+#   1. Checks out the code
+#   2. Sets up Visual Studio 2022 + CMake
+#   3. Configures and builds the Release target
+#   4. Builds the Inno Setup installer
+#   5. Uploads the installer as a CI artifact
+#
+# NOTE: The actual GitHub Release is created by the publish-gui wizard,
+#       which runs locally and calls `gh release create`. This workflow
+#       only verifies the build + installer succeed on a clean CI machine.
+
+name: CI Build
+
+on:
+  workflow_dispatch:  # only run when manually triggered from GitHub UI
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup Visual Studio
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Get version from tag
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart('v')
+          echo "VERSION=$version" >> $env:GITHUB_ENV
+          echo "Building version: $version"
+
+      - name: Configure CMake
+        shell: pwsh
+        run: |
+          # Use bundled cmake (3.31.6+) — required by spdlog FetchContent sub-build
+          $cmake = Get-ChildItem "${{ github.workspace }}\tools\cmake\cmake-*\bin\cmake.exe" |
+                   Select-Object -First 1 -ExpandProperty FullName
+          if (-not $cmake) { $cmake = "cmake" }
+          # Prepend bundled cmake to PATH so FetchContent sub-builds find it too
+          $cmakeDir = Split-Path -Parent $cmake
+          $env:PATH = "${cmakeDir};${env:PATH}"
+          & $cmake -S . -B build `
+            -G "Visual Studio 17 2022" `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_PREFIX_PATH="${{ github.workspace }}\third_party\qt\6.8.3\msvc2022_64"
+
+      - name: Build
+        shell: pwsh
+        run: |
+          $cmake = Get-ChildItem "${{ github.workspace }}\tools\cmake\cmake-*\bin\cmake.exe" |
+                   Select-Object -First 1 -ExpandProperty FullName
+          if (-not $cmake) { $cmake = "cmake" }
+          $cmakeDir = Split-Path -Parent $cmake
+          $env:PATH = "${cmakeDir};${env:PATH}"
+          & $cmake --build build --config Release --target roundtable --parallel
+
+      - name: Build Installer
+        shell: pwsh
+        run: |
+          # Find Inno Setup
+          $iscc = Get-ChildItem "C:\Program Files (x86)\Inno Setup*\ISCC.exe" |
+                  Select-Object -First 1 -ExpandProperty FullName
+          if (-not $iscc) {
+            Write-Error "Inno Setup not found. Install it via: choco install innosetup"
+            exit 1
+          }
+          # Build with version override
+          & $iscc "/DMyAppVersion=$env:VERSION" "installer.iss"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Upload Installer Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: roundtable-installer-v${{ env.VERSION }}
+          path: dist/Roundtable-NLE-v${{ env.VERSION }}-Setup.exe
+          if-no-files-found: error

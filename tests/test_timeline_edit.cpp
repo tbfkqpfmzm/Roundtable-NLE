@@ -1,0 +1,995 @@
+/*
+ * test_timeline_edit.cpp — Tests for Step 13: Timeline Editing Tools.
+ *
+ * Tests the EditOperations (pure logic, no Qt):
+ *   1. SelectionSet (select, deselect, toggle, marquee, select-all)
+ *   2. SnapEngine (build targets, snap to nearest, snap pair)
+ *   3. Razor / split clip
+ *   4. Clip trim (head, tail, clamping)
+ *   5. Rolling edit
+ *   6. Ripple trim & ripple delete
+ *   7. Slip tool
+ *   8. Slide tool
+ *   9. Clip move (same track, cross-track)
+ *  10. Delete selection
+ *  11. Clipboard (copy, cut, paste, duplicate)
+ *  12. In/Out points
+ *  13. Edit point navigation (next/prev)
+ *  14. Helper functions (clipAtTime, findEditPoint)
+ */
+
+#include <gtest/gtest.h>
+
+#include "timeline/EditOperations.h"
+#include "timeline/Timeline.h"
+#include "timeline/Track.h"
+#include "timeline/Clip.h"
+#include "timeline/VideoClip.h"
+#include "timeline/AudioClip.h"
+#include "command/CommandStack.h"
+
+#include <memory>
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Helpers
+// ═════════════════════════════════════════════════════════════════════════════
+
+static constexpr int64_t TPS = 48000; // ticks per second
+
+/// Create a video clip at the given position with the given duration (in seconds).
+static std::unique_ptr<rt::VideoClip> makeClip(double startSec, double durSec)
+{
+    auto clip = std::make_unique<rt::VideoClip>();
+    clip->setTimelineIn(static_cast<int64_t>(startSec * TPS));
+    clip->setDuration(static_cast<int64_t>(durSec * TPS));
+    clip->setSourceIn(0);
+    return clip;
+}
+
+/// Helper: add a clip to a track and return its ID.
+static uint64_t addClip(rt::Track* track, double startSec, double durSec)
+{
+    auto clip = makeClip(startSec, durSec);
+    uint64_t id = clip->id();
+    track->addClip(std::move(clip));
+    return id;
+}
+
+/// Helper: set up a timeline with one video track containing 3 adjacent clips.
+/// [0–2s] [2–5s] [5–8s]
+struct TestTimeline
+{
+    rt::Timeline timeline;
+    rt::Track*   vTrack{nullptr};
+    uint64_t     clipA{0}, clipB{0}, clipC{0};
+    rt::CommandStack stack;
+
+    TestTimeline()
+    {
+        vTrack = timeline.addVideoTrack("V1");
+        clipA = addClip(vTrack, 0.0, 2.0);
+        clipB = addClip(vTrack, 2.0, 3.0);
+        clipC = addClip(vTrack, 5.0, 3.0);
+    }
+};
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  SelectionSet
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST(EditOperations, SelectionEmpty)
+{
+    rt::SelectionSet sel;
+    EXPECT_TRUE(sel.empty());
+    EXPECT_EQ(sel.count(), 0u);
+    EXPECT_FALSE(sel.singleSelection().has_value());
+}
+
+TEST(EditOperations, SelectSingle)
+{
+    rt::SelectionSet sel;
+    rt::ClipRef ref{0, 100};
+    sel.selectClip(ref);
+
+    EXPECT_EQ(sel.count(), 1u);
+    EXPECT_TRUE(sel.isSelected(ref));
+    EXPECT_TRUE(sel.singleSelection().has_value());
+    EXPECT_EQ(sel.singleSelection()->clipId, 100u);
+}
+
+TEST(EditOperations, SelectClipClearsPrevious)
+{
+    rt::SelectionSet sel;
+    sel.selectClip({0, 100});
+    sel.selectClip({0, 200}); // Not addToSelection → clears
+
+    EXPECT_EQ(sel.count(), 1u);
+    EXPECT_FALSE(sel.isSelected({0, 100}));
+    EXPECT_TRUE(sel.isSelected({0, 200}));
+}
+
+TEST(EditOperations, SelectClipAddToSelection)
+{
+    rt::SelectionSet sel;
+    sel.selectClip({0, 100});
+    sel.selectClip({0, 200}, true); // Shift-click
+
+    EXPECT_EQ(sel.count(), 2u);
+    EXPECT_TRUE(sel.isSelected({0, 100}));
+    EXPECT_TRUE(sel.isSelected({0, 200}));
+    EXPECT_FALSE(sel.singleSelection().has_value());
+}
+
+TEST(EditOperations, SelectClipNoDuplicates)
+{
+    rt::SelectionSet sel;
+    sel.selectClip({0, 100});
+    sel.selectClip({0, 100}, true);
+
+    EXPECT_EQ(sel.count(), 1u);
+}
+
+TEST(EditOperations, DeselectClip)
+{
+    rt::SelectionSet sel;
+    sel.selectClip({0, 100});
+    sel.selectClip({0, 200}, true);
+    sel.deselectClip({0, 100});
+
+    EXPECT_EQ(sel.count(), 1u);
+    EXPECT_FALSE(sel.isSelected({0, 100}));
+    EXPECT_TRUE(sel.isSelected({0, 200}));
+}
+
+TEST(EditOperations, ToggleClip)
+{
+    rt::SelectionSet sel;
+    sel.selectClip({0, 100});
+
+    sel.toggleClip({0, 100}); // Toggle off
+    EXPECT_EQ(sel.count(), 0u);
+
+    sel.toggleClip({0, 100}); // Toggle on
+    EXPECT_EQ(sel.count(), 1u);
+}
+
+TEST(EditOperations, Clear)
+{
+    rt::SelectionSet sel;
+    sel.selectClip({0, 100});
+    sel.selectClip({1, 200}, true);
+    sel.clear();
+
+    EXPECT_TRUE(sel.empty());
+}
+
+TEST(EditOperations, IsSelectedById)
+{
+    rt::SelectionSet sel;
+    sel.selectClip({0, 42});
+    sel.selectClip({1, 99}, true);
+
+    EXPECT_TRUE(sel.isSelectedById(42));
+    EXPECT_TRUE(sel.isSelectedById(99));
+    EXPECT_FALSE(sel.isSelectedById(1));
+}
+
+TEST(EditOperations, SelectRectangle)
+{
+    TestTimeline tt;
+
+    rt::SelectionSet sel;
+    // Select region 1s–4s on track 0 → should get clipA and clipB
+    rt::TimelineRect rect{1 * TPS, 4 * TPS, 0, 0};
+    sel.selectRect(tt.timeline, rect);
+
+    EXPECT_EQ(sel.count(), 2u);
+    EXPECT_TRUE(sel.isSelectedById(tt.clipA));
+    EXPECT_TRUE(sel.isSelectedById(tt.clipB));
+    EXPECT_FALSE(sel.isSelectedById(tt.clipC));
+}
+
+TEST(EditOperations, SelectAll)
+{
+    TestTimeline tt;
+
+    rt::SelectionSet sel;
+    sel.selectAll(tt.timeline);
+
+    EXPECT_EQ(sel.count(), 3u);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  SnapEngine
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST(EditOperations, SnapEngineDefaults)
+{
+    rt::SnapEngine snap;
+    EXPECT_TRUE(snap.isEnabled());
+    EXPECT_DOUBLE_EQ(snap.thresholdPixels(), rt::SnapEngine::kDefaultThresholdPx);
+}
+
+TEST(EditOperations, SnapDisabled)
+{
+    rt::SnapEngine snap;
+    snap.setEnabled(false);
+
+    snap.addTarget({5 * TPS, rt::SnapTarget::Type::Playhead});
+    auto result = snap.snap(5 * TPS + 100);
+
+    EXPECT_FALSE(result.didSnap);
+    EXPECT_EQ(result.snappedTick, 5 * TPS + 100);
+}
+
+TEST(EditOperations, SnapToPlayhead)
+{
+    rt::SnapEngine snap;
+    snap.setPixelsPerSecond(100.0);
+    snap.addTarget({5 * TPS, rt::SnapTarget::Type::Playhead});
+
+    // A tick within threshold
+    auto result = snap.snap(5 * TPS + 200);
+    EXPECT_TRUE(result.didSnap);
+    EXPECT_EQ(result.snappedTick, 5 * TPS);
+    EXPECT_EQ(result.snapType, rt::SnapTarget::Type::Playhead);
+}
+
+TEST(EditOperations, SnapTooFar)
+{
+    rt::SnapEngine snap;
+    snap.setPixelsPerSecond(100.0);
+    snap.setThresholdPixels(5.0); // 5px threshold → very tight
+
+    snap.addTarget({5 * TPS, rt::SnapTarget::Type::Playhead});
+
+    // 1 second away at 100pps = 100px → far beyond threshold
+    auto result = snap.snap(6 * TPS);
+    EXPECT_FALSE(result.didSnap);
+}
+
+TEST(EditOperations, SnapBuildTargets)
+{
+    TestTimeline tt;
+    tt.timeline.setPlayheadPosition(3 * TPS);
+
+    rt::SnapEngine snap;
+    snap.setPixelsPerSecond(100.0);
+    snap.buildTargets(tt.timeline, 3 * TPS, 24.0);
+
+    // Should have: playhead + 6 clip edges (3 clips × 2 edges each) = 7 targets
+    EXPECT_GE(snap.targets().size(), 7u);
+}
+
+TEST(EditOperations, SnapBuildTargetsWithExclude)
+{
+    TestTimeline tt;
+
+    rt::SnapEngine snap;
+    snap.setPixelsPerSecond(100.0);
+    snap.buildTargets(tt.timeline, 0, 24.0, {tt.clipA});
+
+    // clipA edges should be excluded
+    bool foundClipAStart = false;
+    for (const auto& t : snap.targets())
+    {
+        if (t.tick == 0 && t.type == rt::SnapTarget::Type::ClipEdge)
+            foundClipAStart = true;
+    }
+    EXPECT_FALSE(foundClipAStart);
+}
+
+TEST(EditOperations, SnapPair)
+{
+    rt::SnapEngine snap;
+    snap.setPixelsPerSecond(100.0);
+    snap.addTarget({5 * TPS, rt::SnapTarget::Type::ClipEdge});
+
+    // Snap a pair where tickB is closer to the target
+    auto result = snap.snapPair(4 * TPS, 5 * TPS + 100);
+    EXPECT_TRUE(result.didSnap);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Razor / Split
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST(EditOperations, SplitClip)
+{
+    TestTimeline tt;
+
+    // Split clipB (2–5s) at 3.5s
+    int64_t splitTime = static_cast<int64_t>(3.5 * TPS);
+    auto cmd = rt::EditOperations::splitClip(tt.timeline, 0, tt.clipB, splitTime);
+    ASSERT_NE(cmd, nullptr);
+
+    tt.stack.execute(std::move(cmd));
+
+    // Track should now have 4 clips
+    EXPECT_EQ(tt.vTrack->clipCount(), 4u);
+
+    // Original clipB should be trimmed to 2–3.5s
+    size_t bIdx = tt.vTrack->findClipIndexById(tt.clipB);
+    ASSERT_LT(bIdx, tt.vTrack->clipCount());
+    EXPECT_EQ(tt.vTrack->clip(bIdx)->timelineIn(), 2 * TPS);
+    EXPECT_EQ(tt.vTrack->clip(bIdx)->duration(), static_cast<int64_t>(1.5 * TPS));
+}
+
+TEST(EditOperations, SplitClipUndo)
+{
+    TestTimeline tt;
+
+    int64_t splitTime = static_cast<int64_t>(3.5 * TPS);
+    auto cmd = rt::EditOperations::splitClip(tt.timeline, 0, tt.clipB, splitTime);
+    tt.stack.execute(std::move(cmd));
+
+    EXPECT_EQ(tt.vTrack->clipCount(), 4u);
+
+    tt.stack.undo();
+
+    // Should be back to 3 clips
+    EXPECT_EQ(tt.vTrack->clipCount(), 3u);
+}
+
+TEST(EditOperations, SplitOutsideClipReturnsNull)
+{
+    TestTimeline tt;
+
+    // Split at 0 (before clipB)
+    auto cmd = rt::EditOperations::splitClip(tt.timeline, 0, tt.clipB, 0);
+    EXPECT_EQ(cmd, nullptr);
+
+    // Split at 6s (after clipB)
+    cmd = rt::EditOperations::splitClip(tt.timeline, 0, tt.clipB, 6 * TPS);
+    EXPECT_EQ(cmd, nullptr);
+}
+
+TEST(EditOperations, SplitAllAtPlayhead)
+{
+    TestTimeline tt;
+    // Add clip to a second track too
+    rt::Track* aTrack = tt.timeline.addAudioTrack("A1");
+    addClip(aTrack, 1.0, 4.0); // 1–5s
+
+    int64_t playhead = static_cast<int64_t>(3.0 * TPS);
+    auto cmd = rt::EditOperations::splitAllAtPlayhead(tt.timeline, playhead);
+    ASSERT_NE(cmd, nullptr);
+
+    tt.stack.execute(std::move(cmd));
+
+    // V1: clipA(0–2) unchanged, clipB split at 3s, clipC unchanged → 4 clips
+    EXPECT_EQ(tt.vTrack->clipCount(), 4u);
+    // A1: clip split at 3s → 2 clips
+    EXPECT_EQ(aTrack->clipCount(), 2u);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Trim
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST(EditOperations, TrimClipHead)
+{
+    TestTimeline tt;
+
+    // Trim clipB (2–5s) head to 3s
+    auto cmd = rt::EditOperations::trimClip(tt.timeline, 0, tt.clipB,
+                                             rt::ClipEdge::Head, 3 * TPS);
+    ASSERT_NE(cmd, nullptr);
+    tt.stack.execute(std::move(cmd));
+
+    size_t idx = tt.vTrack->findClipIndexById(tt.clipB);
+    EXPECT_EQ(tt.vTrack->clip(idx)->timelineIn(), 3 * TPS);
+    EXPECT_EQ(tt.vTrack->clip(idx)->duration(), 2 * TPS); // 3–5s
+}
+
+TEST(EditOperations, TrimClipTail)
+{
+    TestTimeline tt;
+
+    // Trim clipB (2–5s) tail to 4s
+    auto cmd = rt::EditOperations::trimClip(tt.timeline, 0, tt.clipB,
+                                             rt::ClipEdge::Tail, 4 * TPS);
+    ASSERT_NE(cmd, nullptr);
+    tt.stack.execute(std::move(cmd));
+
+    size_t idx = tt.vTrack->findClipIndexById(tt.clipB);
+    EXPECT_EQ(tt.vTrack->clip(idx)->duration(), 2 * TPS); // 2–4s
+}
+
+TEST(EditOperations, TrimClipMinDuration)
+{
+    TestTimeline tt;
+
+    // Try to trim clipB head past its tail → should clamp
+    auto cmd = rt::EditOperations::trimClip(tt.timeline, 0, tt.clipB,
+                                             rt::ClipEdge::Head, 10 * TPS);
+    ASSERT_NE(cmd, nullptr);
+    tt.stack.execute(std::move(cmd));
+
+    size_t idx = tt.vTrack->findClipIndexById(tt.clipB);
+    EXPECT_GE(tt.vTrack->clip(idx)->duration(), 2000); // kMinClipDuration
+}
+
+TEST(EditOperations, TrimClipUndo)
+{
+    TestTimeline tt;
+
+    int64_t origIn = tt.vTrack->clip(tt.vTrack->findClipIndexById(tt.clipB))->timelineIn();
+    int64_t origDur = tt.vTrack->clip(tt.vTrack->findClipIndexById(tt.clipB))->duration();
+
+    auto cmd = rt::EditOperations::trimClip(tt.timeline, 0, tt.clipB,
+                                             rt::ClipEdge::Head, 3 * TPS);
+    tt.stack.execute(std::move(cmd));
+    tt.stack.undo();
+
+    size_t idx = tt.vTrack->findClipIndexById(tt.clipB);
+    EXPECT_EQ(tt.vTrack->clip(idx)->timelineIn(), origIn);
+    EXPECT_EQ(tt.vTrack->clip(idx)->duration(), origDur);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Rolling Edit
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST(EditOperations, RollingEdit)
+{
+    TestTimeline tt;
+
+    // Rolling edit between clipA(0–2s) and clipB(2–5s): move edit to 3s
+    auto cmd = rt::EditOperations::rollingEdit(tt.timeline, 0,
+                                                tt.clipA, tt.clipB, 3 * TPS);
+    ASSERT_NE(cmd, nullptr);
+    tt.stack.execute(std::move(cmd));
+
+    size_t ai = tt.vTrack->findClipIndexById(tt.clipA);
+    size_t bi = tt.vTrack->findClipIndexById(tt.clipB);
+
+    // clipA: 0–3s
+    EXPECT_EQ(tt.vTrack->clip(ai)->timelineIn(), 0);
+    EXPECT_EQ(tt.vTrack->clip(ai)->duration(), 3 * TPS);
+
+    // clipB: 3–5s
+    EXPECT_EQ(tt.vTrack->clip(bi)->timelineIn(), 3 * TPS);
+    EXPECT_EQ(tt.vTrack->clip(bi)->duration(), 2 * TPS);
+}
+
+TEST(EditOperations, RollingEditUndo)
+{
+    TestTimeline tt;
+
+    auto cmd = rt::EditOperations::rollingEdit(tt.timeline, 0,
+                                                tt.clipA, tt.clipB, 3 * TPS);
+    tt.stack.execute(std::move(cmd));
+    tt.stack.undo();
+
+    size_t ai = tt.vTrack->findClipIndexById(tt.clipA);
+    size_t bi = tt.vTrack->findClipIndexById(tt.clipB);
+
+    EXPECT_EQ(tt.vTrack->clip(ai)->duration(), 2 * TPS); // Back to 0–2s
+    EXPECT_EQ(tt.vTrack->clip(bi)->timelineIn(), 2 * TPS);
+    EXPECT_EQ(tt.vTrack->clip(bi)->duration(), 3 * TPS); // Back to 2–5s
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Ripple
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST(EditOperations, RippleTrimTail)
+{
+    TestTimeline tt;
+
+    // Ripple trim clipB tail from 5s to 4s → clipC should shift left by 1s
+    int64_t clipCOrigIn = tt.vTrack->clip(
+        tt.vTrack->findClipIndexById(tt.clipC))->timelineIn();
+
+    auto cmd = rt::EditOperations::rippleTrim(tt.timeline, 0, tt.clipB,
+                                               rt::ClipEdge::Tail, 4 * TPS);
+    ASSERT_NE(cmd, nullptr);
+    tt.stack.execute(std::move(cmd));
+
+    size_t bi = tt.vTrack->findClipIndexById(tt.clipB);
+    EXPECT_EQ(tt.vTrack->clip(bi)->duration(), 2 * TPS); // 2–4s
+
+    size_t ci = tt.vTrack->findClipIndexById(tt.clipC);
+    // clipC should have shifted left by 1s (from 5s to 4s)
+    EXPECT_EQ(tt.vTrack->clip(ci)->timelineIn(), clipCOrigIn - 1 * TPS);
+}
+
+TEST(EditOperations, RippleDelete)
+{
+    TestTimeline tt;
+
+    // Select clipB and ripple delete it
+    rt::SelectionSet sel;
+    sel.selectClip({0, tt.clipB});
+
+    auto cmd = rt::EditOperations::rippleDelete(tt.timeline, sel);
+    ASSERT_NE(cmd, nullptr);
+    tt.stack.execute(std::move(cmd));
+
+    // clipB removed, clipC shifted left
+    EXPECT_EQ(tt.vTrack->clipCount(), 2u);
+    EXPECT_EQ(tt.vTrack->findClipIndexById(tt.clipB), tt.vTrack->clipCount());
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Slip
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST(EditOperations, SlipClip)
+{
+    TestTimeline tt;
+
+    size_t bi = tt.vTrack->findClipIndexById(tt.clipB);
+    int64_t origSourceIn = tt.vTrack->clip(bi)->sourceIn();
+    int64_t origTimelineIn = tt.vTrack->clip(bi)->timelineIn();
+    int64_t origDuration = tt.vTrack->clip(bi)->duration();
+
+    // Slip clipB by +1s of source
+    auto cmd = rt::EditOperations::slipClip(tt.timeline, 0, tt.clipB, TPS);
+    ASSERT_NE(cmd, nullptr);
+    tt.stack.execute(std::move(cmd));
+
+    // Source in should change, timeline position should NOT change
+    EXPECT_EQ(tt.vTrack->clip(bi)->sourceIn(), origSourceIn + TPS);
+    EXPECT_EQ(tt.vTrack->clip(bi)->timelineIn(), origTimelineIn);
+    EXPECT_EQ(tt.vTrack->clip(bi)->duration(), origDuration);
+}
+
+TEST(EditOperations, SlipClipClampNegative)
+{
+    TestTimeline tt;
+
+    // Slip clipB by -10s → should clamp to sourceIn=0
+    auto cmd = rt::EditOperations::slipClip(tt.timeline, 0, tt.clipB, -10 * TPS);
+    ASSERT_NE(cmd, nullptr);
+    tt.stack.execute(std::move(cmd));
+
+    size_t bi = tt.vTrack->findClipIndexById(tt.clipB);
+    EXPECT_EQ(tt.vTrack->clip(bi)->sourceIn(), 0);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Slide
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST(EditOperations, SlideClip)
+{
+    TestTimeline tt;
+
+    // Slide clipB (2–5s) by +1s
+    auto cmd = rt::EditOperations::slideClip(tt.timeline, 0, tt.clipB, TPS);
+    ASSERT_NE(cmd, nullptr);
+    tt.stack.execute(std::move(cmd));
+
+    size_t bi = tt.vTrack->findClipIndexById(tt.clipB);
+    EXPECT_EQ(tt.vTrack->clip(bi)->timelineIn(), 3 * TPS); // Shifted from 2s to 3s
+}
+
+TEST(EditOperations, SlideZeroDelta)
+{
+    TestTimeline tt;
+
+    auto cmd = rt::EditOperations::slideClip(tt.timeline, 0, tt.clipB, 0);
+    EXPECT_EQ(cmd, nullptr); // No-op
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Move
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST(EditOperations, MoveClipSameTrack)
+{
+    TestTimeline tt;
+
+    auto cmd = rt::EditOperations::moveClip(tt.timeline, 0, tt.clipA, 10 * TPS);
+    ASSERT_NE(cmd, nullptr);
+    tt.stack.execute(std::move(cmd));
+
+    size_t ai = tt.vTrack->findClipIndexById(tt.clipA);
+    EXPECT_EQ(tt.vTrack->clip(ai)->timelineIn(), 10 * TPS);
+}
+
+TEST(EditOperations, MoveClipClampNegative)
+{
+    TestTimeline tt;
+
+    auto cmd = rt::EditOperations::moveClip(tt.timeline, 0, tt.clipA, -5 * TPS);
+    ASSERT_NE(cmd, nullptr);
+    tt.stack.execute(std::move(cmd));
+
+    size_t ai = tt.vTrack->findClipIndexById(tt.clipA);
+    EXPECT_EQ(tt.vTrack->clip(ai)->timelineIn(), 0); // Clamped to 0
+}
+
+TEST(EditOperations, MoveClipToTrack)
+{
+    TestTimeline tt;
+    rt::Track* aTrack = tt.timeline.addAudioTrack("A1");
+
+    auto cmd = rt::EditOperations::moveClipToTrack(tt.timeline, 0, 1,
+                                                    tt.clipA, 5 * TPS);
+    ASSERT_NE(cmd, nullptr);
+    tt.stack.execute(std::move(cmd));
+
+    // clipA should be removed from V1
+    EXPECT_EQ(tt.vTrack->findClipIndexById(tt.clipA), tt.vTrack->clipCount());
+
+    // A new clip should exist on A1 at 5s
+    EXPECT_GE(aTrack->clipCount(), 1u);
+    EXPECT_EQ(aTrack->clip(0)->timelineIn(), 5 * TPS);
+}
+
+TEST(EditOperations, MoveClipSameTrackSameIndex)
+{
+    TestTimeline tt;
+
+    // If fromTrack == toTrack, should use simple move
+    auto cmd = rt::EditOperations::moveClipToTrack(tt.timeline, 0, 0,
+                                                    tt.clipA, 10 * TPS);
+    ASSERT_NE(cmd, nullptr);
+    tt.stack.execute(std::move(cmd));
+
+    size_t ai = tt.vTrack->findClipIndexById(tt.clipA);
+    EXPECT_EQ(tt.vTrack->clip(ai)->timelineIn(), 10 * TPS);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Delete
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST(EditOperations, DeleteSelection)
+{
+    TestTimeline tt;
+
+    rt::SelectionSet sel;
+    sel.selectClip({0, tt.clipA});
+    sel.selectClip({0, tt.clipB}, true);
+
+    auto cmd = rt::EditOperations::deleteSelection(tt.timeline, sel);
+    ASSERT_NE(cmd, nullptr);
+    tt.stack.execute(std::move(cmd));
+
+    EXPECT_EQ(tt.vTrack->clipCount(), 1u);
+    EXPECT_EQ(tt.vTrack->findClipIndexById(tt.clipC), 0u);
+}
+
+TEST(EditOperations, DeleteEmptySelection)
+{
+    TestTimeline tt;
+
+    rt::SelectionSet sel;
+    auto cmd = rt::EditOperations::deleteSelection(tt.timeline, sel);
+    EXPECT_EQ(cmd, nullptr);
+}
+
+TEST(EditOperations, DeleteSelectionUndo)
+{
+    TestTimeline tt;
+
+    rt::SelectionSet sel;
+    sel.selectClip({0, tt.clipB});
+
+    auto cmd = rt::EditOperations::deleteSelection(tt.timeline, sel);
+    tt.stack.execute(std::move(cmd));
+    EXPECT_EQ(tt.vTrack->clipCount(), 2u);
+
+    tt.stack.undo();
+    EXPECT_EQ(tt.vTrack->clipCount(), 3u);
+    EXPECT_NE(tt.vTrack->findClipIndexById(tt.clipB), tt.vTrack->clipCount());
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Clipboard
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST(EditOperations, CopySelection)
+{
+    TestTimeline tt;
+
+    rt::SelectionSet sel;
+    sel.selectClip({0, tt.clipA});
+    sel.selectClip({0, tt.clipB}, true);
+
+    rt::ClipboardContents clipboard;
+    rt::EditOperations::copySelection(tt.timeline, sel, clipboard);
+
+    EXPECT_EQ(clipboard.entries.size(), 2u);
+    EXPECT_FALSE(clipboard.empty());
+
+    // Relative times: clipA at 0, clipB at 2s relative to clipA
+    bool foundZero = false, foundOffset = false;
+    for (const auto& entry : clipboard.entries)
+    {
+        if (entry.relativeTime == 0) foundZero = true;
+        if (entry.relativeTime == 2 * TPS) foundOffset = true;
+    }
+    EXPECT_TRUE(foundZero);
+    EXPECT_TRUE(foundOffset);
+}
+
+TEST(EditOperations, CopyEmptySelection)
+{
+    TestTimeline tt;
+    rt::SelectionSet sel;
+    rt::ClipboardContents clipboard;
+    rt::EditOperations::copySelection(tt.timeline, sel, clipboard);
+    EXPECT_TRUE(clipboard.empty());
+}
+
+TEST(EditOperations, Paste)
+{
+    TestTimeline tt;
+
+    // Copy clipA
+    rt::SelectionSet sel;
+    sel.selectClip({0, tt.clipA});
+    rt::ClipboardContents clipboard;
+    rt::EditOperations::copySelection(tt.timeline, sel, clipboard);
+
+    // Paste at 10s
+    auto cmd = rt::EditOperations::paste(tt.timeline, clipboard, 10 * TPS);
+    ASSERT_NE(cmd, nullptr);
+    tt.stack.execute(std::move(cmd));
+
+    EXPECT_EQ(tt.vTrack->clipCount(), 4u);
+}
+
+TEST(EditOperations, PasteUndo)
+{
+    TestTimeline tt;
+
+    rt::SelectionSet sel;
+    sel.selectClip({0, tt.clipA});
+    rt::ClipboardContents clipboard;
+    rt::EditOperations::copySelection(tt.timeline, sel, clipboard);
+
+    auto cmd = rt::EditOperations::paste(tt.timeline, clipboard, 10 * TPS);
+    tt.stack.execute(std::move(cmd));
+    EXPECT_EQ(tt.vTrack->clipCount(), 4u);
+
+    tt.stack.undo();
+    EXPECT_EQ(tt.vTrack->clipCount(), 3u);
+}
+
+TEST(EditOperations, CutSelection)
+{
+    TestTimeline tt;
+
+    rt::SelectionSet sel;
+    sel.selectClip({0, tt.clipA});
+    rt::ClipboardContents clipboard;
+
+    auto cmd = rt::EditOperations::cutSelection(tt.timeline, sel, clipboard);
+    ASSERT_NE(cmd, nullptr);
+    tt.stack.execute(std::move(cmd));
+
+    EXPECT_EQ(tt.vTrack->clipCount(), 2u);
+    EXPECT_FALSE(clipboard.empty());
+}
+
+TEST(EditOperations, DuplicateSelection)
+{
+    TestTimeline tt;
+
+    rt::SelectionSet sel;
+    sel.selectClip({0, tt.clipA});
+
+    auto cmd = rt::EditOperations::duplicateSelection(tt.timeline, sel);
+    ASSERT_NE(cmd, nullptr);
+    tt.stack.execute(std::move(cmd));
+
+    EXPECT_EQ(tt.vTrack->clipCount(), 4u);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  In/Out Points
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST(EditOperations, SetInPoint)
+{
+    TestTimeline tt;
+
+    rt::EditOperations::setInPoint(tt.timeline, 3 * TPS);
+    EXPECT_EQ(tt.timeline.inPoint(), 3 * TPS);
+}
+
+TEST(EditOperations, SetOutPoint)
+{
+    TestTimeline tt;
+
+    rt::EditOperations::setOutPoint(tt.timeline, 7 * TPS);
+    EXPECT_EQ(tt.timeline.outPoint(), 7 * TPS);
+}
+
+TEST(EditOperations, InPointClearsInvalidOut)
+{
+    TestTimeline tt;
+
+    rt::EditOperations::setOutPoint(tt.timeline, 5 * TPS);
+    rt::EditOperations::setInPoint(tt.timeline, 6 * TPS); // Past out point
+
+    EXPECT_EQ(tt.timeline.inPoint(), 6 * TPS);
+    EXPECT_EQ(tt.timeline.outPoint(), -1); // Should be cleared
+}
+
+TEST(EditOperations, OutPointClearsInvalidIn)
+{
+    TestTimeline tt;
+
+    rt::EditOperations::setInPoint(tt.timeline, 5 * TPS);
+    rt::EditOperations::setOutPoint(tt.timeline, 4 * TPS); // Before in point
+
+    EXPECT_EQ(tt.timeline.outPoint(), 4 * TPS);
+    EXPECT_EQ(tt.timeline.inPoint(), -1); // Should be cleared
+}
+
+TEST(EditOperations, ClearInOutPoints)
+{
+    TestTimeline tt;
+
+    rt::EditOperations::setInPoint(tt.timeline, 1 * TPS);
+    rt::EditOperations::setOutPoint(tt.timeline, 5 * TPS);
+    rt::EditOperations::clearInOutPoints(tt.timeline);
+
+    EXPECT_EQ(tt.timeline.inPoint(), -1);
+    EXPECT_EQ(tt.timeline.outPoint(), -1);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Edit point navigation
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST(EditOperations, NextEditPoint)
+{
+    TestTimeline tt;
+    // Clips: [0–2s] [2–5s] [5–8s]
+    // Edit points: 0, 2s, 5s, 8s (in, out, in, out, in, out)
+
+    // From 0 → next is 2s
+    EXPECT_EQ(rt::EditOperations::nextEditPoint(tt.timeline, 0), 2 * TPS);
+
+    // From 2s → next is 5s
+    EXPECT_EQ(rt::EditOperations::nextEditPoint(tt.timeline, 2 * TPS), 5 * TPS);
+
+    // From 5s → next is 8s
+    EXPECT_EQ(rt::EditOperations::nextEditPoint(tt.timeline, 5 * TPS), 8 * TPS);
+
+    // From 8s → no more → stays at 8s
+    EXPECT_EQ(rt::EditOperations::nextEditPoint(tt.timeline, 8 * TPS), 8 * TPS);
+}
+
+TEST(EditOperations, PrevEditPoint)
+{
+    TestTimeline tt;
+    // Edit points: 0, 2s, 5s, 8s
+
+    // From 8s → prev is 5s
+    EXPECT_EQ(rt::EditOperations::prevEditPoint(tt.timeline, 8 * TPS), 5 * TPS);
+
+    // From 5s → prev is 2s  (clipA out=2s is < 5s)
+    EXPECT_EQ(rt::EditOperations::prevEditPoint(tt.timeline, 5 * TPS), 2 * TPS);
+
+    // From 1s → prev is 0
+    EXPECT_EQ(rt::EditOperations::prevEditPoint(tt.timeline, TPS), 0);
+
+    // From 0 → stays at 0
+    EXPECT_EQ(rt::EditOperations::prevEditPoint(tt.timeline, 0), 0);
+}
+
+TEST(EditOperations, NextEditPointEmptyTimeline)
+{
+    rt::Timeline timeline;
+    timeline.addVideoTrack("V1"); // No clips
+
+    EXPECT_EQ(rt::EditOperations::nextEditPoint(timeline, 0), 0);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Helpers
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST(EditOperations, ClipAtTime)
+{
+    TestTimeline tt;
+
+    // At 1s → clipA
+    auto* found = rt::EditOperations::clipAtTime(*tt.vTrack, TPS);
+    ASSERT_NE(found, nullptr);
+    EXPECT_EQ(found->id(), tt.clipA);
+
+    // At 3s → clipB
+    found = rt::EditOperations::clipAtTime(*tt.vTrack, 3 * TPS);
+    ASSERT_NE(found, nullptr);
+    EXPECT_EQ(found->id(), tt.clipB);
+
+    // At 10s → nothing
+    found = rt::EditOperations::clipAtTime(*tt.vTrack, 10 * TPS);
+    EXPECT_EQ(found, nullptr);
+}
+
+TEST(EditOperations, FindEditPoint)
+{
+    TestTimeline tt;
+
+    // Near 2s → should find edit between clipA and clipB
+    auto ep = rt::EditOperations::findEditPoint(*tt.vTrack, 2 * TPS);
+    EXPECT_NE(ep.leftClip, nullptr);
+    EXPECT_NE(ep.rightClip, nullptr);
+    EXPECT_EQ(ep.editTime, 2 * TPS);
+}
+
+TEST(EditOperations, FindEditPointEmpty)
+{
+    rt::Timeline timeline;
+    rt::Track* track = timeline.addVideoTrack("V1");
+
+    auto ep = rt::EditOperations::findEditPoint(*track, TPS);
+    EXPECT_EQ(ep.leftClip, nullptr);
+    EXPECT_EQ(ep.rightClip, nullptr);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  EditTool enum
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST(EditOperations, EditToolValues)
+{
+    EXPECT_NE(static_cast<int>(rt::EditTool::Selection),
+              static_cast<int>(rt::EditTool::Razor));
+    EXPECT_NE(static_cast<int>(rt::EditTool::Rolling),
+              static_cast<int>(rt::EditTool::Ripple));
+    EXPECT_NE(static_cast<int>(rt::EditTool::Slip),
+              static_cast<int>(rt::EditTool::Slide));
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Edge cases
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST(EditOperations, SplitInvalidTrack)
+{
+    TestTimeline tt;
+    auto cmd = rt::EditOperations::splitClip(tt.timeline, 99, tt.clipA, TPS);
+    EXPECT_EQ(cmd, nullptr);
+}
+
+TEST(EditOperations, TrimInvalidClip)
+{
+    TestTimeline tt;
+    auto cmd = rt::EditOperations::trimClip(tt.timeline, 0, 99999,
+                                             rt::ClipEdge::Head, TPS);
+    EXPECT_EQ(cmd, nullptr);
+}
+
+TEST(EditOperations, MoveInvalidTrack)
+{
+    TestTimeline tt;
+    auto cmd = rt::EditOperations::moveClip(tt.timeline, 99, tt.clipA, 0);
+    EXPECT_EQ(cmd, nullptr);
+}
+
+TEST(EditOperations, ClipRefEquality)
+{
+    rt::ClipRef a{0, 100};
+    rt::ClipRef b{0, 100};
+    rt::ClipRef c{1, 100};
+
+    EXPECT_TRUE(a == b);
+    EXPECT_TRUE(a != c);
+}
+
+TEST(EditOperations, ClipboardClear)
+{
+    rt::ClipboardContents clipboard;
+    EXPECT_TRUE(clipboard.empty());
+
+    TestTimeline tt;
+    rt::SelectionSet sel;
+    sel.selectClip({0, tt.clipA});
+    rt::EditOperations::copySelection(tt.timeline, sel, clipboard);
+    EXPECT_FALSE(clipboard.empty());
+
+    clipboard.clear();
+    EXPECT_TRUE(clipboard.empty());
+}

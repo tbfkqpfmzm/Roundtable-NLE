@@ -1,0 +1,923 @@
+/*
+ * ProgramMonitor.cpp -- dependencies, render thread, display, and events.
+ *
+ * Constructor/setupUI --> ProgramMonitorUI.cpp
+ */
+
+#include "panels/monitors/ProgramMonitor.h"
+
+#include "Theme.h"
+
+#include "viewport/Viewport.h"
+#include "viewport/VulkanViewport.h"
+#include "viewport/TransformOverlayWidget.h"
+#include "GpuContext.h"
+#include "widgets/MiniTimeline.h"
+#include "widgets/TransportButton.h"
+#include "media/PlaybackController.h"
+#include "media/PlaybackScheduler.h"
+#include "media/AVSyncClock.h"
+#include "media/FrameCache.h"
+#include "media/MediaPool.h"
+#include "timeline/Timeline.h"
+#include "timeline/Marker.h"
+
+#include <QHBoxLayout>
+#include <QVBoxLayout>
+#include <QStackedLayout>
+#include <QMenu>
+#include <QCursor>
+#include <QShowEvent>
+#include <QKeyEvent>
+#include <QFrame>
+#include <QThread>
+
+#include <spdlog/spdlog.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+namespace rt {
+
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Dependencies
+// ═════════════════════════════════════════════════════════════════════════════
+
+void ProgramMonitor::setController(PlaybackController* controller)
+{
+    m_controller = controller;
+
+    if (m_pipeline)
+        m_pipeline->setController(m_controller);
+
+    if (m_controller)
+    {
+        m_miniTimeline->setFrameRate(m_controller->frameRate());
+    }
+}
+
+void ProgramMonitor::setTimeline(Timeline* timeline)
+{
+    m_timeline = timeline;
+
+    if (m_timeline)
+    {
+        // Update mini-timeline with the timeline duration
+        m_miniTimeline->setDuration(m_timeline->duration());
+
+        // Show in/out points if set
+        if (m_timeline->inPoint() >= 0)
+            m_miniTimeline->setInPoint(m_timeline->inPoint());
+        if (m_timeline->outPoint() >= 0)
+            m_miniTimeline->setOutPoint(m_timeline->outPoint());
+
+        // Sync marker cue points
+        const auto& markers = m_timeline->markers();
+        std::vector<MarkerCue> cues;
+        cues.reserve(markers.size());
+        for (const auto& m : markers)
+            cues.push_back({m.time, m.color});
+        m_miniTimeline->setMarkers(cues);
+    }
+}
+
+void ProgramMonitor::setMediaPool(MediaPool* pool)
+{
+    m_pool = pool;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Display control
+// ═════════════════════════════════════════════════════════════════════════════
+
+void ProgramMonitor::startPolling(int intervalMs)
+{
+    ensurePipelineStarted();
+    m_pollTimer->start(intervalMs);
+}
+
+void ProgramMonitor::stopPolling()
+{
+    m_pollTimer->stop();
+    if (m_pipeline)
+        m_pipeline->stop();
+}
+
+void ProgramMonitor::refresh()
+{
+    m_lastRenderedTick = -1; // Force re-render
+    m_lastRenderedFrame = -1;
+    updateDisplay();
+}
+
+void ProgramMonitor::requestRefresh()
+{
+    m_lastRenderedTick = -1; // Force re-render on next poll cycle
+    m_lastRenderedFrame = -1;
+    m_lastDirectFrame.reset(); // Clear stale playback frame
+
+    // Kick a multi-cycle settle window so that cold decode misses
+    // are retried.  Unlike scrub settle, edit settle does NOT reduce
+    // resolution — the user expects crisp display after an edit.
+    m_editSettleCounter = 15;
+
+    // Do NOT call updateDisplay() — let the 60fps poll timer handle it.
+    // This keeps the calling thread (main/UI) unblocked so edits feel
+    // instant while the program monitor catches up within ≤16ms.
+}
+
+void ProgramMonitor::requestPlaybackPreroll(int64_t tick)
+{
+    if (!usesAsyncPipelinePath())
+        return;
+
+    ensurePipelineStarted();
+    if (!m_pipeline)
+        return;
+
+    m_pipeline->requestFrame(tick, compositeWidth(), compositeHeight(),
+                             /*scrub=*/false);
+}
+
+void ProgramMonitor::setOutputResolution(uint32_t w, uint32_t h)
+{
+    m_outputWidth  = w;
+    m_outputHeight = h;
+    if (m_pipeline)
+        m_pipeline->setOutputResolution(w, h, m_playbackResDivisor);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Compositing callback
+// ═════════════════════════════════════════════════════════════════════════════
+
+void ProgramMonitor::setCompositeCallback(CompositeCallback cb)
+{
+    m_compositeCallback = std::move(cb);
+
+    if (m_pipeline)
+        m_pipeline->setCompositeCallback(m_compositeCallback);
+}
+
+void ProgramMonitor::setPlaybackTierCallback(PlaybackTierCallback cb)
+{
+    m_playbackTierCallback = std::move(cb);
+    // Fire once so the compositor picks up the current dropdown state
+    // (e.g. on startup the dropdown defaults to 1/2 before the callback
+    // is wired — without this, the compositor would stay at its own
+    // default until the user touches the dropdown).
+    if (m_playbackTierCallback)
+        m_playbackTierCallback(m_playbackResDivisor);
+}
+
+void ProgramMonitor::setGpuDisplayEnabled(bool enabled)
+{
+    if (enabled && (!m_vulkanViewport || !m_vulkanViewport->isGpuActive())) {
+        spdlog::warn("ProgramMonitor::setGpuDisplayEnabled(true) but VulkanViewport not available; using CPU viewport fallback");
+        enabled = false;
+    }
+
+    m_gpuDisplay = enabled && m_vulkanViewport && m_vulkanViewport->isGpuActive();
+
+    if (m_viewStack) {
+        if (m_gpuDisplay && m_vulkanViewport)
+            m_viewStack->setCurrentIndex(1);
+        else
+            m_viewStack->setCurrentIndex(0);
+    }
+
+    if (!m_gpuDisplay && m_transformOverlay)
+        m_transformOverlay->hide();
+
+    // When GPU display mode is active, the poll timer composites directly on
+    // the UI thread — the async pipeline must NOT run, or its producer thread
+    // will race with the UI thread for m_compositeMutex, causing the poll
+    // timer to get stale m_lastGoodComposite frames (visible freeze).
+    if (m_gpuDisplay && m_pipeline && m_pipeline->isRunning())
+        m_pipeline->stop();
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  PlaybackPipeline integration
+// ═════════════════════════════════════════════════════════════════════════════
+
+bool ProgramMonitor::usesAsyncPipelinePath() const noexcept
+{
+    return !m_gpuDisplay;
+}
+
+void ProgramMonitor::ensurePipelineStarted()
+{
+    if (!usesAsyncPipelinePath() || !m_controller || !m_compositeCallback)
+        return;
+
+    if (!m_pipeline)
+        initPipeline();
+
+    if (m_pipeline && !m_pipeline->isRunning())
+        m_pipeline->start();
+}
+
+void ProgramMonitor::initPipeline()
+{
+    if (m_pipeline) return;
+
+    m_pipeline = std::make_unique<PlaybackScheduler>();
+    m_pipeline->setController(m_controller);
+    m_pipeline->setCompositeCallback(m_compositeCallback);
+    m_pipeline->setOutputResolution(m_outputWidth, m_outputHeight,
+                                    m_playbackResDivisor);
+
+    // Wire the present callback — called from the pipeline's present thread.
+    // During playback, the UI thread does direct compositing for zero-latency
+    // A/V sync, so the pipeline presenter must NOT touch the Vulkan viewport.
+    m_pipeline->setPresentCallback(
+        [this](const std::shared_ptr<CachedFrame>& frame) -> bool {
+            if (m_controller && m_controller->isPlaying() && !usesAsyncPipelinePath())
+                return true;  // UI thread handles display during playback
+
+            // All QWidget/QImage display work must happen on the GUI thread.
+            // Calling presentFrame from the pipeline present thread can crash
+            // in QtGui/QtWidgets under load.
+            if (QThread::currentThread() == thread())
+                return presentFrame(frame);
+
+            QMetaObject::invokeMethod(this,
+                                      [this, frame]() {
+                                          presentFrame(frame);
+                                      },
+                                      Qt::QueuedConnection);
+            return true;
+        });
+
+    // Wire the present-notify callback — emits Qt signal from present thread.
+    // During playback the UI thread composites directly and emits
+    // frameDisplayed itself, so skip the background-thread emit to avoid
+    // duplicate signals and stale-tick deliveries to scopes.
+    m_pipeline->setPresentNotify(
+        [this](int64_t tick) {
+            if (m_controller && m_controller->isPlaying() && !usesAsyncPipelinePath())
+                return;
+            emit frameDisplayed(tick);
+        });
+}
+
+bool ProgramMonitor::presentFrame(const std::shared_ptr<CachedFrame>& frame)
+{
+    if (!frame) return false;
+
+    if (frame->width > 0) {
+        if (m_gpuDisplay && m_vulkanViewport && frame->gpuReady) {
+            // DIAG: log which display path we take
+            {
+                static int s_presPathLog = 0;
+                if (++s_presPathLog % 5 == 0) {
+                    spdlog::info("[DIAG-PRESENT-PATH] GPU-DIRECT gpuView=0x{:X} "
+                                 "sampler=0x{:X} {}x{}",
+                                 frame->gpuImageView, frame->gpuSampler,
+                                 frame->width, frame->height);
+                }
+            }
+            m_vulkanViewport->displayGpuImage(
+                reinterpret_cast<VkImageView>(frame->gpuImageView),
+                reinterpret_cast<VkSampler>(frame->gpuSampler),
+                frame->width, frame->height,
+                reinterpret_cast<VkSemaphore>(frame->gpuSemaphore));
+            m_lastDirectFrame = frame;
+            return true;
+        }
+        if (frame->ensurePixels()) {
+            if (m_gpuDisplay && m_vulkanViewport) {
+                spdlog::info("[DIAG-PRESENT-PATH] CPU-UPLOAD {}x{} pixelBytes={}",
+                             frame->width, frame->height, frame->pixels.size());
+                m_vulkanViewport->displayFrame(frame);
+                m_lastDirectFrame = frame;
+                return true;
+            }
+            if (!m_gpuDisplay && m_viewport) {
+                static int s_cpuPresentLog = 0;
+                ++s_cpuPresentLog;
+                if (s_cpuPresentLog <= 5 || s_cpuPresentLog % 60 == 0) {
+                    // Sample a few pixels: top-left, center, bottom-right.
+                    // If they're all 0xFFFFFFFF the readback is producing
+                    // white frames; if varied, the data is real and the
+                    // problem is in display.
+                    uint32_t px0 = 0, pxC = 0, pxE = 0;
+                    if (!frame->pixels.empty() && frame->pixels.size() >= 4) {
+                        const uint8_t* p = frame->pixels.data();
+                        const size_t total = frame->pixels.size();
+                        px0 = *reinterpret_cast<const uint32_t*>(p);
+                        const size_t mid = (total / 8) * 4;
+                        pxC = *reinterpret_cast<const uint32_t*>(p + mid);
+                        const size_t end = total - 4;
+                        pxE = *reinterpret_cast<const uint32_t*>(p + end);
+                    }
+                    spdlog::info("[DIAG-PRESENT-PATH] CPU-VIEWPORT {}x{} pixelBytes={} pix[0]=0x{:08X} pix[mid]=0x{:08X} pix[end]=0x{:08X}",
+                                 frame->width, frame->height, frame->pixels.size(),
+                                 px0, pxC, pxE);
+                    const int stackIdx = m_viewStack ? m_viewStack->currentIndex() : -1;
+                    const QSize vpSize = m_viewport->size();
+                    const QSize pmSize = size();
+                    spdlog::info("[DIAG-CPU-VIEW] stackIndex={} vpVisible={} vpSize={}x{} pmVisible={} pmSize={}x{} updatesEnabled={}",
+                                 stackIdx,
+                                 static_cast<int>(m_viewport->isVisible()),
+                                 vpSize.width(), vpSize.height(),
+                                 static_cast<int>(isVisible()),
+                                 pmSize.width(), pmSize.height(),
+                                 static_cast<int>(updatesEnabled()));
+                }
+                m_viewport->displayFrame(frame);
+                m_lastDirectFrame = frame;
+                return true;
+            }
+        }
+        spdlog::warn("[DIAG-PRESENT-PATH] FAILED: gpuDisplay={} viewport={} gpuReady={} pixels={}",
+                     m_gpuDisplay, (m_vulkanViewport != nullptr), frame->gpuReady,
+                     frame->pixels.size());
+        return false;
+    }
+
+    // width==0 -> clear
+    if (m_gpuDisplay && m_vulkanViewport)
+        m_vulkanViewport->clearFrame();
+    else if (m_viewport)
+        m_viewport->clearFrame();
+    m_lastDirectFrame.reset();
+    return true;
+}
+
+std::shared_ptr<CachedFrame> ProgramMonitor::lastDisplayedFrame() const
+{
+    if (m_lastDirectFrame)
+        return m_lastDirectFrame;
+    if (m_pipeline)
+        return m_pipeline->lastDisplayedFrame();
+    return nullptr;
+}
+
+PlaybackScheduler* ProgramMonitor::pipeline() const noexcept
+{
+    return m_pipeline.get();
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Size hint
+// ═════════════════════════════════════════════════════════════════════════════
+
+QSize ProgramMonitor::sizeHint() const
+{
+    return QSize(640, 400);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Slots
+// ═════════════════════════════════════════════════════════════════════════════
+
+void ProgramMonitor::onPollTimer()
+{
+    auto pollStart = std::chrono::steady_clock::now();
+
+    // Detect event-loop stalls (gap between consecutive polls)
+    {
+        static auto s_lastPoll = std::chrono::steady_clock::time_point{};
+        if (s_lastPoll != std::chrono::steady_clock::time_point{}) {
+            double sinceLastMs = std::chrono::duration<double, std::milli>(
+                pollStart - s_lastPoll).count();
+            if (sinceLastMs > 32.0) {
+                spdlog::info("[PERF] pollTimer gap: {:.1f}ms (expected ~16ms)",
+                             sinceLastMs);
+            }
+        }
+        s_lastPoll = pollStart;
+    }
+
+    // Keep the floating overlay positioned over the Vulkan viewport.
+    // syncOverlayGeometry() is cheap — it only calls setGeometry when
+    // the position/size actually changed.
+    syncOverlayGeometry();
+
+    if (!m_controller) return;
+
+    (void)m_controller->pollPosition();
+
+    updateDisplay();
+
+    if (m_droppedFrameLabel) {
+        const bool asyncPlayback = usesAsyncPipelinePath() && m_pipeline
+            && m_controller->isPlaying();
+        const int dropped = asyncPlayback ? m_pipeline->droppedFrames() : 0;
+        if (dropped > 0) {
+            m_droppedFrameLabel->setText(QStringLiteral("Dropped %1").arg(dropped));
+            m_droppedFrameLabel->setVisible(true);
+        } else {
+            m_droppedFrameLabel->setVisible(false);
+        }
+    }
+
+    // ── VRAM pressure warning ────────────────────────────────────────
+    if (m_vramQuery && m_resOverlayLabel) {
+        const int vramPct = m_vramQuery();
+        if (vramPct > 90) {
+            m_resOverlayLabel->setStyleSheet(
+                QStringLiteral("color: #FF4444; font-weight: bold; background: transparent;"));
+            m_resOverlayLabel->setText(QStringLiteral("VRAM %1%").arg(vramPct));
+            m_resOverlayLabel->setVisible(true);
+        } else if (vramPct > 75) {
+            m_resOverlayLabel->setStyleSheet(
+                QStringLiteral("color: #FFD700; background: transparent;"));
+            m_resOverlayLabel->setText(QStringLiteral("VRAM %1%").arg(vramPct));
+            m_resOverlayLabel->setVisible(true);
+        } else {
+            m_resOverlayLabel->setVisible(false);
+        }
+    }
+
+    // Log when the handler itself takes too long
+    {
+        double selfMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - pollStart).count();
+        if (selfMs > 12.0) {
+            spdlog::info("[PERF] onPollTimer self: {:.1f}ms (budget=16ms)", selfMs);
+        }
+    }
+}
+
+void ProgramMonitor::onScrub(int64_t tick)
+{
+    if (!m_controller) return;
+
+    m_controller->seekTo(tick);
+    updateDisplay();
+    emit scrubbed(tick);
+}
+
+void ProgramMonitor::notifyScrub()
+{
+    m_scrubPending = true;
+    m_scrubSettleCounter = 15; // re-render for ~240ms to pick up late decodes
+}
+
+void ProgramMonitor::onFitModeChanged(int index)
+{
+    // Apply zoom to whichever viewport is active
+    if (m_gpuDisplay && m_vulkanViewport) {
+        switch (index)
+        {
+        case 0: m_vulkanViewport->resetZoomPan();    break;  // Fit = 1:1 + no pan
+        case 1: m_vulkanViewport->zoomToFill();       break;  // Fill
+        default: {
+            static constexpr float zoomLevels[] = { 0.25f, 0.50f, 0.75f, 1.0f, 1.5f, 2.0f };
+            int zi = index - 2;
+            if (zi >= 0 && zi < static_cast<int>(std::size(zoomLevels)))
+                m_vulkanViewport->setViewZoom(zoomLevels[zi]);
+            break;
+        }
+        }
+    } else {
+        switch (index)
+        {
+        case 0: m_viewport->setFitMode(ViewportFitMode::Fit);    break;
+        case 1: m_viewport->setFitMode(ViewportFitMode::Fill);   break;
+        default: {
+            static constexpr float zoomLevels[] = { 0.25f, 0.50f, 0.75f, 1.0f, 1.5f, 2.0f };
+            int zi = index - 2;
+            if (zi >= 0 && zi < static_cast<int>(std::size(zoomLevels))) {
+                m_viewport->setFitMode(ViewportFitMode::Actual);
+                m_viewport->setViewZoom(zoomLevels[zi]);
+            }
+            break;
+        }
+        }
+        if (index <= 1)
+            m_viewport->resetZoomPan();
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Internal display update
+// ═════════════════════════════════════════════════════════════════════════════
+
+void ProgramMonitor::updateDisplay()
+{
+    if (!m_controller) return;
+
+    const bool playing = m_controller->isPlaying();
+    const bool asyncPipeline = usesAsyncPipelinePath();
+    int64_t tick = m_controller->currentTick();
+
+    // ── Wall-clock tick during playback ─────────────────────────────
+    // During playback, derive the display tick from steady_clock
+    // elapsed time instead of the AVSyncClock.  This matches the
+    // Source Monitor architecture (which stays perfectly in sync).
+    // Audio also advances at real-time from the same start-point,
+    // so both audio and video stay locked together.
+    if (playing && !asyncPipeline) {
+        // Determine effective playback speed (shuttle may be 2x/4x/etc.).
+        double speed = m_controller->shuttleSpeed();
+        if (speed == 0.0) speed = 1.0;
+
+        if (!m_wallClockActive || speed != m_wallClockSpeed) {
+            // (Re-)anchor whenever playback starts OR speed changes,
+            // so elapsed-time extrapolation uses the correct speed.
+            m_wallClockActive    = true;
+            m_wallClockStart     = std::chrono::steady_clock::now();
+            m_wallClockStartTick = tick;   // snapshot controller tick
+            m_wallClockSpeed     = speed;
+            m_wallClockFrameCount = 0;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        const double elapsedSec =
+            std::chrono::duration<double>(now - m_wallClockStart).count();
+        tick = m_wallClockStartTick
+             + static_cast<int64_t>(elapsedSec * 48000.0 * m_wallClockSpeed);
+
+        // Periodically re-anchor wall clock to audio clock to prevent
+        // long-term drift (steady_clock vs audio device clock).
+        ++m_wallClockFrameCount;
+        if (m_wallClockFrameCount >= 30) { // every ~0.5 seconds at 60fps poll
+            m_wallClockFrameCount = 0;
+            int64_t audioTick = m_controller->currentTick();
+            int64_t drift = tick - audioTick;
+            constexpr int64_t kDriftThreshold = 48000 / 24; // 1 frame at 24fps
+            if (std::abs(drift) > kDriftThreshold) {
+                m_wallClockStart     = now;
+                m_wallClockStartTick = audioTick;
+                tick = audioTick;
+            }
+        }
+    } else {
+        m_wallClockActive = false;
+    }
+
+    // ── Lightweight UI updates (always, regardless of mode) ──────────
+    m_miniTimeline->setPlayhead(tick);
+
+    if (m_timeline) {
+        m_miniTimeline->setDuration(m_timeline->duration());
+
+        // Keep timeline playhead in sync during playback so that the
+        // timeline ruler, loop bounds, and auto-stop all work correctly.
+        if (playing && tick != m_timeline->playheadPosition())
+            m_timeline->setPlayheadPosition(tick);
+    }
+
+    if (m_btnPlayPause) {
+        m_btnPlayPause->setText(playing ? QStringLiteral("\u23F8") : QStringLiteral("\u25B6"));
+    }
+
+    auto updateShuttleLabel = [this, playing]() {
+        if (!m_shuttleSpeedLabel || !m_controller)
+            return;
+
+        const double speed = m_controller->shuttleSpeed();
+        if (playing && speed != 0.0 && speed != 1.0) {
+            QString speedText;
+            if (speed == static_cast<int>(speed))
+                speedText = QStringLiteral("%1x").arg(static_cast<int>(speed));
+            else
+                speedText = QStringLiteral("%1x").arg(speed, 0, 'g', 2);
+            m_shuttleSpeedLabel->setText(speedText);
+            m_shuttleSpeedLabel->show();
+        } else {
+            m_shuttleSpeedLabel->hide();
+        }
+    };
+
+    // ── During playback: direct composite + present on UI thread ────
+    // Composite the frame for the CURRENT wall-clock tick and display
+    // it immediately — zero pipeline latency.
+    //
+    // compositeFrame with playbackNonBlocking=true uses only tryGetFrame
+    // (non-blocking), so this won't stall the UI thread.
+    if (playing) {
+        const double fps = m_controller->frameRate();
+        if (m_pool && fps > 0.0)
+            m_pool->setProjectFps(fps);
+
+        // Keep poll rate at 16ms for smooth frame updates during playback
+        if (m_pollTimer->interval() != 16)
+            m_pollTimer->setInterval(16);
+
+        if (asyncPipeline) {
+            ensurePipelineStarted();
+            updateTimecodeDisplay();
+            updateShuttleLabel();
+            return;
+        }
+
+        if (m_compositeCallback) {
+            uint32_t vpW = m_outputWidth  / static_cast<uint32_t>(m_playbackResDivisor);
+            uint32_t vpH = m_outputHeight / static_cast<uint32_t>(m_playbackResDivisor);
+            vpW = std::clamp(vpW, 64u, 3840u);
+            vpH = std::clamp(vpH, 36u, 2160u);
+
+            auto compT0 = std::chrono::steady_clock::now();
+            auto frame = m_compositeCallback(tick, vpW, vpH, /*scrubMode=*/false);
+            double compMs = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - compT0).count();
+
+            if (frame && frame->width > 0) {
+                auto presT0 = std::chrono::steady_clock::now();
+                presentFrame(frame);
+                double presMs = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - presT0).count();
+
+                if (compMs + presMs > 12.0) {
+                    spdlog::info("[PERF] updateDisplay(play): composite={:.1f}ms  present={:.1f}ms  total={:.1f}ms  res={}x{}",
+                                 compMs, presMs, compMs + presMs, vpW, vpH);
+                }
+
+                emit frameDisplayed(tick);
+            } else if (frame && frame->width == 0) {
+                presentFrame(frame);  // clear stale viewport contents
+            }
+        }
+
+        updateTimecodeDisplay();
+        updateShuttleLabel();
+        return;
+    }
+
+    // ── Not playing: restore fast poll rate for responsive scrubbing ──
+    if (m_pollTimer->interval() != 16)
+        m_pollTimer->setInterval(16);
+    m_lastRenderedFrame = -1;
+
+    // Handle scrub debounce
+    if (m_scrubPending) {
+        m_scrubPending = false;
+        m_isScrubbing = true;
+        m_lastRenderedTick = -1;  // force re-render immediately
+    }
+
+    // Post-scrub settle: keep re-rendering to pick up late prefetch frames.
+    // Without this, the tick-dedup below blocks re-render and the stale
+    // frame returned during fast scrubbing persists after the user stops.
+    if (m_scrubSettleCounter > 0) {
+        --m_scrubSettleCounter;
+        m_lastRenderedTick = -1; // force re-render every cycle during settle
+        m_isScrubbing = true;    // keep using blocking getFrame during settle
+
+        // When scrub settle expires, transition to an edit-settle window
+        // so the frame is re-rendered at full (non-halved) resolution.
+        if (m_scrubSettleCounter == 0 && m_editSettleCounter == 0)
+            m_editSettleCounter = 5;
+    }
+
+    // Post-edit settle: same re-render forcing but at FULL resolution.
+    // Edit settle doesn't set m_isScrubbing, so the normal (non-halved)
+    // resolution divisor is used and compositeFrame gets scrubMode=true
+    // to bypass the LRU cache.
+    bool editSettleActive = false;
+    if (m_editSettleCounter > 0) {
+        --m_editSettleCounter;
+        m_lastRenderedTick = -1; // force re-render every cycle during settle
+        editSettleActive = true;
+    }
+
+    // Skip if tick hasn't changed (paused dedup)
+    if (tick == m_lastRenderedTick) {
+        m_isScrubbing = false;
+        updateTimecodeDisplay();
+        updateShuttleLabel();
+        return;
+    }
+    m_lastRenderedTick = tick;
+
+    // ── SYNC PATH: scrub / seek / paused ─────────────────────────────
+    if (m_compositeCallback) {
+        const int resDivisor = m_isScrubbing
+            ? std::min(m_playbackResDivisor * 2, 8)
+            : m_playbackResDivisor;
+        uint32_t vpW = m_outputWidth  / static_cast<uint32_t>(resDivisor);
+        uint32_t vpH = m_outputHeight / static_cast<uint32_t>(resDivisor);
+        vpW = std::clamp(vpW, 64u, 3840u);
+        vpH = std::clamp(vpH, 36u, 2160u);
+        // Edit settle uses scrub=true for blocking decode + LRU bypass,
+        // but full resolution (m_isScrubbing stays false above).
+        const bool useScrub = m_isScrubbing || editSettleActive;
+
+        if (asyncPipeline) {
+            ensurePipelineStarted();
+            if (m_pipeline)
+                m_pipeline->requestFrame(tick, vpW, vpH, useScrub);
+        } else {
+            auto frame = m_compositeCallback(tick, vpW, vpH, useScrub);
+            if (frame) {
+                presentFrame(frame);
+                if (frame->width > 0)
+                    emit frameDisplayed(tick);
+            }
+        }
+    }
+
+    m_isScrubbing = false;
+    updateTimecodeDisplay();
+    updateShuttleLabel();
+}
+
+void ProgramMonitor::updateTimecodeDisplay()
+{
+    if (!m_controller) return;
+
+    std::string tc = m_controller->currentTimecodeString();
+    m_timecodeLabel->setText(QString::fromStdString(tc));
+
+    // Update duration timecode
+    if (m_durationLabel) {
+        auto dur = tickToTimecode(m_controller->durationTicks(),
+                                  m_controller->frameRate());
+        m_durationLabel->setText(QString::fromStdString(dur.toString()));
+    }
+}
+
+void ProgramMonitor::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+
+    if (!m_firstShowDone) {
+        m_firstShowDone = true;
+        // Defer additional setup until the event loop settles so the
+        // VulkanViewport has its swapchain and HWNDs fully created.
+        QTimer::singleShot(50, this, [this]() {
+            syncOverlayGeometry();
+            refresh();
+        });
+    }
+}
+
+void ProgramMonitor::keyPressEvent(QKeyEvent* event)
+{
+    const int key = event->key();
+    const auto mod = event->modifiers();
+    const bool noMod = (mod == Qt::NoModifier);
+
+    if (noMod && key == Qt::Key_I) {
+        emit inPointRequested();
+        event->accept();
+        return;
+    }
+    if (noMod && key == Qt::Key_O) {
+        emit outPointRequested();
+        event->accept();
+        return;
+    }
+    // Space, J, K, L — forward transport keys to TimelineWorkspace
+    if (noMod && (key == Qt::Key_Space || key == Qt::Key_J ||
+                  key == Qt::Key_K || key == Qt::Key_L)) {
+        event->ignore();
+        return;
+    }
+
+    QWidget::keyPressEvent(event);
+}
+
+bool ProgramMonitor::eventFilter(QObject* obj, QEvent* event)
+{
+    // When the user clicks inside any child widget, grab focus for keyboard.
+    if (event->type() == QEvent::MouseButtonPress ||
+        event->type() == QEvent::MouseButtonDblClick) {
+        // Timecode label click → show editable timecode entry
+        if (obj == m_timecodeLabel && event->type() == QEvent::MouseButtonPress) {
+            m_timecodeLabel->hide();
+            m_timecodeEdit->setText(m_timecodeLabel->text());
+            m_timecodeEdit->show();
+            m_timecodeEdit->setFocus();
+            m_timecodeEdit->selectAll();
+            return true;
+        }
+        setFocus();
+    }
+    // Intercept key events from children to handle I/O shortcuts.
+    if (event->type() == QEvent::KeyPress) {
+        auto* ke = static_cast<QKeyEvent*>(event);
+        if (ke->modifiers() == Qt::NoModifier) {
+            if (ke->key() == Qt::Key_I) {
+                emit inPointRequested();
+                return true;
+            }
+            if (ke->key() == Qt::Key_O) {
+                emit outPointRequested();
+                return true;
+            }
+        }
+    }
+    return QWidget::eventFilter(obj, event);
+}
+
+void ProgramMonitor::syncOverlayGeometry()
+{
+    if (!m_vulkanViewport)
+        return;
+
+    const bool hasOverlay = (m_transformOverlay != nullptr);
+
+#ifdef _WIN32
+    QWindow* nw = m_vulkanViewport->nativeWindow();
+    HWND nativeHwnd = nw ? reinterpret_cast<HWND>(nw->winId()) : nullptr;
+#endif
+
+    // Hide overlay when the viewport is not visible (e.g. tab switched)
+    if (!m_vulkanViewport->isVisible()) {
+        if (hasOverlay && m_transformOverlay->isVisible())
+            m_transformOverlay->hide();
+#ifdef _WIN32
+        // Prevent the native Vulkan child from bleeding over sibling widgets
+        // while this panel is hidden/tabbed out.
+        if (nativeHwnd) {
+            HRGN emptyRgn = CreateRectRgn(0, 0, 0, 0);
+            SetWindowRgn(nativeHwnd, emptyRgn, TRUE);
+            // Windows takes ownership of emptyRgn.
+        }
+#endif
+        return;
+    }
+
+    // Always anchor geometry to the Qt viewport widget rect; this is the
+    // logical preview area inside Program Monitor and remains stable across
+    // tab/dock regrouping. Native HWND rects can transiently report stale
+    // sizes/positions and overdraw controls if trusted directly.
+    const QPoint vpGlobal = m_vulkanViewport->mapToGlobal(QPoint(0, 0));
+    const QRect vpWidgetRect(vpGlobal, m_vulkanViewport->size());
+
+    QPoint panelGlobal = mapToGlobal(QPoint(0, 0));
+    QRect  panelRect(panelGlobal, size());
+
+    QRect  desired = vpWidgetRect.intersected(panelRect);
+    if (desired.isEmpty()) {
+        if (hasOverlay && m_transformOverlay->isVisible())
+            m_transformOverlay->hide();
+        return;
+    }
+
+    // Tell the overlay how much the clipping shifted it relative to the
+    // viewport's origin, so computeFrameRect() uses the viewport's full
+    // dimensions with the correct origin offset.
+    if (hasOverlay) {
+        QPoint vpOffset(desired.left() - vpWidgetRect.left(),
+                        desired.top()  - vpWidgetRect.top());
+        m_transformOverlay->setViewportOffset(vpOffset);
+    }
+
+    if (hasOverlay && m_transformOverlay->geometry() != desired)
+        m_transformOverlay->setGeometry(desired);
+
+    if (hasOverlay && !m_transformOverlay->isVisible())
+        m_transformOverlay->show();
+
+#ifdef _WIN32
+    // The native Vulkan QWindow HWND from createWindowContainer() renders
+    // above all regular Qt widgets.  The TransformOverlayWidget is a
+    // top-level Qt::Tool window, but Windows may still place the embedded
+    // native HWND visually on top of it.  Use SetWindowPos to explicitly
+    // keep the overlay above the Vulkan surface so QPainter-rendered
+    // transform handles, safe-area guides, and grid are visible.
+    {
+        if (hasOverlay) {
+            HWND overlayHwnd = reinterpret_cast<HWND>(m_transformOverlay->winId());
+            if (overlayHwnd)
+                SetWindowPos(overlayHwnd, HWND_TOP, 0, 0, 0, 0,
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+    }
+
+    // Clip the native Vulkan QWindow HWND so it can't paint outside the
+    // ProgramMonitor panel area.  createWindowContainer() embeds a native
+    // HWND that ignores Qt widget clipping, so we must constrain it
+    // manually via SetWindowRgn.
+    if (nativeHwnd) {
+        // Get the native window's screen position.
+        RECT nativeScreenRect;
+        GetWindowRect(nativeHwnd, &nativeScreenRect);
+
+        // Clip to the *visible viewport rect* (desired), not the whole panel.
+        // This ensures the native Vulkan child can never overdraw Program
+        // Monitor controls (control bar, mini timeline, transport bar).
+        int clipLeft   = std::max(0, (int)(desired.left()   - nativeScreenRect.left));
+        int clipTop    = std::max(0, (int)(desired.top()    - nativeScreenRect.top));
+        int clipRight  = std::min((int)(nativeScreenRect.right - nativeScreenRect.left),
+                                 (int)(desired.right()  - nativeScreenRect.left));
+        int clipBottom = std::min((int)(nativeScreenRect.bottom - nativeScreenRect.top),
+                                 (int)(desired.bottom() - nativeScreenRect.top));
+
+        if (clipRight > clipLeft && clipBottom > clipTop) {
+            HRGN rgn = CreateRectRgn(clipLeft, clipTop, clipRight, clipBottom);
+            SetWindowRgn(nativeHwnd, rgn, TRUE);
+            // Windows takes ownership of rgn.
+        } else {
+            HRGN emptyRgn = CreateRectRgn(0, 0, 0, 0);
+            SetWindowRgn(nativeHwnd, emptyRgn, TRUE);
+            // Windows takes ownership of emptyRgn.
+        }
+    }
+#endif
+}
+
+
+} // namespace rt

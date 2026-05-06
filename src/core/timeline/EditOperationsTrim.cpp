@@ -1,0 +1,679 @@
+/*
+ * EditOperationsTrim.cpp -- split, trim, rolling, ripple, slip, slide.
+ *
+ * Split from EditOperations.cpp for maintainability.
+ */
+
+#include "timeline/EditOperations.h"
+
+#include "timeline/Timeline.h"
+#include "timeline/Track.h"
+#include "timeline/Clip.h"
+#include "timeline/VideoClip.h"
+#include "timeline/AudioClip.h"
+#include "timeline/ImageClip.h"
+#include "timeline/SpineClip.h"
+#include "command/Command.h"
+#include "command/CompoundCommand.h"
+#include "command/commands/ClipCommands.h"
+
+#include <algorithm>
+#include <atomic>
+#include <cmath>
+#include <limits>
+#include <unordered_map>
+#include <unordered_set>
+#include <spdlog/spdlog.h>
+
+namespace rt {
+
+// Returns true if the media path has a still-image extension. Such "videos"
+// are really single frames and should be trim-able to any duration (Premiere-style).
+static bool isStillImageMediaPath(const std::string& path)
+{
+    auto pos = path.find_last_of('.');
+    if (pos == std::string::npos) return false;
+    std::string ext = path.substr(pos + 1);
+    for (auto& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return ext == "png"  || ext == "jpg"  || ext == "jpeg" || ext == "bmp" ||
+           ext == "gif"  || ext == "tif"  || ext == "tiff" || ext == "webp" ||
+           ext == "tga"  || ext == "dds";
+}
+
+// ─── Split ───────────────────────────────────────────────────────────────────
+
+/// Thread-safe unique group-ID generator (shared across all split operations).
+static uint64_t nextSplitGroupId()
+{
+    static std::atomic<uint64_t> s_counter{0x8000'0000'0000'0000ULL}; // high bit avoids AudioSync range
+    return s_counter.fetch_add(1, std::memory_order_relaxed);
+}
+
+std::unique_ptr<Command> EditOperations::splitClip(
+    Timeline& timeline, size_t trackIndex, uint64_t clipId, int64_t splitTime)
+{
+    return splitClipInternal(timeline, trackIndex, clipId, splitTime, nullptr);
+}
+
+std::unique_ptr<Command> EditOperations::splitClipInternal(
+    Timeline& timeline, size_t trackIndex, uint64_t clipId, int64_t splitTime,
+    std::unordered_map<uint64_t, uint64_t>* groupRemap)
+{
+    if (trackIndex >= timeline.trackCount())
+        return nullptr;
+
+    Track* track = timeline.track(trackIndex);
+    size_t idx = track->findClipIndexById(clipId);
+    if (idx == track->clipCount())
+        return nullptr;
+
+    const Clip* clip = track->clip(idx);
+
+    // Split must be within the clip
+    if (splitTime <= clip->timelineIn() || splitTime >= clip->timelineOut())
+        return nullptr;
+
+    // Duration must be meaningful on both sides
+    int64_t leftDuration  = splitTime - clip->timelineIn();
+    int64_t rightDuration = clip->timelineOut() - splitTime;
+    if (leftDuration < kMinClipDuration || rightDuration < kMinClipDuration)
+        return nullptr;
+
+    auto compound = std::make_unique<CompoundCommand>("Split clip");
+
+    // 1. Trim the original clip to end at splitTime
+    compound->addCommand(std::make_unique<TrimClipCommand>(
+        track, clipId,
+        clip->timelineIn(), leftDuration, clip->sourceIn()));
+
+    // 2. Clone the clip for the right half
+    auto rightClip = clip->clone();
+    rightClip->setTimelineIn(splitTime);
+    rightClip->setDuration(rightDuration);
+    rightClip->setSourceIn(clip->sourceIn() + leftDuration);
+    rightClip->setLabel(clip->label());
+
+    // Assign a new unique group ID so the right half is independently
+    // switchable.  When splitting multiple clips from the same group
+    // (splitAllAtPlayhead), the groupRemap map ensures all right halves
+    // sharing an old group get the SAME new group ID.
+    if (rightClip->groupId() != 0) {
+        uint64_t oldGid = rightClip->groupId();
+        uint64_t newGid = 0;
+        if (groupRemap) {
+            auto it = groupRemap->find(oldGid);
+            if (it != groupRemap->end()) {
+                newGid = it->second;
+            } else {
+                newGid = nextSplitGroupId();
+                (*groupRemap)[oldGid] = newGid;
+            }
+        } else {
+            newGid = nextSplitGroupId();
+        }
+        rightClip->setGroupId(newGid);
+    }
+
+    compound->addCommand(std::make_unique<AddClipCommand>(track, std::move(rightClip)));
+
+    return compound;
+}
+
+std::unique_ptr<Command> EditOperations::splitAllAtPlayhead(
+    Timeline& timeline, int64_t playhead)
+{
+    auto compound = std::make_unique<CompoundCommand>("Split all at playhead");
+    bool anyAdded = false;
+
+    // Share a remap table so clips from the same group get the same new group ID
+    std::unordered_map<uint64_t, uint64_t> groupRemap;
+
+    for (size_t ti = 0; ti < timeline.trackCount(); ++ti)
+    {
+        Track* track = timeline.track(ti);
+        if (track->isLocked()) continue;
+
+        for (size_t ci = 0; ci < track->clipCount(); ++ci)
+        {
+            const Clip* clip = track->clip(ci);
+            if (playhead > clip->timelineIn() && playhead < clip->timelineOut())
+            {
+                auto splitCmd = splitClipInternal(timeline, ti, clip->id(), playhead, &groupRemap);
+                if (splitCmd)
+                {
+                    compound->addCommand(std::move(splitCmd));
+                    anyAdded = true;
+                }
+            }
+        }
+    }
+
+    return anyAdded ? std::move(compound) : nullptr;
+}
+
+// ─── Trim ────────────────────────────────────────────────────────────────────
+
+std::unique_ptr<Command> EditOperations::trimClip(
+    Timeline& timeline, size_t trackIndex, uint64_t clipId,
+    ClipEdge edge, int64_t newEdgeTime)
+{
+    if (trackIndex >= timeline.trackCount())
+        return nullptr;
+
+    Track* track = timeline.track(trackIndex);
+    size_t idx = track->findClipIndexById(clipId);
+    if (idx == track->clipCount())
+        return nullptr;
+
+    const Clip* clip = track->clip(idx);
+
+    // Looping/unbounded clips (Spine character animations, video characters,
+    // graphic-layer/still-image "videos", and image clips) can be extended in
+    // either direction because they loop or hold a single frame. For these we
+    // skip sourceIn>=0 / source-extent clamps so the user can drag the head
+    // edge backwards past tick 0 of the source.
+    auto isLoopingClip = [](const Clip* c) -> bool {
+        if (auto* vc = dynamic_cast<const VideoClip*>(c))
+            return vc->isVideoCharacter() || isStillImageMediaPath(vc->mediaPath());
+        if (dynamic_cast<const ImageClip*>(c)) return true;
+        if (dynamic_cast<const SpineClip*>(c)) return true;
+        return false;
+    };
+    const bool looping = isLoopingClip(clip);
+
+    int64_t newIn = clip->timelineIn();
+    int64_t newDuration = clip->duration();
+    int64_t newSourceIn = clip->sourceIn();
+
+    if (edge == ClipEdge::Head)
+    {
+        // Moving the in-point: adjust timelineIn, sourceIn, and duration
+        int64_t delta = newEdgeTime - clip->timelineIn();
+        newIn       = newEdgeTime;
+        newSourceIn = clip->sourceIn() + delta;
+        newDuration = clip->duration() - delta;
+
+        // Clamp minimum duration
+        if (newDuration < kMinClipDuration)
+        {
+            newDuration = kMinClipDuration;
+            newIn       = clip->timelineOut() - kMinClipDuration;
+            newSourceIn = clip->sourceIn() + (clip->duration() - kMinClipDuration);
+        }
+        // Don't allow timeline to go negative.
+        if (newIn < 0)
+        {
+            int64_t correction = -newIn;
+            newIn       = 0;
+            newSourceIn += correction;
+            newDuration -= correction;
+            if (newDuration < kMinClipDuration)
+                newDuration = kMinClipDuration;
+        }
+        // For non-looping media, also clamp sourceIn so we don't read before
+        // the start of the source. Looping clips intentionally allow negative
+        // sourceIn (the playback layer wraps modulo source duration).
+        if (!looping && newSourceIn < 0)
+        {
+            int64_t correction = -newSourceIn;
+            newSourceIn = 0;
+            newIn       += correction;
+            newDuration -= correction;
+            if (newDuration < kMinClipDuration)
+                newDuration = kMinClipDuration;
+        }
+    }
+    else // Tail
+    {
+        newDuration = newEdgeTime - clip->timelineIn();
+        if (newDuration < kMinClipDuration)
+            newDuration = kMinClipDuration;
+
+        // Clamp to source media extent for non-looping clips.
+        // sourceDuration == 0 means unknown/unlimited (e.g. SpineClip loops).
+        // Still-image "videos" (.png/.jpg/...) are also unbounded.
+        int64_t srcDur = 0;
+        if (auto* vc = dynamic_cast<const VideoClip*>(clip)) {
+            if (!vc->isVideoCharacter() && !isStillImageMediaPath(vc->mediaPath()))
+                srcDur = vc->sourceDuration();
+        } else if (auto* ac = dynamic_cast<const AudioClip*>(clip)) {
+            srcDur = ac->sourceDuration();
+        }
+        if (srcDur > 0) {
+            int64_t maxDur = srcDur - newSourceIn;
+            if (maxDur < kMinClipDuration) maxDur = kMinClipDuration;
+            if (newDuration > maxDur) {
+                spdlog::info("DIAG-TRIM tail clamp: clipId={} srcDur={} ({:.3f}s) sourceIn={} "
+                             "requested={} ({:.3f}s) clamped={} ({:.3f}s)",
+                             clipId, srcDur, srcDur/48000.0, newSourceIn,
+                             newDuration, newDuration/48000.0, maxDur, maxDur/48000.0);
+                newDuration = maxDur;
+            }
+        }
+    }
+
+    return std::make_unique<TrimClipCommand>(
+        track, clipId, newIn, newDuration, newSourceIn);
+}
+
+// ─── Rolling Edit ────────────────────────────────────────────────────────────
+
+std::unique_ptr<Command> EditOperations::rollingEdit(
+    Timeline& timeline, size_t trackIndex,
+    uint64_t leftClipId, uint64_t rightClipId, int64_t newEditPoint)
+{
+    if (trackIndex >= timeline.trackCount())
+        return nullptr;
+
+    Track* track = timeline.track(trackIndex);
+
+    size_t li = track->findClipIndexById(leftClipId);
+    size_t ri = track->findClipIndexById(rightClipId);
+    if (li == track->clipCount() || ri == track->clipCount())
+        return nullptr;
+
+    const Clip* leftClip  = track->clip(li);
+    const Clip* rightClip = track->clip(ri);
+
+    // Clamp: left clip can't be shorter than minimum
+    int64_t leftNewDuration = newEditPoint - leftClip->timelineIn();
+    if (leftNewDuration < kMinClipDuration)
+    {
+        newEditPoint = leftClip->timelineIn() + kMinClipDuration;
+        leftNewDuration = kMinClipDuration;
+    }
+
+    // Clamp left clip tail to source media extent (non-looping clips)
+    {
+        int64_t srcDur = 0;
+        if (auto* vc = dynamic_cast<const VideoClip*>(leftClip)) {
+            if (!vc->isVideoCharacter())
+                srcDur = vc->sourceDuration();
+        } else if (auto* ac = dynamic_cast<const AudioClip*>(leftClip)) {
+            srcDur = ac->sourceDuration();
+        }
+        if (srcDur > 0) {
+            int64_t maxDur = srcDur - leftClip->sourceIn();
+            if (maxDur < kMinClipDuration) maxDur = kMinClipDuration;
+            if (leftNewDuration > maxDur) {
+                leftNewDuration = maxDur;
+                newEditPoint = leftClip->timelineIn() + leftNewDuration;
+            }
+        }
+    }
+
+    // Right clip can't be shorter than minimum
+    int64_t rightNewDuration = rightClip->timelineOut() - newEditPoint;
+    if (rightNewDuration < kMinClipDuration)
+    {
+        newEditPoint = rightClip->timelineOut() - kMinClipDuration;
+        leftNewDuration = newEditPoint - leftClip->timelineIn();
+        rightNewDuration = kMinClipDuration;
+    }
+
+    int64_t rightSourceDelta = newEditPoint - rightClip->timelineIn();
+
+    auto compound = std::make_unique<CompoundCommand>("Rolling edit");
+
+    // Trim left clip tail
+    compound->addCommand(std::make_unique<TrimClipCommand>(
+        track, leftClipId,
+        leftClip->timelineIn(), leftNewDuration, leftClip->sourceIn()));
+
+    // Trim right clip head
+    compound->addCommand(std::make_unique<TrimClipCommand>(
+        track, rightClipId,
+        newEditPoint, rightNewDuration,
+        rightClip->sourceIn() + rightSourceDelta));
+
+    return compound;
+}
+
+// ─── Ripple Edit ─────────────────────────────────────────────────────────────
+
+std::unique_ptr<Command> EditOperations::rippleTrim(
+    Timeline& timeline, size_t trackIndex, uint64_t clipId,
+    ClipEdge edge, int64_t newEdgeTime)
+{
+    if (trackIndex >= timeline.trackCount())
+        return nullptr;
+
+    Track* track = timeline.track(trackIndex);
+    size_t idx = track->findClipIndexById(clipId);
+    if (idx == track->clipCount())
+        return nullptr;
+
+    const Clip* clip = track->clip(idx);
+    int64_t oldOut = clip->timelineOut();
+    int64_t oldIn  = clip->timelineIn();
+
+    auto compound = std::make_unique<CompoundCommand>("Ripple trim");
+
+    // First, do the normal trim
+    auto trimCmd = trimClip(timeline, trackIndex, clipId, edge, newEdgeTime);
+    if (!trimCmd) return nullptr;
+    compound->addCommand(std::move(trimCmd));
+
+    // Calculate the ripple delta
+    int64_t rippleDelta = 0;
+    if (edge == ClipEdge::Tail)
+    {
+        int64_t newOut = newEdgeTime;
+        if (newOut - oldIn < kMinClipDuration)
+            newOut = oldIn + kMinClipDuration;
+        rippleDelta = newOut - oldOut;
+    }
+    else
+    {
+        int64_t newIn = newEdgeTime;
+        if (oldOut - newIn < kMinClipDuration)
+            newIn = oldOut - kMinClipDuration;
+        rippleDelta = newIn - oldIn;
+    }
+
+    // Shift all subsequent clips
+    if (rippleDelta != 0)
+    {
+        for (size_t ci = 0; ci < track->clipCount(); ++ci)
+        {
+            const Clip* subsequent = track->clip(ci);
+            if (subsequent->id() == clipId) continue;
+
+            bool isAfter = (edge == ClipEdge::Tail)
+                ? subsequent->timelineIn() >= oldOut
+                : subsequent->timelineIn() > oldIn;
+
+            if (isAfter)
+            {
+                compound->addCommand(std::make_unique<MoveClipCommand>(
+                    track, subsequent->id(),
+                    subsequent->timelineIn() + rippleDelta));
+            }
+        }
+    }
+
+    return compound;
+}
+
+std::unique_ptr<Command> EditOperations::rippleDelete(
+    Timeline& timeline, const SelectionSet& selection)
+{
+    if (selection.empty()) return nullptr;
+
+    auto compound = std::make_unique<CompoundCommand>("Ripple delete");
+
+    // Group by track and sort by position for gap calculation
+    struct ClipInfo {
+        size_t trackIndex;
+        uint64_t clipId;
+        int64_t timelineIn;
+        int64_t duration;
+    };
+
+    std::vector<ClipInfo> toRemove;
+    for (const auto& ref : selection.clips())
+    {
+        if (ref.trackIndex >= timeline.trackCount()) continue;
+        const Track* track = timeline.track(ref.trackIndex);
+        size_t idx = track->findClipIndexById(ref.clipId);
+        if (idx == track->clipCount()) continue;
+        const Clip* clip = track->clip(idx);
+        toRemove.push_back({ref.trackIndex, ref.clipId,
+                           clip->timelineIn(), clip->duration()});
+    }
+
+    // Sort by track, then by timeline position (descending for safe removal)
+    std::sort(toRemove.begin(), toRemove.end(),
+              [](const ClipInfo& a, const ClipInfo& b)
+              {
+                  if (a.trackIndex != b.trackIndex) return a.trackIndex < b.trackIndex;
+                  return a.timelineIn > b.timelineIn;
+              });
+
+    // Process each track
+    size_t currentTrack = SIZE_MAX;
+    int64_t totalGap = 0;
+
+    for (const auto& info : toRemove)
+    {
+        if (info.trackIndex != currentTrack)
+        {
+            currentTrack = info.trackIndex;
+            totalGap = 0;
+        }
+
+        Track* track = timeline.track(info.trackIndex);
+
+        // Remove the clip
+        compound->addCommand(std::make_unique<RemoveClipCommand>(
+            track, info.clipId));
+
+        totalGap += info.duration;
+    }
+
+    // Shift subsequent clips to close gaps (per track)
+    // Re-process from left to right
+    std::sort(toRemove.begin(), toRemove.end(),
+              [](const ClipInfo& a, const ClipInfo& b)
+              {
+                  if (a.trackIndex != b.trackIndex) return a.trackIndex < b.trackIndex;
+                  return a.timelineIn < b.timelineIn;
+              });
+
+    // Collect per-track ripple info: earliest edit point and total gap
+    struct TrackRipple {
+        int64_t earliestEdit{INT64_MAX};
+        int64_t totalGap{0};
+    };
+    std::unordered_map<size_t, TrackRipple> trackRipples;
+
+    currentTrack = SIZE_MAX;
+    int64_t accumulatedGap = 0;
+
+    // Build O(1) lookup for removed clip IDs
+    std::unordered_set<uint64_t> removedIds;
+    removedIds.reserve(toRemove.size());
+    for (const auto& info : toRemove)
+        removedIds.insert(info.clipId);
+
+    for (const auto& info : toRemove)
+    {
+        if (info.trackIndex != currentTrack)
+        {
+            currentTrack = info.trackIndex;
+            accumulatedGap = 0;
+        }
+
+        accumulatedGap += info.duration;
+        Track* track = timeline.track(info.trackIndex);
+
+        auto& rip = trackRipples[info.trackIndex];
+        rip.earliestEdit = std::min(rip.earliestEdit, info.timelineIn);
+        rip.totalGap = accumulatedGap;
+
+        // Shift all clips after this one by the accumulated gap
+        for (size_t ci = 0; ci < track->clipCount(); ++ci)
+        {
+            const Clip* clip = track->clip(ci);
+            if (removedIds.find(clip->id()) == removedIds.end() &&
+                clip->timelineIn() > info.timelineIn)
+            {
+                compound->addCommand(std::make_unique<MoveClipCommand>(
+                    track, clip->id(),
+                    clip->timelineIn() - accumulatedGap));
+            }
+        }
+    }
+
+    // Sync Lock: shift clips on other sync-locked tracks by the same gap
+    for (const auto& [editedTrackIdx, rip] : trackRipples)
+    {
+        for (size_t ti = 0; ti < timeline.trackCount(); ++ti)
+        {
+            if (ti == editedTrackIdx) continue;
+            Track* otherTrack = timeline.track(ti);
+            if (!otherTrack->isSyncLocked()) continue;
+
+            for (size_t ci = 0; ci < otherTrack->clipCount(); ++ci)
+            {
+                const Clip* clip = otherTrack->clip(ci);
+                if (clip->timelineIn() >= rip.earliestEdit)
+                {
+                    int64_t newPos = clip->timelineIn() - rip.totalGap;
+                    if (newPos < 0) newPos = 0;
+                    compound->addCommand(std::make_unique<MoveClipCommand>(
+                        otherTrack, clip->id(), newPos));
+                }
+            }
+        }
+    }
+
+    return compound;
+}
+
+// ─── Close Gap ───────────────────────────────────────────────────────────────
+
+std::unique_ptr<Command> EditOperations::closeGap(
+    Timeline& timeline, size_t trackIndex,
+    int64_t gapStart, int64_t gapEnd)
+{
+    if (trackIndex >= timeline.trackCount() || gapEnd <= gapStart)
+        return nullptr;
+
+    int64_t gapDuration = gapEnd - gapStart;
+    auto compound = std::make_unique<CompoundCommand>("Close gap");
+    bool anyMoved = false;
+
+    Track* track = timeline.track(trackIndex);
+    for (size_t ci = 0; ci < track->clipCount(); ++ci) {
+        const Clip* clip = track->clip(ci);
+        if (clip->timelineIn() >= gapEnd) {
+            compound->addCommand(std::make_unique<MoveClipCommand>(
+                track, clip->id(), clip->timelineIn() - gapDuration));
+            anyMoved = true;
+        }
+    }
+
+    // Also shift clips on sync-locked tracks
+    for (size_t ti = 0; ti < timeline.trackCount(); ++ti) {
+        if (ti == trackIndex) continue;
+        Track* otherTrack = timeline.track(ti);
+        if (!otherTrack->isSyncLocked()) continue;
+
+        for (size_t ci = 0; ci < otherTrack->clipCount(); ++ci) {
+            const Clip* clip = otherTrack->clip(ci);
+            if (clip->timelineIn() >= gapEnd) {
+                int64_t newPos = clip->timelineIn() - gapDuration;
+                if (newPos < 0) newPos = 0;
+                compound->addCommand(std::make_unique<MoveClipCommand>(
+                    otherTrack, clip->id(), newPos));
+                anyMoved = true;
+            }
+        }
+    }
+
+    return anyMoved ? std::move(compound) : nullptr;
+}
+
+// ─── Slip ────────────────────────────────────────────────────────────────────
+
+std::unique_ptr<Command> EditOperations::slipClip(
+    Timeline& timeline, size_t trackIndex, uint64_t clipId,
+    int64_t sourceInDelta)
+{
+    if (trackIndex >= timeline.trackCount())
+        return nullptr;
+
+    Track* track = timeline.track(trackIndex);
+    size_t idx = track->findClipIndexById(clipId);
+    if (idx == track->clipCount())
+        return nullptr;
+
+    const Clip* clip = track->clip(idx);
+    int64_t newSourceIn = clip->sourceIn() + sourceInDelta;
+
+    // Clamp sourceIn to non-negative
+    if (newSourceIn < 0) newSourceIn = 0;
+
+    // Clamp sourceIn so sourceOut doesn't exceed source media extent
+    int64_t srcDur = 0;
+    if (auto* vc = dynamic_cast<const VideoClip*>(clip)) {
+        if (!vc->isVideoCharacter())
+            srcDur = vc->sourceDuration();
+    } else if (auto* ac = dynamic_cast<const AudioClip*>(clip)) {
+        srcDur = ac->sourceDuration();
+    }
+    if (srcDur > 0) {
+        int64_t maxSourceIn = srcDur - clip->duration();
+        if (maxSourceIn < 0) maxSourceIn = 0;
+        if (newSourceIn > maxSourceIn)
+            newSourceIn = maxSourceIn;
+    }
+
+    // Only change the sourceIn, not the timeline position or duration
+    return std::make_unique<TrimClipCommand>(
+        track, clipId,
+        clip->timelineIn(), clip->duration(), newSourceIn);
+}
+
+// ─── Slide ───────────────────────────────────────────────────────────────────
+
+std::unique_ptr<Command> EditOperations::slideClip(
+    Timeline& timeline, size_t trackIndex, uint64_t clipId,
+    int64_t slideDelta)
+{
+    if (trackIndex >= timeline.trackCount() || slideDelta == 0)
+        return nullptr;
+
+    Track* track = timeline.track(trackIndex);
+    size_t idx = track->findClipIndexById(clipId);
+    if (idx == track->clipCount())
+        return nullptr;
+
+    const Clip* clip = track->clip(idx);
+    auto compound = std::make_unique<CompoundCommand>("Slide clip");
+
+    // Move the clip
+    int64_t newPos = std::max<int64_t>(0, clip->timelineIn() + slideDelta);
+    compound->addCommand(std::make_unique<MoveClipCommand>(
+        track, clipId, newPos));
+
+    // Find neighbor clips and adjust their durations
+    // Left neighbor: clip whose out-point touches our in-point
+    // Right neighbor: clip whose in-point touches our out-point
+    for (size_t ci = 0; ci < track->clipCount(); ++ci)
+    {
+        const Clip* neighbor = track->clip(ci);
+        if (neighbor->id() == clipId) continue;
+
+        // Left neighbor — adjust its tail
+        if (neighbor->timelineOut() == clip->timelineIn())
+        {
+            int64_t newDuration = neighbor->duration() + slideDelta;
+            if (newDuration >= kMinClipDuration)
+            {
+                compound->addCommand(std::make_unique<TrimClipCommand>(
+                    track, neighbor->id(),
+                    neighbor->timelineIn(), newDuration, neighbor->sourceIn()));
+            }
+        }
+
+        // Right neighbor — adjust its head
+        if (neighbor->timelineIn() == clip->timelineOut())
+        {
+            int64_t newIn = neighbor->timelineIn() + slideDelta;
+            int64_t newDuration = neighbor->duration() - slideDelta;
+            int64_t newSourceIn = neighbor->sourceIn() + slideDelta;
+            if (newDuration >= kMinClipDuration && newSourceIn >= 0)
+            {
+                compound->addCommand(std::make_unique<TrimClipCommand>(
+                    track, neighbor->id(),
+                    newIn, newDuration, newSourceIn));
+            }
+        }
+    }
+
+    return compound;
+}
+
+} // namespace rt

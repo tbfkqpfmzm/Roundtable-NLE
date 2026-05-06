@@ -1,0 +1,168 @@
+/*
+ * OverlayMath.cpp — Shared transform overlay math utilities.
+ *
+ * Implementation of free functions declared in OverlayMath.h.
+ */
+
+#include "viewport/OverlayMath.h"
+
+namespace rt {
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Compute overlay corners
+// ═════════════════════════════════════════════════════════════════════════════
+
+void computeOverlayCorners(
+    const TransformOverlayInfo& overlay,
+    float outW, float outH,
+    const QRectF& frameRect,
+    const FrameToWidgetFn& toWidget,
+    QPointF corners[4])
+{
+    constexpr float REF_W = 1920.0f;
+    constexpr float REF_H = 1080.0f;
+
+    // ── Per-layer content-rect mode ─────────────────────────────────────
+    // Replicates renderGraphicClip's QPainter transform exactly:
+    //   translate(outW/2 + posX, outH/2 + posY)
+    //   rotate(rotation)
+    //   scale(scaleX, scaleY)
+    //   translate(-outW/2, -outH/2)
+    // Content rect corners are in pre-transform canvas coordinates.
+    if (overlay.useContentRect &&
+        overlay.contentCanvasW > 0.0f && overlay.contentCanvasH > 0.0f &&
+        outW > 0.0f && outH > 0.0f && !frameRect.isEmpty())
+    {
+        float canvasW = overlay.contentCanvasW;
+        float canvasH = overlay.contentCanvasH;
+        float cx = canvasW * 0.5f;
+        float cy = canvasH * 0.5f;
+        float radians = overlay.rotation * 3.14159265358979f / 180.0f;
+        float cosR = std::cos(radians);
+        float sinR = std::sin(radians);
+
+        // Clip-level (outer) transform
+        float clipRadians = overlay.clipRotation * 3.14159265358979f / 180.0f;
+        float clipCosR = std::cos(clipRadians);
+        float clipSinR = std::sin(clipRadians);
+        float clipPxX = overlay.clipPosX * (canvasW / REF_W);
+        float clipPxY = overlay.clipPosY * (canvasH / REF_H);
+
+        auto fwd = [&](float x, float y) -> QPointF {
+            // Layer transform (inner): same as renderGraphicClip QPainter
+            float dx = overlay.scaleX * (x - cx);
+            float dy = overlay.scaleY * (y - cy);
+            float ox = dx * cosR - dy * sinR + cx + overlay.posX;
+            float oy = dx * sinR + dy * cosR + cy + overlay.posY;
+
+            // Clip-level transform (outer): compositor blitLayerWithTransform
+            float rx = (ox - cx) * overlay.clipScaleX;
+            float ry = (oy - cy) * overlay.clipScaleY;
+            float fx = rx * clipCosR - ry * clipSinR + cx + clipPxX;
+            float fy = rx * clipSinR + ry * clipCosR + cy + clipPxY;
+
+            // Map using canvas dimensions so coordinates in 1920x1080 space
+            // map correctly even if displayed at half resolution.
+            double wx = frameRect.x() + (static_cast<double>(fx) / canvasW) * frameRect.width();
+            double wy = frameRect.y() + (static_cast<double>(fy) / canvasH) * frameRect.height();
+            return QPointF(wx, wy);
+        };
+
+        corners[0] = fwd(overlay.contentL, overlay.contentT);
+        corners[1] = fwd(overlay.contentR, overlay.contentT);
+        corners[2] = fwd(overlay.contentR, overlay.contentB);
+        corners[3] = fwd(overlay.contentL, overlay.contentB);
+        return;
+    }
+
+    // ── Standard mode ───────────────────────────────────────────────────
+    if (overlay.srcW == 0 || overlay.srcH == 0 ||
+        outW <= 0.0f || outH <= 0.0f || frameRect.isEmpty())
+    {
+        for (int i = 0; i < 4; ++i) corners[i] = QPointF(0, 0);
+        return;
+    }
+
+    // Scale positions from reference to output
+    float posXPx = overlay.posX * (outW / REF_W);
+    float posYPx = overlay.posY * (outH / REF_H);
+
+    float cx = outW * 0.5f;
+    float cy = outH * 0.5f;
+
+    float fittedW, fittedH, baseOffX, baseOffY;
+
+    if (overlay.directSize) {
+        // directSize: srcW/srcH are pixel dims in reference space.
+        fittedW = static_cast<float>(overlay.srcW) * (outW / REF_W);
+        fittedH = static_cast<float>(overlay.srcH) * (outH / REF_H);
+        baseOffX = (outW - fittedW) * 0.5f;
+        baseOffY = (outH - fittedH) * 0.5f;
+    } else {
+        float srcW = static_cast<float>(overlay.srcW);
+        float srcH = static_cast<float>(overlay.srcH);
+        float scaleToFitW = outW / srcW;
+        float scaleToFitH = outH / srcH;
+        float fitScale = overlay.containFit
+            ? std::min(scaleToFitW, scaleToFitH)
+            : std::max(scaleToFitW, scaleToFitH);
+
+        fittedW = static_cast<float>(overlay.srcW) * fitScale;
+        fittedH = static_cast<float>(overlay.srcH) * fitScale;
+        baseOffX = (outW - fittedW) * 0.5f;
+        baseOffY = (outH - fittedH) * 0.5f;
+    }
+
+    float radians = overlay.rotation * 3.14159265358979f / 180.0f;
+    float cosR = std::cos(radians);
+    float sinR = std::sin(radians);
+
+    auto forwardXY = [&](float fitX, float fitY) -> QPointF {
+        float rx = (fitX - cx + baseOffX) * overlay.scaleX;
+        float ry = (fitY - cy + baseOffY) * overlay.scaleY;
+        float ox = rx * cosR - ry * sinR + cx + posXPx;
+        float oy = rx * sinR + ry * cosR + cy + posYPx;
+        return toWidget(ox, oy);
+    };
+
+    corners[0] = forwardXY(0.0f,    0.0f);    // top-left
+    corners[1] = forwardXY(fittedW, 0.0f);    // top-right
+    corners[2] = forwardXY(fittedW, fittedH); // bottom-right
+    corners[3] = forwardXY(0.0f,    fittedH); // bottom-left
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Hit testing
+// ═════════════════════════════════════════════════════════════════════════════
+
+int hitTestHandle(const QPointF& widgetPos, const QPointF corners[4])
+{
+    constexpr double HANDLE_RADIUS = 8.0;
+
+    for (int i = 0; i < 4; ++i) {
+        double dx = widgetPos.x() - corners[i].x();
+        double dy = widgetPos.y() - corners[i].y();
+        if (dx * dx + dy * dy <= HANDLE_RADIUS * HANDLE_RADIUS)
+            return i;
+    }
+    return -1;
+}
+
+bool hitTestBody(const QPointF& widgetPos, const QPointF corners[4])
+{
+    auto cross = [](QPointF a, QPointF b, QPointF p) {
+        return (b.x() - a.x()) * (p.y() - a.y()) -
+               (b.y() - a.y()) * (p.x() - a.x());
+    };
+
+    double c0 = cross(corners[0], corners[1], widgetPos);
+    double c1 = cross(corners[1], corners[2], widgetPos);
+    double c2 = cross(corners[2], corners[3], widgetPos);
+    double c3 = cross(corners[3], corners[0], widgetPos);
+
+    bool allPos = (c0 >= 0) && (c1 >= 0) && (c2 >= 0) && (c3 >= 0);
+    bool allNeg = (c0 <= 0) && (c1 <= 0) && (c2 <= 0) && (c3 <= 0);
+    return allPos || allNeg;
+}
+
+} // namespace rt

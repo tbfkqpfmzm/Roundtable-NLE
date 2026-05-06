@@ -1,0 +1,181 @@
+/*
+ * VideoDecoder — FFmpeg-based video decoder with NVDEC hardware acceleration.
+ *
+ * Wraps FFmpeg's demuxer + decoder pipeline. When an NVIDIA GPU is present,
+ * uses CUDA hardware acceleration (AV_HWDEVICE_TYPE_CUDA) for zero-CPU decode.
+ * Falls back to software decode (libavcodec) transparently.
+ *
+ * Thread-safe: all public methods are guarded by a mutex.
+ */
+
+#pragma once
+
+#include <cstdint>
+#include <filesystem>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
+
+struct AVFormatContext;
+struct AVCodecContext;
+struct AVFrame;
+struct AVPacket;
+struct AVBufferRef;
+
+namespace rt {
+
+/// Pixel format of decoded frames
+enum class PixelFormat : uint8_t
+{
+    Unknown,
+    NV12,       // NVDEC native output (Y + interleaved UV)
+    YUV420P,    // Software decode default
+    BGRA,       // Converted for display
+    RGBA,       // Converted for display
+};
+
+/// Information about a decoded video frame
+struct DecodedFrame
+{
+    uint8_t*    data[4]{};      // Plane pointers (Y, U, V, or packed)
+    int         linesize[4]{};  // Bytes per row per plane
+    uint32_t    width{0};
+    uint32_t    height{0};
+    PixelFormat format{PixelFormat::Unknown};
+    int64_t     pts{0};         // Presentation timestamp (in stream timebase)
+    double      timestamp{0.0}; // Presentation timestamp in seconds
+    int64_t     frameIndex{0};  // Sequential frame number
+    bool        isKeyframe{false};
+    bool        isHardware{false}; // True if decoded on GPU (NVDEC)
+    int         rawFormat{-1};     // Raw AVPixelFormat value for sws_scale
+
+    // If hardware frame, this points to the device frame (GPU memory)
+    AVFrame*    avFrame{nullptr}; // Caller must NOT free — owned by decoder
+};
+
+/// Stream information extracted from container
+struct VideoStreamInfo
+{
+    uint32_t    width{0};
+    uint32_t    height{0};
+    double      fps{0.0};
+    double      duration{0.0};      // Seconds
+    int64_t     frameCount{0};
+    int64_t     bitrate{0};
+    std::string codecName;
+    std::string containerFormat;
+    bool        hasAudio{false};
+    bool        hasAlpha{false};        ///< True if video has native alpha (VP9/ProRes)
+    bool        packedAlpha{false};     ///< True if packed-alpha layout (top=RGB, bot=alpha, 2× height)
+    bool        isVFR{false};           ///< True if variable frame rate detected
+    int         audioStreamIndex{-1};
+    int         videoStreamIndex{-1};
+
+    // Timebase for PTS conversion
+    int         timebaseNum{1};
+    int         timebaseDen{1};
+};
+
+/// Seek mode
+enum class SeekMode : uint8_t
+{
+    Keyframe,   // Seek to nearest keyframe (fast, imprecise)
+    Precise,    // Seek to keyframe then decode forward to exact frame (slow, precise)
+};
+
+class VideoDecoder
+{
+public:
+    VideoDecoder();
+    ~VideoDecoder();
+
+    // Non-copyable
+    VideoDecoder(const VideoDecoder&) = delete;
+    VideoDecoder& operator=(const VideoDecoder&) = delete;
+
+    /// Open a video file. Returns true on success.
+    /// Automatically tries NVDEC hardware acceleration, falls back to software.
+    /// Set forceSoftware=true to skip hardware acceleration entirely (e.g.
+    /// for prefetch workers that shouldn't consume NVDEC sessions).
+    /// maxThreads limits FFmpeg thread_count (0 = auto/all cores).
+    /// sliceOnlyThreading disables FF_THREAD_FRAME (required for
+    /// seek-heavy decoders to avoid H.264 reference frame corruption).
+    bool open(const std::filesystem::path& path, bool forceSoftware = false,
+              int maxThreads = 0, bool sliceOnlyThreading = false);
+
+    /// Close the current file and release all resources.
+    void close();
+
+    /// Is a file currently open?
+    [[nodiscard]] bool isOpen() const noexcept;
+
+    /// Get stream information.
+    [[nodiscard]] const VideoStreamInfo& info() const noexcept;
+
+    /// Seek to a specific time in seconds.
+    bool seek(double timeSeconds, SeekMode mode = SeekMode::Precise);
+
+    /// Seek to a specific frame number.
+    bool seekToFrame(int64_t frameNumber, SeekMode mode = SeekMode::Precise);
+
+    /// Decode the next frame. Returns true if a frame was decoded.
+    /// The DecodedFrame is valid until the next call to decodeNext() or seek().
+    bool decodeNext(DecodedFrame& outFrame);
+
+    /// Decode and return a frame at a specific time. Convenience method.
+    bool decodeAt(double timeSeconds, DecodedFrame& outFrame);
+
+    /// Is hardware (NVDEC) acceleration active?
+    [[nodiscard]] bool isHardwareAccelerated() const noexcept;
+
+    /// Convert a hardware frame to a CPU-accessible frame (NV12 or YUV420P).
+    /// Only needed if isHardware is true and you want CPU access.
+    bool transferHardwareFrame(const DecodedFrame& hwFrame, DecodedFrame& cpuFrame);
+
+    /// Get the last error message.
+    [[nodiscard]] const std::string& lastError() const noexcept;
+
+    /// Convert seconds → frame number using stream FPS.
+    [[nodiscard]] int64_t secondsToFrame(double seconds) const noexcept;
+
+    /// Convert frame number → seconds.
+    [[nodiscard]] double frameToSeconds(int64_t frame) const noexcept;
+
+    /// Convert PTS → seconds using stream timebase.
+    [[nodiscard]] double ptsToSeconds(int64_t pts) const noexcept;
+
+private:
+    bool initHardwareDecoder(int deviceType);  // AVHWDeviceType
+    bool initSoftwareDecoder(const char* preferredDecoderName = nullptr);
+    int m_maxThreads{0};  // 0 = auto
+    bool m_sliceOnlyThreading{false};
+    bool decodePacket(AVPacket* packet, DecodedFrame& outFrame);
+    void fillFrameInfo(DecodedFrame& outFrame, AVFrame* frame);
+
+    AVFormatContext*     m_fmtCtx{nullptr};
+    AVCodecContext*      m_codecCtx{nullptr};
+    AVFrame*             m_frame{nullptr};
+    AVFrame*             m_hwFrame{nullptr};     // For hw→sw transfer
+    AVPacket*            m_packet{nullptr};
+    AVBufferRef*         m_hwDeviceCtx{nullptr};
+    int                  m_hwPixFmt{-1};         // AV_PIX_FMT_CUDA or AV_PIX_FMT_D3D11
+
+    VideoStreamInfo      m_info;
+    bool                 m_isOpen{false};
+    bool                 m_hwAccel{false};
+    bool                 m_audioOnly{false};
+    bool                 m_draining{false};    // True after EOF while flushing B-frames
+    int64_t              m_currentFrame{0};
+    std::string          m_lastError;
+    mutable std::mutex   m_mutex;
+};
+
+// ── Global user preference for decode mode ───────────────────────────────
+// Set from AppPreferencesDialog via VideoDecoder::setForceSoftwareDecode().
+// When true, VideoDecoder::open() skips all hardware decoder attempts.
+void setForceSoftwareDecode(bool force);
+bool forceSoftwareDecode();
+
+} // namespace rt

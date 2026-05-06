@@ -1,0 +1,96 @@
+/*
+ * CommandStack — manages the undo/redo history.
+ *
+ * Owns a stack of executed commands. Supports:
+ * - execute(cmd) — push and execute a command
+ * - undo() / redo()
+ * - merge continuous operations (e.g. dragging)
+ * - configurable max depth
+ */
+
+#pragma once
+
+#include <deque>
+#include <memory>
+#include <functional>
+#include <string>
+#include <vector>
+
+#include "Command.h"
+
+namespace rt {
+
+class CommandStack
+{
+public:
+    explicit CommandStack(size_t maxDepth = 200);
+    ~CommandStack();
+
+    /// Execute a command and push it onto the undo stack.
+    /// Clears the redo stack.
+    void execute(std::unique_ptr<Command> cmd);
+
+    /// Push a command onto the undo stack WITHOUT calling execute().
+    /// Use when the action has already been applied (e.g. live drag) and
+    /// you only need the undo record.  Clears the redo stack.
+    void pushWithoutExecute(std::unique_ptr<Command> cmd);
+
+    /// Undo the most recent command.
+    /// Returns true if there was something to undo.
+    bool undo();
+
+    /// Redo the most recently undone command.
+    /// Returns true if there was something to redo.
+    bool redo();
+
+    /// Can we currently undo/redo?
+    [[nodiscard]] bool canUndo() const noexcept;
+    [[nodiscard]] bool canRedo() const noexcept;
+
+    /// Description of the next undo/redo action
+    [[nodiscard]] std::string undoDescription() const;
+    [[nodiscard]] std::string redoDescription() const;
+
+    /// Number of commands in the undo stack
+    [[nodiscard]] size_t undoCount() const noexcept;
+    [[nodiscard]] size_t redoCount() const noexcept;
+
+    /// Get all command descriptions in the history.
+    /// Returns undo descriptions (oldest-to-newest) + redo descriptions (newest-to-oldest).
+    /// The currentIndex indicates the boundary: items [0..currentIndex) are undo,
+    /// items [currentIndex..size) are redo.
+    struct HistorySnapshot
+    {
+        std::vector<std::string> descriptions;
+        size_t currentIndex{0};  ///< Points past the last executed command
+    };
+    [[nodiscard]] HistorySnapshot historySnapshot() const;
+
+    /// Jump to a specific position in the history.
+    /// index < currentIndex => undo (currentIndex - index) times.
+    /// index > currentIndex => redo (index - currentIndex) times.
+    /// Returns true if the position was reached.
+    bool jumpToIndex(size_t index);
+
+    /// Clear all history
+    void clear();
+
+    /// Callback for UI updates (called after execute/undo/redo)
+    using ChangeCallback = std::function<void()>;
+    void setChangeCallback(ChangeCallback cb) { m_callback = std::move(cb); }
+
+    /// Maximum undo depth
+    [[nodiscard]] size_t maxDepth() const noexcept { return m_maxDepth; }
+    void setMaxDepth(size_t depth) noexcept { m_maxDepth = depth; }
+
+private:
+    std::deque<std::unique_ptr<Command>> m_undoStack;
+    std::deque<std::unique_ptr<Command>> m_redoStack;
+    size_t                               m_maxDepth;
+    ChangeCallback                       m_callback;
+
+    void trimToMaxDepth();
+    void notifyChange();
+};
+
+} // namespace rt

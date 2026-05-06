@@ -1,0 +1,27 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "roundtable",
+  "version": "2.0.0",
+  "description": "ROUNDTABLE — GPU-accelerated Non-Linear Video Editor for Spine animation",
+  "homepage": "",
+  "dependencies": [
+    "vulkan-memory-allocator",
+    {
+      "name": "ffmpeg",
+      "features": ["avcodec", "avformat", "avutil", "swscale", "swresample", "x264", "x265"]
+    },
+    "portaudio",
+    "libsndfile",
+    "freetype",
+    "harfbuzz",
+    "flatbuffers",
+    "sqlite3",
+    "stb",
+    "spdlog",
+    "glm",
+    "gtest",
+    "cpp-httplib",
+    "toml11",
+    "nlohmann-json"
+  ]
+}

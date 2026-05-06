@@ -1,0 +1,96 @@
+#version 450
+/*
+ * ultra_key_matte.comp — Ultra Key Pass 1: Base matte generation.
+ *
+ * Converts each pixel to YCbCr, computes chroma distance to the key color,
+ * and generates a raw alpha matte.  Applies tolerance, highlight/shadow
+ * recovery, pedestal noise floor, and transparency scaling.
+ *
+ * Output: original RGB in .rgb, computed matte in .a
+ */
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0, rgba8) uniform writeonly image2D outputImage;
+layout(binding = 1)        uniform sampler2D        inputImage;
+
+layout(push_constant) uniform PushConstants {
+    int   width;
+    int   height;
+    int   paramCount;
+    int   _pad;
+    float params[28];
+} pc;
+
+// ── Param indices (must match ChromaKey::Param enum) ────────────────────
+#define KEY_R        pc.params[0]
+#define KEY_G        pc.params[1]
+#define KEY_B        pc.params[2]
+#define OUTPUT_MODE  pc.params[3]
+#define SETTING      pc.params[4]
+#define TRANSPARENCY pc.params[5]
+#define HIGHLIGHT    pc.params[6]
+#define SHADOW       pc.params[7]
+#define TOLERANCE    pc.params[8]
+#define PEDESTAL     pc.params[9]
+
+// ── RGB ↔ YCbCr (BT.709) ───────────────────────────────────────────────
+vec3 rgb2ycbcr(vec3 c) {
+    float y  =  0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+    float cb = -0.1146 * c.r - 0.3854 * c.g + 0.5000 * c.b;
+    float cr =  0.5000 * c.r - 0.4542 * c.g - 0.0458 * c.b;
+    return vec3(y, cb, cr);
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= pc.width || pixel.y >= pc.height) return;
+
+    vec2 uv    = (vec2(pixel) + 0.5) / vec2(pc.width, pc.height);
+    vec4 color = texture(inputImage, uv);
+
+    // Convert pixel and key color to YCbCr
+    vec3 ycbcr    = rgb2ycbcr(color.rgb);
+    vec3 keyYCbCr = rgb2ycbcr(vec3(KEY_R, KEY_G, KEY_B));
+
+    // Chroma distance (Cb/Cr plane only)
+    float chromaDist = length(ycbcr.yz - keyYCbCr.yz);
+
+    // Also measure color-space distance including luma (weighted less)
+    // to better distinguish foreground from screen
+    float lumaDiff = abs(ycbcr.x - keyYCbCr.x);
+    float combinedDist = chromaDist + lumaDiff * 0.15;
+
+    // Tolerance controls the inner radius (fully transparent).
+    // The soft transition is kept narrow (fixed 0.06) so that foreground
+    // pixels reach full opacity quickly — prevents the grey-matte problem.
+    float tol = TOLERANCE / 100.0;        // 0–1 range
+    float inner = tol * 0.55;             // fully keyed radius
+    float outer = inner + 0.06;           // narrow fixed soft edge
+
+    float alpha_raw = smoothstep(inner, outer, combinedDist);
+
+    // Highlight recovery — restore bright pixels that were keyed
+    float highlightStr = HIGHLIGHT / 100.0;
+    float luma = ycbcr.x;
+    if (highlightStr > 0.0) {
+        float highlightMask = smoothstep(0.55, 0.85, luma) * highlightStr;
+        alpha_raw = mix(alpha_raw, min(1.0, alpha_raw + highlightMask), highlightMask);
+    }
+
+    // Shadow recovery — restore dark pixels that were keyed
+    float shadowStr = SHADOW / 100.0;
+    if (shadowStr > 0.0) {
+        float shadowMask = smoothstep(0.35, 0.10, luma) * shadowStr;
+        alpha_raw = mix(alpha_raw, min(1.0, alpha_raw + shadowMask), shadowMask);
+    }
+
+    // Pedestal — remove noise floor from matte
+    float ped = PEDESTAL / 100.0 * 0.2;
+    alpha_raw = clamp((alpha_raw - ped) / max(1.0 - ped, 0.001), 0.0, 1.0);
+
+    // Transparency scaling
+    float transp = TRANSPARENCY / 100.0;
+    alpha_raw *= (1.0 - transp);
+
+    imageStore(outputImage, pixel, vec4(color.rgb, alpha_raw));
+}

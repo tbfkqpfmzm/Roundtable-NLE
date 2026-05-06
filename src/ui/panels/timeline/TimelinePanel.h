@@ -1,0 +1,544 @@
+/*
+ * TimelinePanel — Main timeline container widget.
+ *
+ * Step 12: Composes ruler, track area, track headers, scrollbars,
+ * and playhead into the NLE timeline UI.
+ * Step 13: Extended with editing tools, selection, snapping, shortcuts.
+ */
+
+#pragma once
+
+#include <QWidget>
+#include <QScrollArea>
+#include <QSplitter>
+#include <QVBoxLayout>
+#include <QSplitter>
+#include <QRubberBand>
+#include <QPushButton>
+#include <QPixmap>
+
+#include "timeline/TimelineLayoutEngine.h"
+#include "timeline/EditOperations.h"
+
+#include <memory>
+#include <optional>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+class QTimer;
+
+namespace rt {
+
+class Timeline;
+class TimelineRuler;
+class TimelineTrackWidget;
+class AnimationVideoCache;
+class NLEScrollBar;
+class Track;
+class CommandStack;
+class ShortcutManager;
+class GhostTrackOverlay;
+class MediaPool;
+
+/// Track header widget (name, V/A icon, lock/mute/solo, height handle).
+class TrackHeader : public QWidget
+{
+    Q_OBJECT
+
+public:
+    explicit TrackHeader(QWidget* parent = nullptr);
+    ~TrackHeader() override;
+
+    void setTrack(const Track* track, size_t index);
+    void setHeight(float h);
+
+    static constexpr int kHeaderWidth = 160;
+
+    QSize sizeHint() const override;
+
+signals:
+    void lockToggled(size_t trackIndex, bool locked);
+    void muteToggled(size_t trackIndex, bool muted);
+    void soloToggled(size_t trackIndex, bool soloed);
+    void targetToggled(size_t trackIndex, bool targeted);
+    void collapseToggled(size_t trackIndex, bool collapsed);
+    void syncLockToggled(size_t trackIndex, bool syncLocked);
+    void heightChanged(size_t trackIndex, float newHeight);
+    void trackRenamed(size_t trackIndex, const QString& newName);
+    void addTrackRequested(bool video, bool above, size_t nearIndex);
+    void addDividerRequested(bool above, size_t nearIndex);
+    void deleteTrackRequested(size_t trackIndex);
+    void trackSizePresetRequested(size_t trackIndex, float height);
+    // Drag-to-reorder signals
+    void reorderDragStarted(size_t trackIndex);
+    void reorderDragMoved(size_t trackIndex, const QPoint& globalPos);
+    void reorderDragFinished(size_t trackIndex, const QPoint& globalPos, bool commit);
+
+protected:
+    bool event(QEvent* e) override;
+    void paintEvent(QPaintEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
+    void mouseReleaseEvent(QMouseEvent* event) override;
+    void mouseDoubleClickEvent(QMouseEvent* event) override;
+    void contextMenuEvent(QContextMenuEvent* event) override;
+
+private:
+    const Track* m_track{nullptr};
+    size_t       m_trackIndex{0};
+    float        m_height{80.0f};
+
+    // Track height resize drag state
+    bool  m_resizeDragging{false};
+    int   m_resizeDragStartY{0};
+    float m_resizeDragStartHeight{0.0f};
+    static constexpr int kResizeGripHeight = 5; // pixels from bottom edge
+    static constexpr float kMinTrackHeight = 30.0f;
+    static constexpr float kMaxTrackHeight = 300.0f;
+
+    // Reorder drag state
+    bool  m_reorderPressed{false};
+    bool  m_reorderActive{false};
+    QPoint m_reorderPressGlobal;
+
+    QRect targetButtonRect() const;
+    QRect buttonRect(int index) const;
+    int   contentYOffset() const;
+    QRect lockButtonRect() const;
+    QRect muteButtonRect() const;
+    QRect soloButtonRect() const;
+    QRect syncLockButtonRect() const;
+};
+
+/// Main timeline panel — the NLE editing area.
+class TimelinePanel : public QWidget
+{
+    Q_OBJECT
+
+public:
+    /// Represents a selected gap between clips on a track.
+    struct GapSelection {
+        size_t  trackIndex{SIZE_MAX};
+        int64_t startTick{0};
+        int64_t endTick{0};
+        bool    active{false};
+    };
+
+    explicit TimelinePanel(QWidget* parent = nullptr);
+    ~TimelinePanel() override;
+
+    /// Set the timeline data model.
+    void setTimeline(Timeline* timeline);
+
+    /// Update playhead position and repaint.
+    void setPlayheadPosition(int64_t tick);
+
+    /// Get the layout engine (for external queries).
+    const TimelineLayoutEngine& layoutEngine() const { return m_layoutEngine; }
+    TimelineLayoutEngine& layoutEngine() { return m_layoutEngine; }
+
+    /// Notify that zoom/scroll changed — repaints ruler, scrollbar, and tracks.
+    void notifyZoomChanged();
+
+    /// Refresh all track widgets from the data model.
+    void rebuildTracks();
+
+    /// Lightweight refresh — updates waveform/thumbnail caches and repaints
+    /// track widgets WITHOUT destroying and recreating them.  Use this for
+    /// edits that don't change the number or order of tracks (splits,
+    /// deletes, cuts, pastes within existing tracks, razor).
+    void refreshTrackContents();
+
+    /// Zoom to fit the entire timeline.
+    void zoomToFit();
+
+    /// Zoom in centered on playhead (keyboard shortcut Ctrl+=).
+    /// Doubles zoom level while keeping playhead in the same screen position.
+    void zoomIn();
+
+    /// Zoom out centered on playhead (keyboard shortcut Ctrl+-).
+    /// Halves zoom level while keeping playhead in the same screen position.
+    void zoomOut();
+
+    /// Set the framerate for timecode display.
+    void setFrameRate(double fps);
+
+    /// Current width of the track header column (dynamic, resizable via splitter).
+    int headerWidth() const;
+
+    // ── Step 13: Editing ────────────────────────────────────────────────
+
+    /// Set the command stack for undo/redo.
+    void setCommandStack(CommandStack* stack);
+
+    /// Set the shortcut manager.
+    void setShortcutManager(ShortcutManager* shortcuts);
+
+    /// Set the active editing tool.
+    void setActiveTool(EditTool tool);
+
+    /// Get the active editing tool.
+    [[nodiscard]] EditTool activeTool() const noexcept { return m_activeTool; }
+
+    /// Get the selection set.
+    [[nodiscard]] const SelectionSet& selection() const { return m_selection; }
+    [[nodiscard]] SelectionSet& selection() { return m_selection; }
+
+    /// Get the gap selection state.
+    [[nodiscard]] const GapSelection& gapSelection() const { return m_gapSelection; }
+    [[nodiscard]] GapSelection& gapSelection() { return m_gapSelection; }
+
+    /// Clear the gap selection and update track widgets.
+    void clearGapSelection();
+
+    /// Get the snap engine.
+    [[nodiscard]] const SnapEngine& snapEngine() const { return m_snapEngine; }
+    [[nodiscard]] SnapEngine& snapEngine() { return m_snapEngine; }
+
+    /// Get the clipboard.
+    [[nodiscard]] const ClipboardContents& clipboard() const { return m_clipboard; }
+
+    /// Toggle snapping on/off.
+    void setSnappingEnabled(bool enabled);
+
+    /// Toggle linked selection (move A/V clips together).
+    void setLinkedSelectionEnabled(bool enabled) { m_linkedSelectionEnabled = enabled; }
+    [[nodiscard]] bool linkedSelectionEnabled() const noexcept { return m_linkedSelectionEnabled; }
+
+    /// Toggle nest-sequences mode (insert sequences as nested vs individual clips).
+    void setNestSequencesEnabled(bool enabled) { m_nestSequencesEnabled = enabled; }
+    [[nodiscard]] bool nestSequencesEnabled() const noexcept { return m_nestSequencesEnabled; }
+
+    /// Open the Paste Attributes dialog for the current selection.
+    /// Remembers which checkboxes were checked last time (Premiere-style).
+    void showPasteAttributesDialog();
+
+    /// Copy attributes from the first selected clip into the attributes clipboard.
+    /// Called automatically by Ctrl+C so Paste Attributes is always ready.
+    void copyAttributesFromSelection();
+
+    /// Show or hide caption track widgets.
+    void setCaptionTrackVisible(bool visible);
+
+    /// Sync ruler in/out markers from the timeline data model.
+    void updateInOutRange();
+
+    /// Set pointer to animation video cache (for cached-clip color override).
+    void setAnimVideoCache(const AnimationVideoCache* cache);
+
+    /// Set pointer to media pool (for drag preview duration lookup).
+    void setMediaPool(MediaPool* pool) noexcept { m_mediaPool = pool; }
+
+    /// Last clicked clip edge (for Ctrl+T default transition).
+    /// Returns { clipRef, edge, valid } — valid is false if no edge was clicked.
+    struct ClickedEdge {
+        ClipRef  clipRef;
+        ClipEdge edge{ClipEdge::Head};
+        bool     valid{false};
+    };
+    [[nodiscard]] ClickedEdge lastClickedEdge() const { return m_lastClickedEdge; }
+
+signals:
+    /// Emitted when user scrubs the playhead.
+    void playheadMoved(int64_t tick);
+
+    /// Emitted when a clip is selected.
+    void clipSelected(size_t trackIndex, size_t clipIndex);
+
+    /// Emitted when the active tool changes.
+    void toolChanged(EditTool tool);
+
+    /// Emitted when selection changes.
+    void selectionChanged();
+
+    /// Emitted when timeline content changes (clips moved/added/removed/trimmed).
+    void contentChanged();
+
+    /// Emitted when a new clip is created via a tool (e.g., Text tool).
+    void clipCreated();
+
+    /// Emitted when a clip context menu action is requested.
+    void clipContextAction(const QString& action, size_t trackIndex, uint64_t clipId);
+
+    /// Emitted when a track should be added.
+    void addTrackAbove(size_t nearIndex, bool video);
+    void addTrackBelow(size_t nearIndex, bool video);
+    void deleteTrack(size_t trackIndex);
+
+    /// Emitted when media is dropped from the project bin onto the timeline.
+    void mediaDropped(const QString& filePath, uint64_t mediaHandle, int64_t atTick, size_t trackIndex);
+
+    /// Emitted when media is dropped from the Source Monitor with in/out points.
+    void mediaDroppedWithRegion(const QString& filePath, uint64_t mediaHandle,
+                                int64_t atTick, size_t trackIndex,
+                                int64_t sourceIn, int64_t sourceOut);
+
+    /// Emitted when an external file (from Windows Explorer) is dropped onto the timeline.
+    void externalFileDropped(const QString& filePath, int64_t atTick, size_t trackIndex);
+
+    /// Emitted when an effect is dropped onto a timeline clip.
+    void effectDroppedOnClip(size_t trackIndex, uint64_t clipId, int effectType);
+
+    /// Emitted when a transition is dropped at a clip edge.
+    void transitionDroppedAtEdge(size_t trackIndex, uint64_t leftClipId,
+                                 uint64_t rightClipId, int64_t editPointTick,
+                                 int transitionType);
+
+    /// Emitted when the user clicks on a transition body (not just its edge).
+    void transitionSelected(size_t trackIndex, size_t transitionIndex);
+
+    /// Emitted when the user double-clicks a clip (load in Source Monitor).
+    void clipDoubleClicked(size_t trackIndex, size_t clipIndex);
+
+    /// Emitted when user chooses "Nest" from the timeline context menu.
+    void nestSelectedClips(const std::vector<ClipRef>& clips, const QString& nestName);
+
+    /// Emitted when a sequence is dropped from the project bin onto the timeline.
+    void sequenceDropped(size_t sequenceIndex, int64_t atTick, size_t trackIndex,
+                         int64_t sourceIn = -1, int64_t sourceOut = -1);
+
+    /// Emitted when user wants to open a nested sequence (double-click or right-click).
+    void openNestedSequence(size_t sequenceIndex);
+
+    /// Emitted when user chooses "Reveal in Project" from clip context menu.
+    void revealInProjectBin(const QString& filePath);
+
+protected:
+    void resizeEvent(QResizeEvent* event) override;
+    void wheelEvent(QWheelEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
+    void mouseDoubleClickEvent(QMouseEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
+    void mouseReleaseEvent(QMouseEvent* event) override;
+    void paintEvent(QPaintEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dragMoveEvent(QDragMoveEvent* event) override;
+    void dragLeaveEvent(QDragLeaveEvent* event) override;
+    void dropEvent(QDropEvent* event) override;
+
+private slots:
+    void onRulerScrub(int64_t tick);
+    void onScrollChanged();
+
+    /// Recompute and apply the minimum header width based on track names.
+    void updateMinHeaderWidth();
+
+private:
+    Timeline*             m_timeline{nullptr};
+    TimelineLayoutEngine  m_layoutEngine;
+    CommandStack*         m_commandStack{nullptr};
+    ShortcutManager*      m_shortcuts{nullptr};
+
+    // Child widgets
+    TimelineRuler*   m_ruler{nullptr};
+    QWidget*         m_trackHeaderArea{nullptr};
+    QWidget*         m_trackContentArea{nullptr};
+    NLEScrollBar*    m_scrollBar{nullptr};
+    QScrollArea*     m_verticalScroll{nullptr};
+    QScrollArea*     m_headerScroll{nullptr};
+    QSplitter*       m_headerSplitter{nullptr};
+    bool             m_splitterInitialized{false};
+    QWidget*         m_headerSpacer{nullptr};
+    QWidget*         m_scrollSpacer{nullptr};
+
+    std::vector<TrackHeader*>          m_trackHeaders;
+    std::vector<TimelineTrackWidget*>  m_trackWidgets;
+
+    // Playhead overlay — lightweight transparent widget that draws only the
+    // playhead line, avoiding full track widget repaints on every tick.
+    QWidget* m_playheadOverlay{nullptr};
+    int64_t m_playheadTick{0};
+
+    // Snap indicator line (white line shown when a snap target is hit during drag)
+    int64_t m_snapIndicatorTick{-1};   // -1 = hidden
+
+    // Razor tool hover indicator
+    int64_t m_razorHoverTick{-1};
+    size_t  m_razorHoverTrack{SIZE_MAX};
+
+    // Linked selection: when true, clips on V+A tracks move together
+    bool m_linkedSelectionEnabled{true};
+    bool m_nestSequencesEnabled{false};
+
+    // Waveform peak cache: clipId → vector of peak amplitudes (0..1)
+    std::unordered_map<uint64_t, std::vector<float>> m_waveformPeaks;
+    // Path-based index — avoids re-decoding when a clip is split (new ID,
+    // same source file).  Waveform peaks cover the entire source file so
+    // they are identical for every clip that shares the same mediaPath.
+    std::unordered_map<std::string, std::vector<float>> m_waveformByPath;
+    std::unordered_set<std::string> m_pendingWaveformPaths;
+    std::unordered_set<std::string> m_failedWaveformPaths;
+    uint64_t m_waveformLoadGeneration{0};
+
+    // Video thumbnail cache: clipId → first-frame thumbnail (QPixmap)
+    std::unordered_map<uint64_t, QPixmap> m_thumbnailCache;
+    // Same idea: path-based index for thumbnails.
+    std::unordered_map<std::string, QPixmap> m_thumbnailByPath;
+    // Negative cache: paths that failed to open or produced unusable format
+    // (e.g. YUV-only decode, missing file).  Prevents hundreds of repeated
+    // VideoDecoder::open() calls (~150ms each for HEVC/NVDEC) on every
+    // loadThumbnails() invocation.
+    std::unordered_set<std::string> m_failedThumbnailPaths;
+
+    // Animation video cache (for Spine clip cached-vs-live color override)
+    const AnimationVideoCache* m_animVideoCache{nullptr};
+    MediaPool* m_mediaPool{nullptr};
+
+    // Step 13: Editing state
+    EditTool          m_activeTool{EditTool::Selection};
+    SelectionSet      m_selection;
+    size_t            m_selectedTransitionTrack{SIZE_MAX};
+    size_t            m_selectedTransitionIndex{SIZE_MAX};
+
+    // Gap selection state
+    GapSelection      m_gapSelection;
+
+    SnapEngine        m_snapEngine;
+    ClipboardContents m_clipboard;
+
+    // Effect clipboard (for Copy Effects / Paste Effects)
+    std::unique_ptr<EffectStack> m_effectClipboard;
+
+    // Transform attributes clipboard (for Copy Attributes / Paste Attributes)
+    struct AttributesClipboard {
+        KeyframeTrack<float> opacity{1.0f};
+        KeyframeTrack<float> posX{0.0f};
+        KeyframeTrack<float> posY{0.0f};
+        KeyframeTrack<float> scaleX{1.0f};
+        KeyframeTrack<float> scaleY{1.0f};
+        KeyframeTrack<float> rotation{0.0f};
+        double speed{1.0};
+        KeyframeTrack<float> speedRamp{1.0f};
+    };
+    std::optional<AttributesClipboard> m_attrClipboard;
+
+    // Persistent paste-attribute checkbox state (Premiere-style: remembers last selection)
+    // Bit flags: 0=opacity, 1=posX, 2=posY, 3=scaleX, 4=scaleY, 5=rotation, 6=speed, 7=speedRamp
+    uint8_t m_pasteAttrMask{0xFF}; // All checked by default
+
+    // Drag state
+    enum class DragMode { None, ClipMove, ClipTrimHead, ClipTrimTail,
+                          PendingMarquee, MarqueeSelect, RollingEdit,
+                          SlipTool, SlideTool, TransitionTrim };
+    DragMode  m_dragMode{DragMode::None};
+    QPointF   m_dragStart;
+    QPointF   m_marqueeEnd;   // Current endpoint during marquee drag
+    ClipRef   m_dragClipRef;
+    int64_t   m_dragOriginalIn{0};
+    int64_t   m_dragOriginalSourceIn{0};
+    int64_t   m_dragOriginalDuration{0};
+    size_t    m_dragOriginalTrack{0};
+
+    // Rolling edit drag state
+    uint64_t  m_rollLeftClipId{0};
+    uint64_t  m_rollRightClipId{0};
+    size_t    m_rollTrackIndex{0};
+    int64_t   m_rollOriginalEditPoint{0};
+    // Original clip states for direct-manipulation rolling edit
+    int64_t   m_rollLeftOrigIn{0};
+    int64_t   m_rollLeftOrigDur{0};
+    int64_t   m_rollLeftOrigSrcIn{0};
+    int64_t   m_rollRightOrigIn{0};
+    int64_t   m_rollRightOrigDur{0};
+    int64_t   m_rollRightOrigSrcIn{0};
+
+    // Transition trim drag state
+    size_t  m_transTrimTrackIndex{0};
+    size_t  m_transTrimIndex{0};       // index in track->transitions()
+    bool    m_transTrimIsStart{false}; // dragging the start or end of the transition?
+    int64_t m_transTrimOrigDuration{0};
+    int64_t m_transTrimOrigEditPoint{0};
+
+    // Last clicked edge (for Ctrl+T transitions) — uses public ClickedEdge struct
+    ClickedEdge m_lastClickedEdge;
+
+    // Multi-clip drag state: stores each selected clip's original position
+    struct DragClipState {
+        ClipRef ref;
+        int64_t originalIn{0};
+        size_t  originalTrack{0};
+    };
+    std::vector<DragClipState> m_dragSelectedClips;
+    size_t m_dragTargetTrack{SIZE_MAX};  // track under cursor during drag
+
+    // ── Ghost track (drag-to-create new track, Premiere Pro style) ──
+    bool   m_ghostTrackVisible{false};
+    bool   m_ghostTrackIsAbove{false}; // true = new video track above topmost, false = new audio below
+    int    m_ghostTrackY{0};           // Y position of ghost track in panel coords
+    int    m_ghostTrackHeight{60};     // height of the ghost track
+    GhostTrackOverlay* m_ghostOverlay{nullptr};
+
+    // Drag-to-reorder state
+    size_t m_reorderSrcIndex{SIZE_MAX};
+    void   updateReorderOverlay(const QPoint& globalMousePos);
+    size_t computeReorderInsertionIndex(const QPoint& globalMousePos) const;
+
+    // Marquee rubber-band overlay (draws ON TOP of children)
+    QRubberBand* m_rubberBand{nullptr};
+
+    // Marquee state: prior selection captured at marquee start (for
+    // Shift+marquee additive selection — Premiere-style "add to set").
+    std::vector<ClipRef> m_marqueeBaseSelection;
+    // Auto-scroll while marquee drag pegs against left/right edge of
+    // the track area.  Repaints + scrolls every tick for as long as
+    // the cursor stays in the edge zone, like Premiere Pro.
+    QTimer*  m_marqueeScrollTimer{nullptr};
+    QPointF  m_marqueeLastMovePos;
+
+    // Effect drag-drop highlight: clip under cursor during effect drag
+    std::optional<ClipRef> m_effectDropTarget;
+
+    // Transition drag-drop state: edge being targeted
+    struct TransitionDropTarget {
+        size_t  trackIndex{SIZE_MAX};
+        int64_t editPointTick{-1};
+        uint64_t leftClipId{0};
+        uint64_t rightClipId{0};
+    };
+    std::optional<TransitionDropTarget> m_transitionDropTarget;
+
+    void setupLayout();
+    void updateTrackGeometries();
+    void paintPlayhead(class QPainter& painter);
+    void updatePlayheadOverlay();
+
+    /// Show context menu for a clip.
+    void showClipContextMenu(const QPointF& globalPos, const ClipRef& ref);
+
+    /// Show context menu for empty timeline area.
+    void showEmptyAreaContextMenu(const QPointF& globalPos, size_t trackIndex);
+
+    /// Ensure at least 1 video and 1 audio track exist (Premiere Pro default).
+    void ensureDefaultTracks();
+
+    /// Load waveform peaks for all audio clips.
+    void loadWaveforms();
+    void queueWaveformLoad(const std::string& path);
+    void applyWaveformPeaks(uint64_t generation,
+                            const std::string& path,
+                            std::vector<float> peaks);
+
+    /// Load video thumbnails for all video clips.
+    void loadThumbnails();
+
+    // Step 13: Editing helpers
+    void executeCommand(std::unique_ptr<Command> cmd);
+    std::optional<ClipRef> hitTestClip(const QPointF& pos) const;
+    size_t hitTestTrack(double y) const;
+    ClipEdge hitTestClipEdge(const QPointF& pos, const ClipRef& ref) const;
+    void updateCursorForTool();
+    void wireShortcuts();
+
+    /// Update snap indicator line across all track widgets and ruler.
+    void setSnapIndicator(int64_t tick);
+
+    /// Recompute marquee selection from current m_dragStart/m_marqueeLastMovePos
+    /// (additively merging in m_marqueeBaseSelection if Shift+marquee).
+    void refreshMarqueeSelection();
+};
+
+} // namespace rt

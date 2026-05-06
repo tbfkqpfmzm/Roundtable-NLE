@@ -1,0 +1,84 @@
+---
+Language: Cpp
+BasedOnStyle: Google
+
+# Override Google defaults for readability
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 100
+
+# Braces
+BreakBeforeBraces: Allman
+BraceWrapping:
+  AfterClass: true
+  AfterControlStatement: true
+  AfterEnum: true
+  AfterFunction: true
+  AfterNamespaceDeclaration: true
+  AfterStruct: true
+  AfterUnion: true
+  BeforeCatch: true
+  BeforeElse: true
+  IndentBraces: false
+
+# Namespaces
+NamespaceIndentation: None
+CompactNamespaces: false
+
+# Alignment
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: true
+AlignConsecutiveDeclarations: false
+AlignEscapedNewlines: Left
+AlignOperands: true
+AlignTrailingComments: true
+
+# Arguments & parameters
+AllowAllParametersOfDeclarationOnNextLine: true
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+BinPackArguments: false
+BinPackParameters: false
+
+# Includes
+IncludeBlocks: Regroup
+IncludeCategories:
+  # Project headers
+  - Regex: '^"'
+    Priority: 1
+  # Qt headers
+  - Regex: '^<Q'
+    Priority: 2
+  # Vulkan headers
+  - Regex: '^<vulkan/'
+    Priority: 3
+  # Third-party headers
+  - Regex: '^<(spdlog|glm|spine|flatbuffers|portaudio|cuda)'
+    Priority: 4
+  # System headers
+  - Regex: '^<'
+    Priority: 5
+
+SortIncludes: true
+
+# Pointer/reference alignment
+PointerAlignment: Left
+ReferenceAlignment: Left
+
+# Misc
+SpaceAfterCStyleCast: false
+SpaceBeforeParens: ControlStatements
+SpaceInEmptyBlock: false
+SpaceInEmptyParentheses: false
+
+# C++20
+Standard: c++20
+
+# Access modifiers
+AccessModifierOffset: -4
+IndentAccessModifiers: false
+...

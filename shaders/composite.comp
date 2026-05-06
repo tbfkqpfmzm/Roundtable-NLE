@@ -1,0 +1,371 @@
+#version 450
+// Multi-layer compositor compute shader (blend modes, transforms, masks)
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// Output image
+layout(binding = 0, rgba8) uniform writeonly image2D outputImage;
+
+// Layer textures (bindless or array — up to 32 layers)
+layout(binding = 1) uniform sampler2D layers[32];
+
+// Per-layer parameters
+layout(std430, binding = 2) buffer LayerParams {
+    mat4  transform[32];    // Per-layer transform matrix
+    float opacity[32];      // Per-layer opacity (0–1)
+    int   blendMode[32];    // 0=Normal, 1=Multiply, 2=Screen, 3=Add
+    int   enabled[32];      // 0=skip, 1=render
+    vec4  cropRect[32];     // Per-layer crop (L, R, T, B) as fractions 0–1
+    int   isPacked[32];     // 1=packed-alpha (top=RGB, bottom=alpha greyscale)
+    int   isPMA[32];        // 1=premultiplied-alpha (e.g. Spine FBO output)
+    int   needsSwapRB[32];  // 1=swap R↔B after sampling (nested sequence composite)
+    int   hasMask[32];      // 1=opacity mask texture provided
+    int   layerCount;       // Number of active layers
+} params;
+
+// Mask textures (one per layer, only used when hasMask[i] == 1)
+layout(binding = 3) uniform sampler2D maskTextures[32];
+
+// Output dimensions
+layout(push_constant) uniform PushConstants {
+    int width;
+    int height;
+} pc;
+
+vec4 blendNormal(vec4 base, vec4 over)
+{
+    float a = over.a + base.a * (1.0 - over.a);
+    if (a < 0.001) return vec4(0.0);
+    vec3 c = (over.rgb * over.a + base.rgb * base.a * (1.0 - over.a)) / a;
+    return vec4(c, a);
+}
+
+vec4 blendMultiply(vec4 base, vec4 over)
+{
+    vec3 c = base.rgb * over.rgb;
+    return blendNormal(base, vec4(c, over.a));
+}
+
+vec4 blendScreen(vec4 base, vec4 over)
+{
+    vec3 c = 1.0 - (1.0 - base.rgb) * (1.0 - over.rgb);
+    return blendNormal(base, vec4(c, over.a));
+}
+
+vec4 blendAdd(vec4 base, vec4 over)
+{
+    return vec4(min(base.rgb + over.rgb * over.a, vec3(1.0)), 
+                min(base.a + over.a, 1.0));
+}
+
+vec4 blendOverlay(vec4 base, vec4 over)
+{
+    vec3 c;
+    for (int i = 0; i < 3; i++) {
+        c[i] = base[i] < 0.5
+            ? 2.0 * base[i] * over[i]
+            : 1.0 - 2.0 * (1.0 - base[i]) * (1.0 - over[i]);
+    }
+    return blendNormal(base, vec4(c, over.a));
+}
+
+vec4 blendSoftLight(vec4 base, vec4 over)
+{
+    vec3 c;
+    for (int i = 0; i < 3; i++) {
+        if (over[i] <= 0.5)
+            c[i] = base[i] - (1.0 - 2.0 * over[i]) * base[i] * (1.0 - base[i]);
+        else
+            c[i] = base[i] + (2.0 * over[i] - 1.0) * (sqrt(base[i]) - base[i]);
+    }
+    return blendNormal(base, vec4(c, over.a));
+}
+
+vec4 blendHardLight(vec4 base, vec4 over)
+{
+    vec3 c;
+    for (int i = 0; i < 3; i++) {
+        c[i] = over[i] < 0.5
+            ? 2.0 * base[i] * over[i]
+            : 1.0 - 2.0 * (1.0 - base[i]) * (1.0 - over[i]);
+    }
+    return blendNormal(base, vec4(c, over.a));
+}
+
+vec4 blendDifference(vec4 base, vec4 over)
+{
+    vec3 c = abs(base.rgb - over.rgb);
+    return blendNormal(base, vec4(c, over.a));
+}
+
+vec4 blendColorDodge(vec4 base, vec4 over)
+{
+    vec3 c;
+    for (int i = 0; i < 3; i++) {
+        c[i] = over[i] >= 1.0 ? 1.0 : min(base[i] / (1.0 - over[i]), 1.0);
+    }
+    return blendNormal(base, vec4(c, over.a));
+}
+
+vec4 blendColorBurn(vec4 base, vec4 over)
+{
+    vec3 c;
+    for (int i = 0; i < 3; i++) {
+        c[i] = over[i] <= 0.0 ? 0.0 : max(1.0 - (1.0 - base[i]) / over[i], 0.0);
+    }
+    return blendNormal(base, vec4(c, over.a));
+}
+
+vec4 blendExclusion(vec4 base, vec4 over)
+{
+    vec3 c = base.rgb + over.rgb - 2.0 * base.rgb * over.rgb;
+    return blendNormal(base, vec4(c, over.a));
+}
+
+vec4 blendDarken(vec4 base, vec4 over)
+{
+    vec3 c = min(base.rgb, over.rgb);
+    return blendNormal(base, vec4(c, over.a));
+}
+
+vec4 blendLighten(vec4 base, vec4 over)
+{
+    vec3 c = max(base.rgb, over.rgb);
+    return blendNormal(base, vec4(c, over.a));
+}
+
+vec4 blendLinearDodge(vec4 base, vec4 over)
+{
+    vec3 c = min(base.rgb + over.rgb, vec3(1.0));
+    return blendNormal(base, vec4(c, over.a));
+}
+
+vec4 blendLinearBurn(vec4 base, vec4 over)
+{
+    vec3 c = max(base.rgb + over.rgb - vec3(1.0), vec3(0.0));
+    return blendNormal(base, vec4(c, over.a));
+}
+
+vec4 blendVividLight(vec4 base, vec4 over)
+{
+    vec3 c;
+    for (int i = 0; i < 3; i++) {
+        if (over[i] <= 0.5)
+            c[i] = over[i] <= 0.0 ? 0.0 : max(1.0 - (1.0 - base[i]) / (2.0 * over[i]), 0.0);
+        else
+            c[i] = over[i] >= 1.0 ? 1.0 : min(base[i] / (2.0 * (1.0 - over[i])), 1.0);
+    }
+    return blendNormal(base, vec4(c, over.a));
+}
+
+vec4 blendPinLight(vec4 base, vec4 over)
+{
+    vec3 c;
+    for (int i = 0; i < 3; i++) {
+        c[i] = over[i] < 0.5
+            ? min(base[i], 2.0 * over[i])
+            : max(base[i], 2.0 * over[i] - 1.0);
+    }
+    return blendNormal(base, vec4(c, over.a));
+}
+
+vec4 blendHardMix(vec4 base, vec4 over)
+{
+    vec3 c;
+    for (int i = 0; i < 3; i++) {
+        c[i] = base[i] + over[i] >= 1.0 ? 1.0 : 0.0;
+    }
+    return blendNormal(base, vec4(c, over.a));
+}
+
+// HSL conversion helpers for Hue/Saturation/Color/Luminosity blend modes
+vec3 rgb2hsl(vec3 c)
+{
+    float mx = max(max(c.r, c.g), c.b);
+    float mn = min(min(c.r, c.g), c.b);
+    float l = (mx + mn) * 0.5;
+    if (mx == mn) return vec3(0.0, 0.0, l);
+    float d = mx - mn;
+    float s = l > 0.5 ? d / (2.0 - mx - mn) : d / (mx + mn);
+    float h;
+    if (mx == c.r) h = (c.g - c.b) / d + (c.g < c.b ? 6.0 : 0.0);
+    else if (mx == c.g) h = (c.b - c.r) / d + 2.0;
+    else h = (c.r - c.g) / d + 4.0;
+    h /= 6.0;
+    return vec3(h, s, l);
+}
+
+float hue2rgb(float p, float q, float t)
+{
+    if (t < 0.0) t += 1.0;
+    if (t > 1.0) t -= 1.0;
+    if (t < 1.0/6.0) return p + (q - p) * 6.0 * t;
+    if (t < 1.0/2.0) return q;
+    if (t < 2.0/3.0) return p + (q - p) * (2.0/3.0 - t) * 6.0;
+    return p;
+}
+
+vec3 hsl2rgb(vec3 hsl)
+{
+    if (hsl.y == 0.0) return vec3(hsl.z);
+    float q = hsl.z < 0.5 ? hsl.z * (1.0 + hsl.y) : hsl.z + hsl.y - hsl.z * hsl.y;
+    float p = 2.0 * hsl.z - q;
+    return vec3(
+        hue2rgb(p, q, hsl.x + 1.0/3.0),
+        hue2rgb(p, q, hsl.x),
+        hue2rgb(p, q, hsl.x - 1.0/3.0)
+    );
+}
+
+vec4 blendHue(vec4 base, vec4 over)
+{
+    vec3 baseHSL = rgb2hsl(base.rgb);
+    vec3 overHSL = rgb2hsl(over.rgb);
+    vec3 c = hsl2rgb(vec3(overHSL.x, baseHSL.y, baseHSL.z));
+    return blendNormal(base, vec4(c, over.a));
+}
+
+vec4 blendSaturation(vec4 base, vec4 over)
+{
+    vec3 baseHSL = rgb2hsl(base.rgb);
+    vec3 overHSL = rgb2hsl(over.rgb);
+    vec3 c = hsl2rgb(vec3(baseHSL.x, overHSL.y, baseHSL.z));
+    return blendNormal(base, vec4(c, over.a));
+}
+
+vec4 blendColor(vec4 base, vec4 over)
+{
+    vec3 baseHSL = rgb2hsl(base.rgb);
+    vec3 overHSL = rgb2hsl(over.rgb);
+    vec3 c = hsl2rgb(vec3(overHSL.x, overHSL.y, baseHSL.z));
+    return blendNormal(base, vec4(c, over.a));
+}
+
+vec4 blendLuminosity(vec4 base, vec4 over)
+{
+    vec3 baseHSL = rgb2hsl(base.rgb);
+    vec3 overHSL = rgb2hsl(over.rgb);
+    vec3 c = hsl2rgb(vec3(baseHSL.x, baseHSL.y, overHSL.z));
+    return blendNormal(base, vec4(c, over.a));
+}
+
+void main()
+{
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= pc.width || pixel.y >= pc.height) return;
+
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(pc.width, pc.height);
+
+    // Start with transparent black for correct intermediate alpha blending.
+    vec4 result = vec4(0.0, 0.0, 0.0, 0.0);
+
+    // Composite layers bottom-to-top
+    for (int i = 0; i < params.layerCount; i++)
+    {
+        if (params.enabled[i] == 0) continue;
+
+        // Transform UV through layer matrix
+        vec4 transformedUV = params.transform[i] * vec4(uv, 0.0, 1.0);
+        vec2 layerUV = transformedUV.xy / transformedUV.w;
+
+        // Skip if outside layer bounds
+        if (layerUV.x < 0.0 || layerUV.x > 1.0 || 
+            layerUV.y < 0.0 || layerUV.y > 1.0) continue;
+
+        // Apply crop: discard pixels outside the cropped region.
+        // cropRect = (cropLeft, cropRight, cropTop, cropBottom) as 0–1 fractions.
+        vec4  crop = params.cropRect[i];
+        float cL = crop.x;   // fraction to remove from left
+        float cR = crop.y;   // fraction to remove from right
+        float cT = crop.z;   // fraction to remove from top
+        float cB = crop.w;   // fraction to remove from bottom
+        if (layerUV.x < cL || layerUV.x > (1.0 - cR) ||
+            layerUV.y < cT || layerUV.y > (1.0 - cB)) continue;
+
+        vec4 layerColor;
+        if (params.isPacked[i] == 1) {
+            // Packed-alpha: top half of texture = RGB (A=255),
+            //               bottom half = alpha as greyscale.
+            // Remap layerUV.y [0,1] → top half [0,0.5] for RGB,
+            //                       → bottom half [0.5,1.0] for alpha.
+            vec2 rgbUV   = vec2(layerUV.x, layerUV.y * 0.5);
+            vec2 alphaUV = vec2(layerUV.x, layerUV.y * 0.5 + 0.5);
+            vec4 rgb   = texture(layers[i], rgbUV);
+            vec4 alpha = texture(layers[i], alphaUV);
+            layerColor = vec4(rgb.rgb, alpha.r);
+        } else {
+            layerColor = texture(layers[i], layerUV);
+        }
+
+        // Nested sequence composites store BGRA bytes in an RGBA texture
+        // (due to the output .bgra swizzle for Qt readback).  Undo the
+        // swap so the colors are correct when used as a layer.
+        if (params.needsSwapRB[i] == 1) {
+            layerColor = layerColor.bgra;
+        }
+
+        // Apply opacity mask: multiply layer alpha by mask luminance.
+        // The mask texture is a single-channel greyscale where white=opaque, black=transparent.
+        if (params.hasMask[i] == 1) {
+            float maskAlpha = texture(maskTextures[i], uv).r;
+            layerColor.a *= maskAlpha;
+        }
+
+        if (params.isPMA[i] == 1) {
+            // PMA layer (e.g. Spine FBO): blend directly without
+            // un-premultiplying — avoids lossy division by alpha
+            // at semi-transparent edges.
+            // Formula: PMA over straight-alpha base
+            //   totalA = srcA + baseA * (1 - srcA)
+            //   rgb = (srcPMA + base * baseA * (1 - srcA)) / totalA
+            float opa = params.opacity[i];
+            vec3  srcRGB = layerColor.rgb * opa;
+            float srcA   = layerColor.a   * opa;
+            float a      = srcA + result.a * (1.0 - srcA);
+            if (a > 0.001) {
+                vec3 c = (srcRGB + result.rgb * result.a * (1.0 - srcA)) / a;
+                result = vec4(c, a);
+            }
+        } else {
+            layerColor.a *= params.opacity[i];
+
+            // Blend based on mode
+            switch (params.blendMode[i])
+            {
+                case 0:  result = blendNormal(result, layerColor); break;
+                case 1:  result = blendMultiply(result, layerColor); break;
+                case 2:  result = blendScreen(result, layerColor); break;
+                case 3:  result = blendAdd(result, layerColor); break;
+                case 4:  result = blendOverlay(result, layerColor); break;
+                case 5:  result = blendSoftLight(result, layerColor); break;
+                case 6:  result = blendHardLight(result, layerColor); break;
+                case 7:  result = blendDifference(result, layerColor); break;
+                case 8:  result = blendColorDodge(result, layerColor); break;
+                case 9:  result = blendColorBurn(result, layerColor); break;
+                case 10: result = blendExclusion(result, layerColor); break;
+                case 11: result = blendDarken(result, layerColor); break;
+                case 12: result = blendLighten(result, layerColor); break;
+                case 13: result = blendLinearDodge(result, layerColor); break;
+                case 14: result = blendLinearBurn(result, layerColor); break;
+                case 15: result = blendVividLight(result, layerColor); break;
+                case 16: result = blendPinLight(result, layerColor); break;
+                case 17: result = blendHardMix(result, layerColor); break;
+                case 18: result = blendHue(result, layerColor); break;
+                case 19: result = blendSaturation(result, layerColor); break;
+                case 20: result = blendColor(result, layerColor); break;
+                case 21: result = blendLuminosity(result, layerColor); break;
+            }
+        }
+    }
+
+    // Convert straight-alpha result to display-over-black.
+    // Without a background layer the intermediate alpha may be < 1;
+    // premultiplying by alpha dims semi-transparent edges correctly
+    // instead of showing them at full brightness.
+    result = vec4(result.rgb * result.a, 1.0);
+
+    // Swizzle R↔B to output BGRA byte order, which matches Qt's ARGB32
+    // (BGRA in memory on little-endian).  This avoids a per-pixel CPU swap
+    // after readback.
+    imageStore(outputImage, pixel, result.bgra);
+}

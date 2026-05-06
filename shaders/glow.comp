@@ -1,0 +1,66 @@
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0, rgba8) uniform writeonly image2D outputImage;
+layout(binding = 1) uniform sampler2D inputImage;
+
+layout(push_constant) uniform PushConstants {
+    int   width;
+    int   height;
+    int   paramCount;
+    int   _pad;
+    float params[16];
+} pc;
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= pc.width || pixel.y >= pc.height) return;
+
+    float threshold = pc.params[0]; // luminance threshold 0–1
+    float intensity = pc.params[1]; // glow intensity 0–5
+    float radius    = pc.params[2]; // glow radius 1–50
+
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(pc.width, pc.height);
+    vec4 center = texture(inputImage, uv);
+
+    if (intensity < 0.01) {
+        imageStore(outputImage, pixel, center);
+        return;
+    }
+
+    // Extract bright areas above threshold, then blur them
+    int iRadius = int(clamp(radius, 1.0, 50.0));
+    float sigma = radius * 0.4;
+    float sigSq2 = 2.0 * sigma * sigma;
+
+    vec4 glow = vec4(0.0);
+    float wSum = 0.0;
+
+    // Use a stride to keep iteration count manageable for large radii
+    int step = max(1, iRadius / 8);
+
+    for (int dy = -iRadius; dy <= iRadius; dy += step) {
+        for (int dx = -iRadius; dx <= iRadius; dx += step) {
+            float d2 = float(dx * dx + dy * dy);
+            if (d2 > float(iRadius * iRadius)) continue;
+
+            float w = exp(-d2 / sigSq2);
+            vec2 sUV = (vec2(pixel) + vec2(dx, dy) + 0.5) / vec2(pc.width, pc.height);
+            vec4 s = texture(inputImage, sUV);
+
+            // Only include bright pixels
+            float luma = dot(s.rgb, vec3(0.299, 0.587, 0.114));
+            float bright = smoothstep(threshold, threshold + 0.1, luma);
+            glow += s * w * bright;
+            wSum += w;
+        }
+    }
+
+    if (wSum > 0.0) glow /= wSum;
+
+    // Additive blend: original + glow * intensity
+    vec4 result = center + glow * intensity;
+    result = clamp(result, 0.0, 1.0);
+    result.a = center.a;
+    imageStore(outputImage, pixel, result);
+}

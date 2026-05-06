@@ -1,0 +1,4 @@
+// Windows application icon — embedded in the .exe by the resource compiler.
+// IDI_ICON1 (1) is the default icon Windows uses for the executable.
+// The .ico is generated from icon.png at build time by png_to_ico.py.
+1 ICON "@ROUNDTABLE_ICO_PATH@"

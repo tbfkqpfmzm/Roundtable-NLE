@@ -1,0 +1,112 @@
+#version 450
+// Zoom transition.
+// direction=0: simple zoom (A zooms in, B appears)
+// direction=1: cross zoom (both zoom with blur effect)
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0, rgba8) uniform writeonly image2D outputImage;
+layout(binding = 1) uniform sampler2D sourceA;
+layout(binding = 2) uniform sampler2D sourceB;
+
+layout(push_constant) uniform PushConstants {
+    int   width;
+    int   height;
+    float progress;
+    int   direction;
+    float softness;
+    float param2;
+    float param3;    // sourceA packed-alpha flag
+    float param4;    // sourceB packed-alpha flag
+} pc;
+
+
+// Per-source transform and packed-alpha data (SSBO from TransitionRenderer)
+layout(std430, binding = 3) readonly buffer SourceParams {
+    mat4 transformA;
+    mat4 transformB;
+    vec4 cropA;       // (L, R, T, B)
+    vec4 cropB;
+    int  isPackedA;
+    int  isPackedB;
+} sp;
+
+// Sample a source texture with viewport transform, crop, and packed-alpha support.
+// 'uv' is the transition-effect UV (in viewport space [0,1]).
+vec4 sampleSrc(sampler2D tex, vec2 uv, mat4 xform, vec4 crop, int packed) {
+    // Map from viewport UV to source texture UV
+    vec4 t = xform * vec4(uv, 0.0, 1.0);
+    if (t.w == 0.0) return vec4(0.0);
+    vec2 srcUV = t.xy / t.w;
+
+    // Out-of-bounds = transparent
+    if (srcUV.x < 0.0 || srcUV.x > 1.0 || srcUV.y < 0.0 || srcUV.y > 1.0)
+        return vec4(0.0);
+
+    // Crop check
+    if (srcUV.x < crop.x || srcUV.x > (1.0 - crop.y) ||
+        srcUV.y < crop.z || srcUV.y > (1.0 - crop.w))
+        return vec4(0.0);
+
+    // Packed-alpha: top half = RGB, bottom half = alpha greyscale
+    if (packed > 0) {
+        vec2 rgbUV   = vec2(srcUV.x, srcUV.y * 0.5);
+        vec2 alphaUV = vec2(srcUV.x, srcUV.y * 0.5 + 0.5);
+        vec3 rgb     = texture(tex, rgbUV).rgb;
+        float a      = texture(tex, alphaUV).r;
+        return vec4(rgb, a);
+    }
+    return texture(tex, srcUV);
+}
+void main()
+{
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= pc.width || pixel.y >= pc.height) return;
+
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(pc.width, pc.height);
+    float p = pc.progress;
+
+    vec4 color;
+
+    if (pc.direction == 0) {
+        // Simple zoom: A zooms in and fades, B zooms out from small and appears
+        float scaleA = 1.0 + p * 2.0;  // A scales up
+        float scaleB = mix(3.0, 1.0, p); // B starts big and settles
+
+        vec2 uvA = (uv - 0.5) / scaleA + 0.5;
+        vec2 uvB = (uv - 0.5) / scaleB + 0.5;
+
+        vec4 colorA = sampleSrc(sourceA, uvA, sp.transformA, sp.cropA, (pc.param3 > 0.5 ? 1 : 0));
+        vec4 colorB = sampleSrc(sourceB, uvB, sp.transformB, sp.cropB, (pc.param4 > 0.5 ? 1 : 0));
+
+        float fadeA = 1.0 - smoothstep(0.3, 0.7, p);
+        color = mix(colorB, colorA, fadeA);
+    } else {
+        // Cross zoom: both zoom with radial blur approximation
+        float zoomA = 1.0 + p * 1.5;
+        float zoomB = mix(2.5, 1.0, p);
+
+        vec2 center = vec2(0.5);
+        vec4 colorA = vec4(0.0);
+        vec4 colorB = vec4(0.0);
+
+        // Simple multi-sample for blur approximation (5 samples)
+        const int samples = 5;
+        for (int i = 0; i < samples; i++) {
+            float t = float(i) / float(samples - 1);
+            float sA = mix(1.0, zoomA, t * 0.3);
+            float sB = mix(1.0, zoomB, t * 0.3);
+            vec2 uvA = (uv - center) / sA + center;
+            vec2 uvB = (uv - center) / sB + center;
+            colorA += sampleSrc(sourceA, uvA, sp.transformA, sp.cropA, (pc.param3 > 0.5 ? 1 : 0));
+            colorB += sampleSrc(sourceB, uvB, sp.transformB, sp.cropB, (pc.param4 > 0.5 ? 1 : 0));
+        }
+        colorA /= float(samples);
+        colorB /= float(samples);
+
+        float fadeA = 1.0 - smoothstep(0.3, 0.7, p);
+        color = mix(colorB, colorA, fadeA);
+    }
+
+    imageStore(outputImage, pixel, color);
+}

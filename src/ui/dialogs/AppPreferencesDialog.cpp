@@ -1,0 +1,213 @@
+/*
+ * AppPreferencesDialog.cpp — Application preferences implementation.
+ */
+
+#include "dialogs/AppPreferencesDialog.h"
+#include "Theme.h"
+#include "GpuContext.h"
+#include "media/AudioEngine.h"
+#include "media/VideoDecoder.h"
+
+#include <QComboBox>
+#include <QDialogButtonBox>
+#include <QFileDialog>
+#include <QFormLayout>
+#include <QGroupBox>
+#include <QLabel>
+#include <QLineEdit>
+#include <QPushButton>
+#include <QSettings>
+#include <QSpinBox>
+#include <QVBoxLayout>
+
+namespace rt {
+
+AppPreferencesDialog::AppPreferencesDialog(QWidget* parent,
+                                           const std::vector<AudioDeviceInfo>& audioDevices)
+    : QDialog(parent)
+{
+    setWindowTitle(tr("Preferences"));
+    setMinimumWidth(500);
+
+    auto* mainLayout = new QVBoxLayout(this);
+
+    // ── Appearance ──────────────────────────────────────────────────────
+    auto* appearanceGroup = new QGroupBox(tr("Appearance"), this);
+    auto* appearanceForm = new QFormLayout(appearanceGroup);
+
+    m_themeCombo = new QComboBox(this);
+    m_themeCombo->addItem(tr("Dark"));
+    appearanceForm->addRow(tr("Theme:"), m_themeCombo);
+
+    m_scrollbarWidthSpin = new QSpinBox(this);
+    m_scrollbarWidthSpin->setRange(10, 28);
+    m_scrollbarWidthSpin->setSuffix(tr(" px"));
+    appearanceForm->addRow(tr("Scrollbar Width:"), m_scrollbarWidthSpin);
+
+    mainLayout->addWidget(appearanceGroup);
+
+    // ── General ─────────────────────────────────────────────────────────
+    auto* generalGroup = new QGroupBox(tr("General"), this);
+    auto* generalForm = new QFormLayout(generalGroup);
+
+    m_autosaveSpin = new QSpinBox(this);
+    m_autosaveSpin->setRange(1, 60);
+    m_autosaveSpin->setSuffix(tr(" minutes"));
+    generalForm->addRow(tr("Autosave Interval:"), m_autosaveSpin);
+
+    mainLayout->addWidget(generalGroup);
+
+    // ── Directories ─────────────────────────────────────────────────────
+    auto* dirGroup = new QGroupBox(tr("Directories"), this);
+    auto* dirForm = new QFormLayout(dirGroup);
+
+    auto* projRow = new QHBoxLayout;
+    m_projectsDirEdit = new QLineEdit(this);
+    m_projectsDirEdit->setReadOnly(true);
+    projRow->addWidget(m_projectsDirEdit, 1);
+    auto* projBrowse = new QPushButton(tr("Browse..."), this);
+    connect(projBrowse, &QPushButton::clicked, this, [this]() {
+        QString dir = QFileDialog::getExistingDirectory(this,
+            tr("Select Projects Directory"), m_projectsDirEdit->text());
+        if (!dir.isEmpty()) m_projectsDirEdit->setText(dir);
+    });
+    projRow->addWidget(projBrowse);
+    dirForm->addRow(tr("Projects Folder:"), projRow);
+
+    auto* cacheRow = new QHBoxLayout;
+    m_cacheDirEdit = new QLineEdit(this);
+    m_cacheDirEdit->setReadOnly(true);
+    cacheRow->addWidget(m_cacheDirEdit, 1);
+    auto* cacheBrowse = new QPushButton(tr("Browse..."), this);
+    connect(cacheBrowse, &QPushButton::clicked, this, [this]() {
+        QString dir = QFileDialog::getExistingDirectory(this,
+            tr("Select Cache Directory"), m_cacheDirEdit->text());
+        if (!dir.isEmpty()) m_cacheDirEdit->setText(dir);
+    });
+    cacheRow->addWidget(cacheBrowse);
+    dirForm->addRow(tr("Cache Folder:"), cacheRow);
+
+    mainLayout->addWidget(dirGroup);
+
+    // ── Audio ───────────────────────────────────────────────────────────
+    auto* audioGroup = new QGroupBox(tr("Audio"), this);
+    auto* audioForm = new QFormLayout(audioGroup);
+
+    m_audioDeviceCombo = new QComboBox(this);
+    m_audioDeviceCombo->addItem(tr("System Default"), -1);
+    for (const auto& dev : audioDevices) {
+        QString label = QString::fromStdString(dev.name);
+        if (dev.isDefault) label += tr(" (default)");
+        m_audioDeviceCombo->addItem(label, dev.index);
+    }
+    audioForm->addRow(tr("Output Device:"), m_audioDeviceCombo);
+
+    mainLayout->addWidget(audioGroup);
+
+    // ── Hardware Acceleration ───────────────────────────────────────────
+    auto* hwGroup = new QGroupBox(tr("Hardware Acceleration"), this);
+    auto* hwForm = new QFormLayout(hwGroup);
+
+    m_hardwareDecodeCombo = new QComboBox(this);
+    m_hardwareDecodeCombo->addItem(tr("Auto (prefer NVDEC / GPU)"), 0);
+    m_hardwareDecodeCombo->addItem(tr("Software only"), 1);
+    hwForm->addRow(tr("Video Decode:"), m_hardwareDecodeCombo);
+
+    // CUDA availability status
+    bool cudaOk = GpuContext::get().cudaAvailable();
+    m_cudaStatusLabel = new QLabel(this);
+    if (cudaOk) {
+        m_cudaStatusLabel->setText(tr("✓ NVIDIA CUDA / NVDEC detected"));
+        m_cudaStatusLabel->setStyleSheet("color: #64b96a;");
+    } else {
+        m_cudaStatusLabel->setText(tr("✗ NVIDIA CUDA not available — software fallback active"));
+        m_cudaStatusLabel->setStyleSheet("color: #d96060;");
+    }
+    hwForm->addRow(tr("GPU Status:"), m_cudaStatusLabel);
+
+    mainLayout->addWidget(hwGroup);
+
+    // ── Button box ──────────────────────────────────────────────────────
+    mainLayout->addStretch();
+
+    auto* buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+    mainLayout->addWidget(buttons);
+
+    connect(buttons, &QDialogButtonBox::accepted, this, [this]() {
+        saveSettings();
+        accept();
+    });
+    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+
+    loadSettings();
+    m_originalThemeIndex = m_themeCombo->currentIndex();
+}
+
+int AppPreferencesDialog::autosaveMinutes() const { return m_autosaveSpin->value(); }
+QString AppPreferencesDialog::projectsDirectory() const { return m_projectsDirEdit->text(); }
+QString AppPreferencesDialog::cacheDirectory() const { return m_cacheDirEdit->text(); }
+bool AppPreferencesDialog::themeChanged() const { return m_themeCombo->currentIndex() != m_originalThemeIndex; }
+int AppPreferencesDialog::themePresetIndex() const { return m_themeCombo->currentIndex(); }
+int AppPreferencesDialog::scrollbarWidth() const { return m_scrollbarWidthSpin->value(); }
+int AppPreferencesDialog::audioDeviceIndex() const
+{
+    return m_audioDeviceCombo ? m_audioDeviceCombo->currentData().toInt() : -1;
+}
+
+int AppPreferencesDialog::hardwareDecodeMode() const
+{
+    return m_hardwareDecodeCombo ? m_hardwareDecodeCombo->currentData().toInt() : 0;
+}
+
+void AppPreferencesDialog::loadSettings()
+{
+    QSettings s("ROUNDTABLE", "NLE");
+    m_themeCombo->setCurrentIndex(s.value("ThemePreset", 0).toInt());
+    m_autosaveSpin->setValue(s.value("AutosaveInterval", 5).toInt());
+    m_scrollbarWidthSpin->setValue(s.value("ScrollbarWidth", 16).toInt());
+    m_projectsDirEdit->setText(s.value("ProjectsDirectory").toString());
+    m_cacheDirEdit->setText(s.value("CacheDirectory").toString());
+
+    int hwMode = s.value("HardwareDecodeMode", 0).toInt();
+    if (m_hardwareDecodeCombo) {
+        for (int i = 0; i < m_hardwareDecodeCombo->count(); ++i) {
+            if (m_hardwareDecodeCombo->itemData(i).toInt() == hwMode) {
+                m_hardwareDecodeCombo->setCurrentIndex(i);
+                break;
+            }
+        }
+    }
+
+    int savedDevice = s.value("AudioDeviceIndex", -1).toInt();
+    if (m_audioDeviceCombo) {
+        for (int i = 0; i < m_audioDeviceCombo->count(); ++i) {
+            if (m_audioDeviceCombo->itemData(i).toInt() == savedDevice) {
+                m_audioDeviceCombo->setCurrentIndex(i);
+                break;
+            }
+        }
+    }
+}
+
+void AppPreferencesDialog::saveSettings()
+{
+    QSettings s("ROUNDTABLE", "NLE");
+    s.setValue("ThemePreset", m_themeCombo->currentIndex());
+    s.setValue("AutosaveInterval", m_autosaveSpin->value());
+    s.setValue("ScrollbarWidth", m_scrollbarWidthSpin->value());
+    if (!m_projectsDirEdit->text().isEmpty())
+        s.setValue("ProjectsDirectory", m_projectsDirEdit->text());
+    if (!m_cacheDirEdit->text().isEmpty())
+        s.setValue("CacheDirectory", m_cacheDirEdit->text());
+    if (m_audioDeviceCombo)
+        s.setValue("AudioDeviceIndex", m_audioDeviceCombo->currentData().toInt());
+    if (m_hardwareDecodeCombo) {
+        int mode = m_hardwareDecodeCombo->currentData().toInt();
+        s.setValue("HardwareDecodeMode", mode);
+        // Apply immediately — affects all new VideoDecoder instances
+        setForceSoftwareDecode(mode == 1);
+    }
+}
+
+} // namespace rt

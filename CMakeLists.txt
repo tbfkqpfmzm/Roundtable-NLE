@@ -1,0 +1,210 @@
+cmake_minimum_required(VERSION 3.28)
+
+if(POLICY CMP0091)
+    cmake_policy(SET CMP0091 NEW)
+endif()
+
+# Set before project()/target creation so MSVC runtime selection is honored
+# by all targets unless explicitly overridden.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL" CACHE STRING "MSVC runtime" FORCE)
+
+# Read version from src/version.h (written by publish.bat at release time).
+# This is checked into git so every tag has an immutable version.
+file(STRINGS "${CMAKE_SOURCE_DIR}/src/version.h" _version_line
+     REGEX "#define ROUNDTABLE_VERSION")
+if(_version_line MATCHES "\"([0-9.]+)\"")
+    set(PROJECT_VERSION "${CMAKE_MATCH_1}")
+else()
+    set(PROJECT_VERSION "0.0.0")
+endif()
+message(STATUS "Version: ${PROJECT_VERSION} (from src/version.h)")
+# Reconfigure when version.h changes (pulled a new tag)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_SOURCE_DIR}/src/version.h")
+
+project(Roundtable VERSION ${PROJECT_VERSION} LANGUAGES CXX)
+
+# ─── C++20 Standard ─────────────────────────────────────────────────────────
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# ─── CRT linkage ────────────────────────────────────────────────────────────
+# Force all targets (including FetchContent deps) to use the dynamic CRT
+# (/MD in Release, /MDd in Debug).
+
+# ─── Output directories ─────────────────────────────────────────────────────
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+
+# ─── Build type defaults ────────────────────────────────────────────────────
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type" FORCE)
+endif()
+
+# ─── Unity (jumbo) build support ────────────────────────────────────────────
+# Groups multiple .cpp files into single TUs to reduce header re-parsing.
+# Enable with -DCMAKE_UNITY_BUILD=ON for faster full rebuilds.
+# Default OFF — incremental builds are faster without it.
+option(CMAKE_UNITY_BUILD "Enable unity (jumbo) build" OFF)
+if(CMAKE_UNITY_BUILD)
+    set(CMAKE_UNITY_BUILD_BATCH_SIZE 8)
+endif()
+
+# ─── Compiler flags ─────────────────────────────────────────────────────────
+if(MSVC)
+    add_compile_options(
+        /W4             # High warning level
+        /MP             # Multi-processor compilation (use all Ryzen cores)
+        /permissive-    # Standards conformance
+        /Zc:__cplusplus # Report correct __cplusplus value
+        /utf-8          # Source and execution charset
+    )
+    # Prevent Windows.h from defining min/max macros (safe for third-party libs)
+    add_compile_definitions(NOMINMAX)
+    # WIN32_LEAN_AND_MEAN applied per-target to avoid breaking PortAudio WASAPI
+    # Release optimizations (generator expression for multi-config generators)
+    add_compile_options(
+        $<$<CONFIG:Release>:/O2>
+        $<$<CONFIG:Release>:/Oi>
+        $<$<CONFIG:Release>:/Gy>
+    )
+    add_link_options(
+        $<$<CONFIG:Release>:/OPT:REF>
+        $<$<CONFIG:Release>:/OPT:ICF>
+    )
+    # Link-Time Code Generation (very slow — only for final distribution builds)
+    option(ROUNDTABLE_LTO "Enable /GL + /LTCG for whole-program optimization (slow)" OFF)
+    if(ROUNDTABLE_LTO)
+        add_compile_options($<$<CONFIG:Release>:/GL>)
+        add_link_options($<$<CONFIG:Release>:/LTCG>)
+    endif()
+else()
+    add_compile_options(-Wall -Wextra -Wpedantic)
+    if(CMAKE_BUILD_TYPE STREQUAL "Release")
+        add_compile_options(-O3 -march=native -flto)
+    endif()
+endif()
+
+# ─── Portable dependencies (no system install required) ──────────────────────
+# All deps fetched via FetchContent or shipped in third_party/.
+# No vcpkg, no Vulkan SDK, no CUDA Toolkit install needed.
+add_subdirectory(third_party)
+
+# ─── Global definitions ─────────────────────────────────────────────────────
+add_compile_definitions(
+    ROUNDTABLE_VERSION="${PROJECT_VERSION}"
+    VK_NO_PROTOTYPES          # Required: volk provides Vulkan function pointers at runtime.
+                              # Without this, vulkan.h declares direct prototypes that link
+                              # to volk's pointer variables instead of calling through them.
+    $<$<CONFIG:Debug>:ROUNDTABLE_DEBUG>
+    $<$<BOOL:${CUDAToolkit_FOUND}>:ROUNDTABLE_HAS_CUDA>
+    $<$<BOOL:${FFMPEG_FOUND}>:ROUNDTABLE_HAS_FFMPEG>
+)
+
+# ─── Shader compilation ─────────────────────────────────────────────────────
+# Compile GLSL → SPIR-V at build time (requires glslc from Vulkan SDK or shaderc)
+set(SHADER_DIR ${CMAKE_SOURCE_DIR}/shaders)
+set(SPIRV_OUTPUT_DIR ${CMAKE_BINARY_DIR}/shaders)
+file(MAKE_DIRECTORY ${SPIRV_OUTPUT_DIR})
+
+file(GLOB SHADER_SOURCES CONFIGURE_DEPENDS
+    ${SHADER_DIR}/*.vert
+    ${SHADER_DIR}/*.frag
+    ${SHADER_DIR}/*.comp
+)
+
+# Try to find glslc (from tools/shaderc/, Vulkan SDK, or system PATH)
+find_program(GLSLC_EXECUTABLE glslc
+    HINTS ${CMAKE_SOURCE_DIR}/tools/shaderc
+          $ENV{VULKAN_SDK}/Bin
+          $ENV{VULKAN_SDK}/bin
+)
+
+if(GLSLC_EXECUTABLE AND SHADER_SOURCES)
+    foreach(SHADER ${SHADER_SOURCES})
+        get_filename_component(SHADER_NAME ${SHADER} NAME)
+        set(SPIRV_OUTPUT ${SPIRV_OUTPUT_DIR}/${SHADER_NAME}.spv)
+        add_custom_command(
+            OUTPUT ${SPIRV_OUTPUT}
+            COMMAND ${GLSLC_EXECUTABLE} ${SHADER} -o ${SPIRV_OUTPUT}
+            DEPENDS ${SHADER}
+            COMMENT "Compiling shader: ${SHADER_NAME}"
+        )
+        list(APPEND SPIRV_OUTPUTS ${SPIRV_OUTPUT})
+    endforeach()
+    add_custom_target(shaders ALL DEPENDS ${SPIRV_OUTPUTS})
+else()
+    if(NOT GLSLC_EXECUTABLE)
+        message(STATUS "glslc not found — shaders will not be compiled (add Vulkan SDK to PATH or install shaderc)")
+    endif()
+    add_custom_target(shaders) # Empty target so dependencies don't break
+endif()
+
+# ─── Subdirectories ─────────────────────────────────────────────────────────
+add_subdirectory(src)
+
+enable_testing()
+option(ROUNDTABLE_BUILD_TESTS "Build Roundtable unit/integration tests" OFF)
+if(ROUNDTABLE_BUILD_TESTS)
+    find_package(Qt6 QUIET COMPONENTS Test)
+    if(Qt6Test_FOUND)
+        add_subdirectory(tests)
+    else()
+        message(STATUS "Qt6::Test not found — skipping test targets")
+    endif()
+else()
+    message(STATUS "ROUNDTABLE_BUILD_TESTS=OFF — skipping tests (pass -DROUNDTABLE_BUILD_TESTS=ON to enable)")
+endif()
+
+if(MSVC)
+    # Normalize CRT linkage on every local, non-imported target to avoid
+    # mixed-runtime link warnings (LNK4098).
+    get_property(_allTargets GLOBAL PROPERTY TARGETS)
+    foreach(_t IN LISTS _allTargets)
+        get_target_property(_isImported ${_t} IMPORTED)
+        if(_isImported)
+            continue()
+        endif()
+        get_target_property(_type ${_t} TYPE)
+        if(_type STREQUAL "INTERFACE_LIBRARY")
+            continue()
+        endif()
+        set_property(TARGET ${_t} PROPERTY
+            MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+    endforeach()
+endif()
+
+# ─── Install ─────────────────────────────────────────────────────────────────
+if(TARGET roundtable)
+    install(TARGETS roundtable RUNTIME DESTINATION bin)
+endif()
+
+# ─── Standalone tools ────────────────────────────────────────────────────────
+if(SPINE_CPP_FOUND)
+    add_executable(query_spine_bounds tools/query_spine_bounds.cpp)
+    target_link_libraries(query_spine_bounds PRIVATE roundtable_core)
+    target_include_directories(query_spine_bounds PRIVATE ${CMAKE_SOURCE_DIR}/src)
+endif()
+install(DIRECTORY ${SPIRV_OUTPUT_DIR}/ DESTINATION shaders)
+
+# Copy FFmpeg DLLs to output directory for runtime
+if(FFMPEG_FOUND)
+    file(GLOB FFMPEG_DLLS "${FFMPEG_BIN_DIR}/*.dll")
+    # Copy DLLs alongside test executables (bin/ output dir)
+    # Use a custom target instead of POST_BUILD on a specific target
+    add_custom_target(copy_ffmpeg_dlls ALL
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>/
+        COMMENT "Copying FFmpeg DLLs to output directory"
+    )
+    foreach(DLL ${FFMPEG_DLLS})
+        get_filename_component(DLL_NAME ${DLL} NAME)
+        add_custom_command(TARGET copy_ffmpeg_dlls POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DLL}
+                    ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>/
+            COMMENT "Copying ${DLL_NAME}"
+        )
+    endforeach()
+endif()
+install(DIRECTORY ${CMAKE_SOURCE_DIR}/assets/ DESTINATION assets)

@@ -1,0 +1,63 @@
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0, rgba8) uniform writeonly image2D outputImage;
+layout(binding = 1) uniform sampler2D inputImage;
+
+layout(push_constant) uniform PushConstants {
+    int   width;
+    int   height;
+    int   paramCount;
+    int   _pad;
+    float params[16];
+} pc;
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= pc.width || pixel.y >= pc.height) return;
+
+    float offsetX  = pc.params[0]; // pixel offset X (-2000 to 2000)
+    float offsetY  = pc.params[1]; // pixel offset Y (-2000 to 2000)
+    float scale    = pc.params[2]; // uniform scale (0.01–10)
+    float rotation = pc.params[3]; // degrees (-360 to 360)
+    float anchorX  = pc.params[4]; // normalized anchor X (0–1)
+    float anchorY  = pc.params[5]; // normalized anchor Y (0–1)
+
+    vec2 size = vec2(pc.width, pc.height);
+
+    // Compute anchor point in pixel space
+    vec2 anchor = vec2(anchorX * size.x, anchorY * size.y);
+
+    // Transform: move to anchor, rotate, scale, translate
+    float rad = radians(-rotation);
+    float cosR = cos(rad);
+    float sinR = sin(rad);
+
+    // Current pixel position relative to anchor
+    vec2 pos = vec2(pixel) + 0.5 - anchor;
+
+    // Inverse transform to find source position
+    // Undo translation
+    pos -= vec2(offsetX, offsetY);
+
+    // Undo scale
+    pos /= max(scale, 0.001);
+
+    // Undo rotation
+    vec2 rotated;
+    rotated.x = pos.x * cosR + pos.y * sinR;
+    rotated.y = -pos.x * sinR + pos.y * cosR;
+
+    // Move back from anchor
+    vec2 srcPos = rotated + anchor;
+    vec2 srcUV = srcPos / size;
+
+    // Sample with bounds check
+    if (srcUV.x < 0.0 || srcUV.x > 1.0 || srcUV.y < 0.0 || srcUV.y > 1.0) {
+        imageStore(outputImage, pixel, vec4(0.0));
+        return;
+    }
+
+    vec4 color = texture(inputImage, srcUV);
+    imageStore(outputImage, pixel, color);
+}

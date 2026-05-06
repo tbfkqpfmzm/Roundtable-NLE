@@ -1,0 +1,67 @@
+#version 450
+// Gaussian blur compute shader.
+// Step 22: Effects System
+//
+// Single-pass blur (combined horizontal + vertical for simplicity).
+// For separable two-pass blur, this would be dispatched twice with
+// different direction parameters.
+//
+// Parameters (push constants):
+//   params[0] = radius  (0–100 pixels)
+//   params[1] = sigma   (0.1–50.0)
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0, rgba8) uniform writeonly image2D outputImage;
+layout(binding = 1) uniform sampler2D inputImage;
+
+layout(push_constant) uniform PushConstants {
+    int   width;
+    int   height;
+    int   paramCount;
+    int   _pad;
+    float params[16];
+} pc;
+
+void main()
+{
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= pc.width || pixel.y >= pc.height) return;
+
+    float radius = pc.params[0];
+    // Derive sigma from radius using the standard 3-sigma rule so the
+    // Gaussian kernel falls off naturally inside [-radius, +radius].
+    // Floor at 0.5 to avoid a divide-by-zero in the weight calc.
+    float sigma  = max(radius / 3.0, 0.5);
+
+    // If radius is ~0, pass through
+    if (radius < 0.5) {
+        vec2 uv = (vec2(pixel) + 0.5) / vec2(pc.width, pc.height);
+        imageStore(outputImage, pixel, texture(inputImage, uv));
+        return;
+    }
+
+    int iRadius = int(min(radius, 50.0)); // cap for performance
+    float sigmaSquared2 = 2.0 * sigma * sigma;
+
+    vec4 sum = vec4(0.0);
+    float weightSum = 0.0;
+
+    // 2D kernel sampling
+    for (int dy = -iRadius; dy <= iRadius; dy++) {
+        for (int dx = -iRadius; dx <= iRadius; dx++) {
+            float dist2 = float(dx * dx + dy * dy);
+            if (dist2 > radius * radius) continue;
+
+            float weight = exp(-dist2 / sigmaSquared2);
+            vec2 sampleUV = (vec2(pixel) + vec2(dx, dy) + 0.5) / vec2(pc.width, pc.height);
+            sum += texture(inputImage, sampleUV) * weight;
+            weightSum += weight;
+        }
+    }
+
+    if (weightSum > 0.0)
+        sum /= weightSum;
+
+    imageStore(outputImage, pixel, sum);
+}

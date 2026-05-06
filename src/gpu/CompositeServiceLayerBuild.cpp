@@ -1,0 +1,1333 @@
+/*
+ * CompositeServiceLayerBuild.cpp - Layer collection / building for compositeFrame().
+ * Extracted from CompositeServiceFrame.cpp (Step P1.3 of modularization plan).
+ */
+
+#include "CompositeService.h"
+#include "CompositeServiceLayerBuild.h"
+#include "ClipRenderers.h"
+#include "CompositeServiceBlend.h"
+
+#include "media/FrameCache.h"
+#include "media/MediaPool.h"
+#include "Constants.h"
+#include "timeline/AudioClip.h"
+#include "timeline/ImageClip.h"
+#include "timeline/SequenceClip.h"
+#include "timeline/SpineClip.h"
+#include "timeline/TitleClip.h"
+#include "timeline/GraphicClip.h"
+#include "timeline/GraphicLayer.h"
+#include "timeline/Timeline.h"
+#include "timeline/Track.h"
+#include "timeline/Transition.h"
+#include "timeline/VideoClip.h"
+#include "timeline/OpacityMask.h"
+
+#include "project/Project.h"
+
+#ifdef ROUNDTABLE_HAS_SPINE
+#include "spine/AnimationVideoCache.h"
+#include "spine/ModelManager.h"
+#include "spine/ShotPreset.h"
+#include "stb_image.h"
+#endif
+
+#include "GpuTextureCache.h"
+#include "GpuContext.h"
+#include "SpineRenderer.h"
+
+#include <thread>
+#include <unordered_set>
+
+namespace rt {
+
+// ---- buildLayersForFrame ----
+std::vector<LayerInfo> CompositeService::buildLayersForFrame(
+    int64_t tick, uint32_t outW, uint32_t outH,
+    bool scrubMode, bool playbackNonBlocking,
+    int& clipsAtTick, bool perfLog,
+    std::unique_lock<std::mutex>& lock,
+    bool& gpuSpineUsedThisFrame)
+{
+    auto fetchMediaFrame = [&](MediaHandle handle, int64_t frameNumber,
+                               ResolutionTier tier) -> std::shared_ptr<CachedFrame> {
+        if (!m_mediaPool)
+            return nullptr;
+        // During export (forceFullRes), first try the cache via tryGetFrame
+        // — this sets the playhead + extends the interactive playback window
+        // (unlike getFrame with scrubMode=true which skips both).  If the
+        // exact frame IS cached, return it instantly.  Otherwise fall through
+        // to blocking getFrame with scrubMode=true which does inline decode
+        // via the scrub decoder (the !scrubMode path only returns stale
+        // frames without decoding — useless for export).  The playhead is
+        // already set by tryGetFrame, so the cache won't thrash-evict.
+        if (m_forceFullResolution.load()) {
+            auto frame = m_mediaPool->tryGetFrame(handle, frameNumber, tier);
+            if (frame && frame->frameNumber == frameNumber)
+                return frame;
+            return m_mediaPool->getFrame(handle, frameNumber, tier, true);
+        }
+        // Try non-blocking first (fast path for cached frames during playback).
+        auto frame = m_mediaPool->tryGetFrame(handle, frameNumber, tier);
+        if (frame)
+            return frame;
+        // During timeline scrub, avoid blocking decode (would hold the
+        // compositor mutex for 50-500ms, causing the program monitor to
+        // freeze on a stale m_lastGoodComposite).  The scrub settle loop
+        // will re-try next cycle when the prefetch has landed the frame.
+        if (scrubMode)
+            return nullptr;
+        // Fall back to blocking read (correct path for cold cache).
+        return m_mediaPool->getFrame(handle, frameNumber, tier, scrubMode);
+    };
+
+    std::vector<LayerInfo> layers;
+
+    clipsAtTick = 0;   // count enabled clips
+    m_gpuSpineCount = 0;
+    m_gpuSpineInsertedLayer = -1;
+    m_gpuSpinePrevLayer = -1;
+    m_gpuSpineJustRendered = false;
+    for (size_t ti_rev = m_timeline->trackCount(); ti_rev > 0; --ti_rev) {
+        auto* track = m_timeline->track(ti_rev - 1);
+        if (!track || track->type() != TrackType::Video || track->isMuted())
+            continue;
+
+        auto active = track->clipsAtTime(tick);
+
+        // ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ Cross-dissolve fix: include clips outside their normal range
+        // that participate in an active cross-dissolve transition at this
+        // tick.  Without this, only ONE clip renders and we get a dip-to-
+        // black instead of a true simultaneous dissolve.
+        for (size_t trI2 = 0; trI2 < track->transitionCount(); ++trI2) {
+            const Transition* trans = track->transition(trI2);
+            if (!trans) continue;
+            float prog = trans->progress(tick);
+            if (prog < 0.0f) continue; // tick outside transition
+
+            // Add leftClip if not already active (past its timelineOut)
+            if (trans->leftClipId != 0) {
+                bool found = false;
+                for (auto* a : active) if (a->id() == trans->leftClipId) { found = true; break; }
+                if (!found) {
+                    size_t li = track->findClipIndexById(trans->leftClipId);
+                    if (li < track->clipCount())
+                        active.push_back(track->clip(li));
+                }
+            }
+            // Add rightClip if not already active (before its timelineIn)
+            if (trans->rightClipId != 0) {
+                bool found = false;
+                for (auto* a : active) if (a->id() == trans->rightClipId) { found = true; break; }
+                if (!found) {
+                    size_t rri = track->findClipIndexById(trans->rightClipId);
+                    if (rri < track->clipCount())
+                        active.push_back(track->clip(rri));
+                }
+            }
+        }
+
+        for (auto* clip : active) {
+            auto perfClipT0 = std::chrono::high_resolution_clock::now();
+            if (!clip->isEnabled()) continue;
+            ++clipsAtTick;
+            bool fromNestedSequence = false;
+
+            // Evaluate common transform properties.
+            // Clip positions are stored as pixel offsets from center at the
+            // REFERENCE resolution (1920ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â1080).  Scale them proportionally
+            // to the actual output resolution so compositing looks correct
+            // at any viewport size.
+            constexpr float REF_W = 1920.0f;
+            constexpr float REF_H = 1080.0f;
+            const float scaleToOutX = static_cast<float>(outW) / REF_W;
+            const float scaleToOutY = static_cast<float>(outH) / REF_H;
+
+            const int64_t localTick = tick - clip->timelineIn();
+            float opac = clip->opacity().evaluate(localTick);
+            const float px   = clip->positionX().evaluate(localTick) * scaleToOutX;
+            const float py   = clip->positionY().evaluate(localTick) * scaleToOutY;
+            const float sx   = clip->scaleX().evaluate(localTick);
+            const float sy   = clip->scaleY().evaluate(localTick);
+            const float rot  = clip->rotation().evaluate(localTick);
+
+            // Apply transition opacity modulation (for fades & dissolves).
+            // Wipe transitions store metadata for GPU spatial blending.
+            const uint64_t clipId = clip->id();
+            TransitionType activeWipeType = TransitionType::CrossDissolve;
+            float activeWipeProgress = -1.0f;
+            float activeWipeSoftness = -1.0f;
+            uint64_t activeWipePeer = 0;
+            bool activeWipeOutgoing = false;
+
+            for (size_t trI = 0; trI < track->transitionCount(); ++trI) {
+                const Transition* trans = track->transition(trI);
+                if (!trans) continue;
+                float prog = trans->progress(tick);
+                if (prog < 0.0f) continue; // tick outside transition range
+
+                if (trans->type == TransitionType::FadeFromBlack) {
+                    // Single-clip GPU fade: clip fades in from black.
+                    if (trans->rightClipId == clipId) {
+                        activeWipeType = TransitionType::FadeFromBlack;
+                        activeWipeProgress = prog;
+                        activeWipeSoftness = trans->param1;
+                        activeWipePeer = 0;
+                        activeWipeOutgoing = true;
+                    }
+                } else if (trans->type == TransitionType::FadeToBlack) {
+                    // Single-clip GPU fade: clip fades out to black.
+                    if (trans->leftClipId == clipId) {
+                        activeWipeType = TransitionType::FadeToBlack;
+                        activeWipeProgress = prog;
+                        activeWipeSoftness = trans->param1;
+                        activeWipePeer = 0;
+                        activeWipeOutgoing = true;
+                    }
+                } else if (trans->type == TransitionType::FadeFromWhite) {
+                    // Single-clip GPU fade: clip fades in from white.
+                    if (trans->rightClipId == clipId) {
+                        activeWipeType = TransitionType::FadeFromWhite;
+                        activeWipeProgress = prog;
+                        activeWipeSoftness = trans->param1;
+                        activeWipePeer = 0;
+                        activeWipeOutgoing = true;
+                    }
+                } else if (trans->type == TransitionType::FadeToWhite) {
+                    // Single-clip GPU fade: clip fades out to white.
+                    if (trans->leftClipId == clipId) {
+                        activeWipeType = TransitionType::FadeToWhite;
+                        activeWipeProgress = prog;
+                        activeWipeSoftness = trans->param1;
+                        activeWipePeer = 0;
+                        activeWipeOutgoing = true;
+                    }
+                } else if (trans->type == TransitionType::CrossDissolve) {
+                    // Route CrossDissolve through the GPU transition path
+                    // (TransitionRenderer mixes A and B in a single pass).
+                    //
+                    // Pure-opacity modulation is WRONG when a lower video
+                    // track is present: at progress=0.5 each clip renders
+                    // at 50% alpha, so the combined front coverage is only
+                    // p*R + (1-p)^2*L = 0.75, and 0.25 of the lower track
+                    // leaks through â€” visually "darkening" the dissolve.
+                    // The GPU Dissolve shader does mix(A, B, p) directly,
+                    // producing full coverage.
+                    //
+                    // For single-clip dissolves (peer == 0) the GPU path
+                    // uses a transparent placeholder, producing a proper
+                    // alpha fade that reveals lower tracks cleanly.
+                    if (trans->leftClipId == clipId && trans->rightClipId != 0) {
+                        // Two-clip: this is the outgoing side (drives merge).
+                        activeWipeType = TransitionType::CrossDissolve;
+                        activeWipeProgress = prog;
+                        activeWipeSoftness = trans->param1;
+                        activeWipePeer = trans->rightClipId;
+                        activeWipeOutgoing = true;
+                    } else if (trans->rightClipId == clipId && trans->leftClipId != 0) {
+                        // Two-clip: this is the incoming side (passive).
+                        activeWipeType = TransitionType::CrossDissolve;
+                        activeWipeProgress = prog;
+                        activeWipeSoftness = trans->param1;
+                        activeWipePeer = trans->leftClipId;
+                        activeWipeOutgoing = false;
+                    } else if (trans->leftClipId == clipId) {
+                        // Single-clip outgoing fade (no right peer).
+                        activeWipeType = TransitionType::CrossDissolve;
+                        activeWipeProgress = prog;
+                        activeWipeSoftness = trans->param1;
+                        activeWipePeer = 0;
+                        activeWipeOutgoing = true;
+                    } else if (trans->rightClipId == clipId) {
+                        // Single-clip incoming fade (no left peer).  Mark as
+                        // "outgoing" so the GPU transition scan picks it up;
+                        // the placeholder-swap logic handles direction.
+                        activeWipeType = TransitionType::CrossDissolve;
+                        activeWipeProgress = prog;
+                        activeWipeSoftness = trans->param1;
+                        activeWipePeer = 0;
+                        activeWipeOutgoing = false; // direction flag for swap
+                        // Force scan to process this layer (no peer to merge).
+                        // The scan filters by isWipeOutgoing, so we need a
+                        // way to include incoming singletons.  See note in
+                        // the scan below for how this is handled.
+                    }
+                } else {
+                    // GPU-spatial transition: don't modulate opacity ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â store info for GPU path.
+                    // Both clips render at full opacity; spatial blending is
+                    // done later by TransitionRenderer.
+                    if (trans->leftClipId == clipId) {
+                        activeWipeType = trans->type;
+                        activeWipeProgress = prog;
+                        activeWipeSoftness = trans->param1;
+                        activeWipePeer = trans->rightClipId;
+                        activeWipeOutgoing = true;
+                    } else if (trans->rightClipId == clipId) {
+                        activeWipeType = trans->type;
+                        activeWipeProgress = prog;
+                        activeWipeSoftness = trans->param1;
+                        activeWipePeer = trans->leftClipId;
+                        activeWipeOutgoing = false;
+                    }
+                }
+            }
+
+            std::shared_ptr<CachedFrame> frame;
+            bool gpuSpineZeroCopy = false;
+            bool isPreRenderedSpine = false;  // set when using cached spine video
+            bool cpuSpineRendered  = false;   // set when CPU Spine fallback succeeds
+            VkDescriptorImageInfo gpuSpineDescriptor{};
+            uint32_t gpuSpineW{0}, gpuSpineH{0};
+
+            // Program monitor video tier follows the playback-resolution
+            // dropdown (Full / 1/2 / 1/4 / 1/8).
+            // Always decode at full resolution for maximum quality.
+            const auto videoTier = ResolutionTier::Full;
+
+            // ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ VideoClip ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬
+            if (auto* videoClip = dynamic_cast<VideoClip*>(clip)) {
+                if (!m_mediaPool) continue;  // VideoClip needs MediaPool
+                const auto& mediaPath = videoClip->mediaPath();
+                if (mediaPath.empty()) continue;
+
+                // Lazy-open media handle (cached by path)
+                uint64_t handle = 0;
+                auto it = m_openMediaHandles.find(mediaPath);
+                if (it != m_openMediaHandles.end() && it->second != 0) {
+                    handle = it->second;
+                } else if (playbackNonBlocking && !m_forceFullResolution.load()) {
+                    // Check if MediaPool finished opening this path in the background.
+                    if (m_mediaPool->isPathOpen(mediaPath)) {
+                        handle = m_mediaPool->open(mediaPath);
+                        m_openMediaHandles[mediaPath] = handle;
+                    } else {
+                        // Not open yet — start or continue async open.
+                        m_mediaPool->openAsync(mediaPath);
+                        handle = 0;
+                    }
+                } else {
+                    // Prefer .mp4 packed-alpha (NVDEC hw decode) over .mov/.webm
+                    // (software decode).  Try .mp4 FIRST before the original path
+                    // so we never open a slow ProRes when a fast HEVC exists.
+                    namespace fs = std::filesystem;
+                    fs::path p(mediaPath);
+                    if (p.extension() == ".mov" || p.extension() == ".webm") {
+                        fs::path mp4Path = fs::path(mediaPath).replace_extension(".mp4");
+                        if (fs::exists(mp4Path))
+                            handle = m_mediaPool->open(mp4Path);
+                        if (handle == 0) {
+                            fs::path mp4InVideos = fs::path("assets") / "videos" / mp4Path.filename();
+                            if (fs::exists(mp4InVideos))
+                                handle = m_mediaPool->open(mp4InVideos);
+                        }
+                    }
+
+                    // Fall back to original path
+                    if (handle == 0)
+                        handle = m_mediaPool->open(mediaPath);
+
+                    // If that fails, try resolving common search paths
+                    if (handle == 0) {
+                        // Try alternate extensions Ã¢â‚¬â€ prefer .mp4 packed-alpha
+                        // (NVDEC hardware decode) over .webm (software VP9).
+                        std::vector<fs::path> altExts;
+                        if (p.extension() == ".webm") {
+                            altExts.push_back(fs::path(mediaPath).replace_extension(".mp4"));
+                            altExts.push_back(fs::path(mediaPath).replace_extension(".mov"));
+                        } else if (p.extension() == ".mov") {
+                            altExts.push_back(fs::path(mediaPath).replace_extension(".mp4"));
+                            altExts.push_back(fs::path(mediaPath).replace_extension(".webm"));
+                        } else if (p.extension() == ".mp4") {
+                            altExts.push_back(fs::path(mediaPath).replace_extension(".webm"));
+                            altExts.push_back(fs::path(mediaPath).replace_extension(".mov"));
+                        }
+
+                        // Search paths for unresolved media (bare filenames or
+                        // relative paths)
+                        std::vector<fs::path> searchPaths = {
+                            fs::path("assets") / "backgrounds" / p.filename(),
+                            fs::path("assets") / "videos" / p.filename(),
+                            fs::path("assets") / p,
+                            p.filename()
+                        };
+
+                        // Also try alternate extensions in each search dir
+                        for (const auto& altExt : altExts) {
+                            if (altExt.empty()) continue;
+                            fs::path altName = altExt.filename();
+                            searchPaths.push_back(altExt);
+                            searchPaths.push_back(fs::path("assets") / "videos" / altName);
+                            searchPaths.push_back(fs::path("assets") / altExt);
+                            searchPaths.push_back(altName);
+                        }
+
+                        for (const auto& candidate : searchPaths) {
+                            if (fs::exists(candidate)) {
+                                handle = m_mediaPool->open(candidate);
+                                if (handle != 0) {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (handle == 0) {
+                        spdlog::warn("compositeFrame: could not resolve media '{}'", mediaPath);
+                        continue;
+                    }
+                    m_openMediaHandles[mediaPath] = handle;
+                }
+
+                // Calculate source frame number
+                int64_t srcTick = localTick + clip->sourceIn();
+                // Clamp to 0 instead of skipping: during transition overlap
+                // the incoming clip has negative localTick (tick < timelineIn).
+                // Using frame 0 gives the correct visual for the transition.
+                if (srcTick < 0) srcTick = 0;
+
+                double fps = videoClip->sourceFps();
+                if (fps <= 0.0) fps = 24.0;
+
+                int64_t frameNum = static_cast<int64_t>(
+                    ticksToSeconds(srcTick) * fps);
+
+                auto* mediaInfo = m_mediaPool->getInfo(handle);
+
+                // If clip had no stored fps, use the authoritative MediaPool fps
+                if (videoClip->sourceFps() <= 0.0 && mediaInfo && mediaInfo->fps > 0.0) {
+                    fps = mediaInfo->fps;
+                    frameNum = static_cast<int64_t>(ticksToSeconds(srcTick) * fps);
+                }
+
+                const bool isVideoChar = videoClip->isVideoCharacter();
+
+                // Character overlays always Half (they composite tiny),
+                // UNLESS forceFullResolution is set (ExportPanel preview/export).
+                // Other video follows the playback-resolution dropdown.
+                const auto charVideoTier = isVideoChar
+                    ? (m_forceFullResolution.load() ? ResolutionTier::Full : ResolutionTier::Half)
+                    : playbackTier();
+
+                // Clamp frame number to valid range.
+                // For video characters, wrap with modulo so the animation
+                // loops continuously when the clip is stretched beyond the
+                // source video's duration.
+                if (mediaInfo) {
+                    if (mediaInfo->frameCount <= 1) {
+                        frameNum = 0;
+                    } else if (isVideoChar && mediaInfo->frameCount > 1) {
+                        // Looping character animation: modulo wrap
+                        frameNum = ((frameNum % mediaInfo->frameCount) + mediaInfo->frameCount)
+                                   % mediaInfo->frameCount;
+                    } else if (mediaInfo->frameCount > 0) {
+                        frameNum = std::clamp(frameNum, int64_t(0),
+                                              mediaInfo->frameCount - 1);
+                    }
+                }
+
+                // Ã¢â€â‚¬Ã¢â€â‚¬ DIRTY TRACKING: Skip decode when GPU already has this frame Ã¢â€â‚¬Ã¢â€â‚¬
+                // If the GPU texture cache already has this (mediaId, frameNumber),
+                // skip the entire decode + CPU packed-alpha unpack path.  This is
+                // the single biggest performance win: backgrounds and unchanged
+                // animation loops skip ALL CPU work (~60% of frames at 60fps when
+                // source is 24fps).
+                if (m_gpuTexCache && m_gpuCompositeState == 1) {
+                    auto gpuHit = m_gpuTexCache->get(handle, frameNum);
+                    if (gpuHit.found) {
+                        LayerInfo layer;
+                        layer.gpuTextureReady = true;
+                        layer.gpuDescriptor   = gpuHit.descriptor;
+                        layer.frameWidth      = gpuHit.width;
+                        layer.frameHeight     = gpuHit.height;
+                        layer.opacity  = opac;
+                        layer.posX     = px;
+                        layer.posY     = py;
+                        layer.rot      = rot;
+                        layer.clipId   = clipId;
+                        layer.blendMode = clip->blendMode();
+                        // VideoClip characters already have the COMPOSE 0.85
+                        // base-fit factor baked into their clip scaleX (kCF).
+                        layer.scX = sx;
+                        layer.scY = sy;
+                        // Portrait character frames need contain-fit.
+                        if (isVideoChar)
+                            layer.containFit = true;
+                        // Packed-alpha: use the flag stored in the GPU cache
+                        // entry at upload time â€” avoids fragile height heuristics.
+                        layer.isPacked = gpuHit.isPacked;
+                        layer.isPMA    = gpuHit.isPMA;
+                        // Wipe transition metadata
+                        if (activeWipeProgress >= 0.0f) {
+                            layer.wipeType        = activeWipeType;
+                            layer.wipeProgress    = activeWipeProgress;
+                            layer.wipeSoftness    = activeWipeSoftness;
+                            layer.wipePeerClipId  = activeWipePeer;
+                            layer.isWipeOutgoing  = activeWipeOutgoing;
+                        }
+                        // Crop
+                        layer.cropL = videoClip->cropLeft();
+                        layer.cropR = videoClip->cropRight();
+                        layer.cropT = videoClip->cropTop();
+                        layer.cropB = videoClip->cropBottom();
+                        // Effects
+                        if (clip->effects().hasActiveEffects()) {
+                            layer.effects = clip->effects().evaluate(localTick);
+                        }
+                        if (perfLog) {
+                            auto perfClipT1 = std::chrono::high_resolution_clock::now();
+                            double clipMs = std::chrono::duration<double, std::milli>(
+                                perfClipT1 - perfClipT0).count();
+                            spdlog::info("  [PERF] clip '{}' type=Video (GPU CACHE HIT) -> {:.1f}ms ({}x{}) frame={}",
+                                         clip->label(), clipMs, gpuHit.width, gpuHit.height, frameNum);
+                        }
+                        layer.clipPtr = clip;
+                        layer.isLoopContent = isVideoChar;
+                        layers.push_back(std::move(layer));
+                        continue;
+                    }
+                }
+
+                frame = fetchMediaFrame(handle, frameNum, charVideoTier);
+
+                // Packed-alpha unpack is now handled entirely by:
+                //   - GPU path: compositor shader isPacked UV split
+                //   - CPU path: MediaPool::unpackPackedAlphaInPlace()
+                // No manual unpack needed here.
+            }
+            // ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ TitleClip ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬
+            else if (auto* titleClip = dynamic_cast<TitleClip*>(clip)) {
+                frame = renderTitleClip(titleClip, tick, outW, outH);
+            }
+            // Ã¢â€â‚¬Ã¢â€â‚¬ GraphicClip (multi-layer) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+            else if (auto* graphicClip = dynamic_cast<GraphicClip*>(clip)) {
+                // Pass project output resolution as reference so text scales
+                // proportionally at reduced render resolutions (scrub).
+                uint32_t refW = 0, refH = 0;
+                if (m_project) {
+                    refW = m_project->settings().resolution().width;
+                    refH = m_project->settings().resolution().height;
+                }
+                frame = rt::renderGraphicClip(graphicClip, tick, outW, outH, refW, refH);
+            }
+            // â”€â”€ SequenceClip (nested sequence) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            else if (auto* seqClip = dynamic_cast<SequenceClip*>(clip)) {
+                if (m_project && seqClip->sequenceIndex() < m_project->sequenceCount()) {
+                    auto* innerTimeline = m_project->sequence(seqClip->sequenceIndex());
+                    if (innerTimeline && innerTimeline != m_timeline) {
+                        // Map the local tick to the inner timeline's tick space
+                        int64_t innerTick = localTick;
+                        if (innerTick < 0) innerTick = 0;
+
+                        // Temporarily swap to the inner timeline and release
+                        // the lock so the recursive compositeFrame can acquire it.
+                        Timeline* outerTimeline = m_timeline;
+                        m_timeline = innerTimeline;
+                        lock.unlock();
+
+                        frame = compositeFrame(innerTick, outW, outH, scrubMode);
+                        fromNestedSequence = true;
+
+                        // Restore outer timeline and reacquire the lock
+                        lock.lock();
+                        m_timeline = outerTimeline;
+                    }
+                }
+            }
+#ifdef ROUNDTABLE_HAS_SPINE
+            // ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ SpineClip ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬
+            else if (auto* spineClip = dynamic_cast<SpineClip*>(clip)) {
+              try {
+
+                // Ã¢â€â‚¬Ã¢â€â‚¬ Pre-rendered animation video cache (fast path) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+                // If this character/outfit/animation has been pre-rendered
+                // to a VP9+alpha WebM, decode a frame from it instead of
+                // evaluating Spine live.  This is ~10x faster.
+                bool usedPreRendered = false;
+                if (false /* SpineClips use GPU live rendering */ && m_animVideoCache) {
+                    const std::string& charName = spineClip->characterName();
+                    const std::string& outfit   = spineClip->outfit();
+                    const std::string& animName = spineClip->animationName();
+
+                    // Pick the talk variant when talking is enabled
+                    const std::string cacheAnimName = spineClip->isTalking()
+                        ? (animName + "_talk") : animName;
+
+                    MediaHandle animHandle = m_animVideoCache->getMediaHandle(
+                        charName, outfit, cacheAnimName);
+                    if (animHandle != InvalidMedia && m_mediaPool) {
+                        const auto* animInfo = m_mediaPool->getInfo(animHandle);
+                        if (animInfo && animInfo->frameCount > 0 && animInfo->fps > 0.0) {
+                            // Calculate loop frame index
+                            const int64_t animTick = spineClip->useGlobalTime()
+                                                         ? tick : localTick;
+                            const float animTime = static_cast<float>(
+                                ticksToSeconds(animTick)) * spineClip->animationSpeed();
+                            const int64_t totalFrames = animInfo->frameCount;
+                            int64_t animFrame = static_cast<int64_t>(
+                                animTime * animInfo->fps);
+                            // Wrap for looping
+                            if (spineClip->isLooping() && totalFrames > 0) {
+                                animFrame = ((animFrame % totalFrames) + totalFrames) % totalFrames;
+                            } else {
+                                animFrame = std::clamp(animFrame, int64_t(0), totalFrames - 1);
+                            }
+
+                            // Ã¢â€â‚¬Ã¢â€â‚¬ DIRTY TRACKING: Skip decode for pre-rendered spine Ã¢â€â‚¬Ã¢â€â‚¬
+                            if (m_gpuTexCache && m_gpuCompositeState == 1) {
+                                auto gpuHit = m_gpuTexCache->get(animHandle, animFrame);
+                                if (gpuHit.found) {
+                                    LayerInfo layer;
+                                    layer.gpuTextureReady = true;
+                                    layer.gpuDescriptor   = gpuHit.descriptor;
+                                    layer.frameWidth      = gpuHit.width;
+                                    layer.frameHeight     = gpuHit.height;
+                                    layer.opacity  = opac;
+                                    layer.posX     = px;
+                                    layer.posY     = py;
+                                    // Apply the same 0.85/0.9 correction as
+                                    // the non-cache path (isSpineRendered).
+                                    constexpr float kCF = 0.85f;
+                                    constexpr float kSP = 0.9f;
+                                    layer.scX      = sx * (kCF / kSP);
+                                    layer.scY      = sy * (kCF / kSP);
+                                    layer.rot      = rot;
+                                    layer.clipId   = clipId;
+                                    layer.blendMode = clip->blendMode();
+                                    // Pre-rendered spine: contain-fit so
+                                    // character fits within the output.
+                                    layer.containFit = true;
+                                    // Packed-alpha: use the flag stored in the GPU cache
+                                    // entry at upload time.
+                                    layer.isPacked = gpuHit.isPacked;
+                                    layer.isPMA    = gpuHit.isPMA;
+                                    if (activeWipeProgress >= 0.0f) {
+                                        layer.wipeType        = activeWipeType;
+                                        layer.wipeProgress    = activeWipeProgress;
+                                        layer.wipeSoftness    = activeWipeSoftness;
+                                        layer.wipePeerClipId  = activeWipePeer;
+                                        layer.isWipeOutgoing  = activeWipeOutgoing;
+                                    }
+                                    layer.cropL = spineClip->cropLeft();
+                                    layer.cropR = spineClip->cropRight();
+                                    layer.cropT = spineClip->cropTop();
+                                    layer.cropB = spineClip->cropBottom();
+                                    if (clip->effects().hasActiveEffects())
+                                        layer.effects = clip->effects().evaluate(localTick);
+                                    if (perfLog) {
+                                        auto perfClipT1 = std::chrono::high_resolution_clock::now();
+                                        double clipMs = std::chrono::duration<double, std::milli>(
+                                            perfClipT1 - perfClipT0).count();
+                                        spdlog::info("  [PERF] clip '{}' type=Spine (GPU CACHE HIT) -> {:.1f}ms ({}x{})",
+                                                     clip->label(), clipMs, gpuHit.width, gpuHit.height);
+                                    }
+                                    layer.clipPtr = clip;
+                                    layers.push_back(std::move(layer));
+                                    continue;
+                                }
+                            }
+
+                            // Spine character overlays always use Half tier:
+                            // they're composited at 1920Ãƒâ€”1080 and never need
+                            // full resolution, even when paused. This avoids
+                            // massive initial-render decode (7 chars Ãƒâ€” Full res).
+                            frame = fetchMediaFrame(animHandle, animFrame,
+                                                    ResolutionTier::Half);
+                            if (frame) {
+                                // Packed-alpha unpack is now handled by:
+                                //   - GPU path: compositor shader isPacked UV split
+                                //   - CPU path: MediaPool::unpackPackedAlphaInPlace()
+                                usedPreRendered = true;
+                                isPreRenderedSpine = true;
+                                m_lastPreRenderedSpineFrame[clipId] = frame;
+                            } else {
+                                // Keep source stable: if pre-rendered media exists but
+                                // this frame missed (non-blocking tryGetFrame), reuse the
+                                // last pre-rendered frame for this clip instead of falling
+                                // back to live Spine.  This prevents visible oscillation
+                                // between 816x1920 packed video and 960x540 live Spine.
+                                auto itLast = m_lastPreRenderedSpineFrame.find(clipId);
+                                if (itLast != m_lastPreRenderedSpineFrame.end() && itLast->second) {
+                                    frame = itLast->second;
+                                    usedPreRendered = true;
+                                    isPreRenderedSpine = true;
+                                } else {
+                                    // No pre-rendered frame has ever landed for this clip
+                                    // yet.  Fall back to live Spine so the character stays
+                                    // visible during warm-up.
+                                    usedPreRendered = false;
+                                    isPreRenderedSpine = false;
+                                }
+                            }
+                        } else {
+                            // Bad/corrupt cache file (0 frames) Ã¢â‚¬â€ remove entry
+                            // and queue re-render so we don't retry every frame
+                            m_animVideoCache->removeEntry(charName, outfit, cacheAnimName);
+                            m_animVideoCache->queueRender(charName, outfit, animName,
+                                                           spineClip->isTalking());
+                        }
+                    } else if (animHandle == InvalidMedia) {
+                        // Not cached yet Ã¢â‚¬â€ queue background pre-render
+                        m_animVideoCache->queueRender(charName, outfit, animName,
+                                                       spineClip->isTalking());
+                    }
+                }
+
+                // Ã¢â€â‚¬Ã¢â€â‚¬ Live Spine evaluation (fallback when no pre-render) Ã¢â€â‚¬Ã¢â€â‚¬
+                if (!usedPreRendered) {
+                // Try GPU Spine rendering first (faster + better quality)
+                bool gpuSpineDone = false;
+                auto& gpuCtx = GpuContext::get();
+                if (gpuCtx.isInitialized()) {
+                    auto* sr = gpuCtx.spineRenderer(outW, outH);
+                    if (sr && sr->isInitialized()) {
+                        // Multi-character GPU Spine: each character renders on
+                        // GPU.  The first character stays as GPU zero-copy (fast,
+                        // no readback).  When a SECOND character arrives, we
+                        // readback the FBO (which holds the FIRST character's
+                        // pixels) before the next beginFrame() clears it, and
+                        // assign that readback to the first character's layer.
+                        // Subsequent characters follow the same pattern.
+                        // Non-blocking: get cached state or schedule background load
+                        const uint64_t cid = spineClip->id();
+                        auto sit = m_spineCache.find(cid);
+                        if (sit == m_spineCache.end()) {
+                            tryGetSpineState(spineClip);
+                            sit = m_spineCache.find(cid);
+                        }
+
+                        if (sit != m_spineCache.end() && sit->second
+                            && sit->second->engine.isLoaded()
+                            && sit->second->shared
+                            && sit->second->shared->boundsCached) {
+                            auto& state = *sit->second;
+                            auto& shared = *state.shared;
+
+                            // Upload atlas textures to GPU only when the
+                            // active character set changes.  Consecutive
+                            // clips of the same character skip the upload.
+                            // MUST release old textures first: different
+                            // characters have different atlas page counts.
+                            // Without a full release, extra pages from the
+                            // previous character leak and the wrong texture
+                            // gets sampled for pages beyond the current
+                            // character's atlas size.
+                            const std::string charKey = spineCharKey(*spineClip);
+                            if (m_gpuSpineActiveCharKey != charKey) {
+                                sr->releaseAllTextures();
+                                m_gpuSpineActiveCharKey.clear();
+                                int loaded = 0;
+                                if (!shared.pagePixels.empty()) {
+                                    for (size_t pi = 0; pi < shared.pagePixels.size(); ++pi) {
+                                        if (shared.pagePixels[pi].empty()) continue;
+                                        if (sr->uploadAtlasTexture(
+                                                static_cast<int>(pi),
+                                                shared.pagePixels[pi].data(),
+                                                static_cast<uint32_t>(shared.pageWidths[pi]),
+                                                static_cast<uint32_t>(shared.pageHeights[pi]),
+                                                "shared")) {
+                                            ++loaded;
+                                        }
+                                    }
+                                } else {
+                                    loaded = sr->loadAtlasTextures(state.engine.atlas());
+                                }
+                                if (loaded > 0) {
+                                    m_gpuSpineActiveCharKey = charKey;
+                                    spdlog::info("[SPINE-GPU] uploaded atlas for '{}': {} pages (was '{}')",
+                                                  spineClip->characterName(), loaded,
+                                                  m_gpuSpineActiveCharKey);
+                                } else {
+                                    spdlog::warn("[SPINE-GPU] atlas upload FAILED for '{}' ({} pages)",
+                                                  spineClip->characterName(), shared.pagePixels.size());
+                                }
+                            }
+
+                            if (m_gpuSpineActiveCharKey == charKey) {
+                                // Evaluate animation
+                                const int64_t animTick = spineClip->useGlobalTime()
+                                                             ? tick : localTick;
+                                const float timeSeconds = static_cast<float>(ticksToSeconds(animTick));
+                                state.engine.evaluateAtTime(
+                                    timeSeconds * spineClip->animationSpeed(), timeSeconds);
+
+                                SpineRenderData renderData = state.engine.extractMeshes();
+                                if (!renderData.batches.empty()) {
+                                    // Use STABLE (setup-pose) bounds for scale so the character
+                                    // doesn't appear to zoom in/out when live bounds fluctuate
+                                    // per frame (e.g. Crown whose idle animation bbox oscillates).
+                                    // Fall back to live bounds when stable bounds are degenerate.
+                                    float liveBx{0}, liveBy{0}, liveBw{0}, liveBh{0};
+                                    state.engine.getBounds(liveBx, liveBy, liveBw, liveBh);
+                                    const float bw = (shared.stableBoundsW > 1.0f) ? shared.stableBoundsW
+                                                    : ((liveBw > 1.0f) ? liveBw : shared.stableBoundsW);
+                                    const float bh = (shared.stableBoundsH > 1.0f) ? shared.stableBoundsH
+                                                    : ((liveBh > 1.0f) ? liveBh : shared.stableBoundsH);
+                                    const float fW = static_cast<float>(outW);
+                                    const float fH = static_cast<float>(outH);
+                                    float fitZoom = 1.0f;
+                                    float cx = shared.stableBoundsX + shared.stableBoundsW * 0.5f;
+                                    float cy = shared.stableBoundsY + shared.stableBoundsH * 0.5f;
+                                    if (bw > 1.0f && bh > 1.0f) {
+                                        fitZoom = (fH / bh) * 0.9f;
+                                    }
+                                    // One-time diagnostic: compare stableBounds vs liveBounds
+                                    {
+                                        static bool s_spineGpuBoundsLogged = false;
+                                        if (!s_spineGpuBoundsLogged) {
+                                            s_spineGpuBoundsLogged = true;
+                                            spdlog::info("=== SPINE SIZING DIAGNOSTIC (GPU) ===");
+                                            spdlog::info("  clip='{}' char='{}'",
+                                                         spineClip->label(), spineClip->characterName());
+                                            spdlog::info("  stableBounds: x={:.1f} y={:.1f} w={:.1f} h={:.1f}",
+                                                         shared.stableBoundsX, shared.stableBoundsY,
+                                                         shared.stableBoundsW, shared.stableBoundsH);
+                                            spdlog::info("  liveBounds:   x={:.1f} y={:.1f} w={:.1f} h={:.1f}",
+                                                         liveBx, liveBy, liveBw, liveBh);
+                                            spdlog::info("  usedBounds:   w={:.1f} h={:.1f}", bw, bh);
+                                            spdlog::info("  FBO={}x{} fitZoom={:.4f} cx={:.1f} cy={:.1f}",
+                                                         outW, outH, fitZoom, cx, cy);
+                                            spdlog::info("  sx={:.4f} finalSx(after *0.85/0.9)={:.4f}",
+                                                         sx, sx * 0.85f / 0.9f);
+                                            spdlog::info("=====================================");
+                                        }
+                                    }
+
+                                    glm::mat4 proj = SpineRenderer::orthoProjection(
+                                        fW, fH, cx, cy, fitZoom);
+                                    glm::mat4 model = SpineRenderer::modelMatrix(0.0f, 0.0f);
+                                    glm::mat4 mvp = proj * model;
+
+                                    // Readback the PREVIOUS character's FBO content
+                                    // BEFORE rendering the next one.  The FBO still
+                                    // holds the previous character's pixels (from
+                                    // its waitForFrame), so read them out now before
+                                    // beginFrame() clears the FBO.
+                                    if (m_gpuSpineCount > 0) {
+                                        sr->waitForFrame();
+                                        auto readback = sr->readbackPixels();
+                                        if (readback && m_gpuSpineInsertedLayer >= 0 &&
+                                            static_cast<size_t>(m_gpuSpineInsertedLayer) < layers.size()) {
+                                            auto& prevLayer = layers[m_gpuSpineInsertedLayer];
+                                            prevLayer.frame = std::move(readback);
+                                            prevLayer.gpuTextureReady = false;
+                                        }
+                                    }
+
+                                    sr->beginFrame();
+                                    sr->renderSkeleton(renderData, mvp, 1.0f);
+                                    sr->endFrame();
+
+                                    sr->waitForFrame();
+
+                                    gpuSpineDone = true;
+                                    gpuSpineZeroCopy = true;
+                                    gpuSpineUsedThisFrame = true;
+                                    ++m_gpuSpineCount;
+                                    m_gpuSpineJustRendered = true;
+                                    gpuSpineDescriptor = sr->outputDescriptorInfo();
+                                    gpuSpineW = outW;
+                                    gpuSpineH = outH;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // CPU fallback if GPU Spine didn't produce a frame
+                if (!gpuSpineDone) {
+                    frame = renderSpineClip(spineClip, tick, outW, outH);
+                    if (frame) {
+                        cpuSpineRendered = true;
+                        spdlog::info("[SPINE-RENDER] '{}' CPU raster: {}x{}",
+                                     spineClip->characterName(),
+                                     frame->width, frame->height);
+                    } else {
+                        spdlog::warn("[SPINE-RENDER] '{}' FAILED both GPU and CPU paths",
+                                     spineClip->characterName());
+                    }
+                } else if (gpuSpineZeroCopy) {
+                    spdlog::info("[SPINE-RENDER] '{}' GPU zero-copy: {}x{}",
+                                 spineClip->characterName(), gpuSpineW, gpuSpineH);
+                }
+
+                // Fallback: if Spine rendering failed (no skeleton), check
+                // whether this character is actually a video character and
+                // render via MediaPool instead.  Cache the result so we
+                // don't re-lookup the preset on every frame.
+                if (false /* no video fallback for SpineClips */) {
+                    const uint64_t cid = spineClip->id();
+                    auto& fb = m_videoFallbackCache[cid];
+
+                    if (!fb.looked_up) {
+                        fb.looked_up = true;
+                        if (m_shotPresetManager) {
+                            const std::string charName = spineClip->characterName();
+                            std::string presetName = charName + " (Default)";
+                            auto preset = m_shotPresetManager->load(presetName);
+                            if (preset) {
+                                for (int ci2 = 0; ci2 < preset->characterCount(); ++ci2) {
+                                    auto* ch = preset->character(ci2);
+                                    if (!ch || ch->characterName != charName || !ch->isVideoCharacter())
+                                        continue;
+                                    fb.videoPath = ch->activeVideoPath();
+                                    break;
+                                }
+                            }
+                            if (!fb.videoPath.empty()) {
+                                // Prefer .mp4 packed-alpha (NVDEC hw decode)
+                                // over .mov/.webm (software decode).
+                                {
+                                    namespace fs = std::filesystem;
+                                    fs::path vp(fb.videoPath);
+                                    if (vp.extension() == ".mov" || vp.extension() == ".webm") {
+                                        fs::path mp4 = fs::path(fb.videoPath).replace_extension(".mp4");
+                                        if (fs::exists(mp4))
+                                            fb.handle = m_mediaPool->open(mp4);
+                                        if (fb.handle == 0) {
+                                            fs::path mp4v = fs::path("assets") / "videos" / mp4.filename();
+                                            if (fs::exists(mp4v))
+                                                fb.handle = m_mediaPool->open(mp4v);
+                                        }
+                                    }
+                                }
+                                if (fb.handle == 0)
+                                    fb.handle = m_mediaPool->open(fb.videoPath);
+                                if (fb.handle == 0) {
+                                    namespace fs = std::filesystem;
+                                    fs::path vp(fb.videoPath);
+                                    // Try filename in assets/videos
+                                    fs::path candidate = fs::path("assets") / "videos" / vp.filename();
+                                    if (fs::exists(candidate))
+                                        fb.handle = m_mediaPool->open(candidate);
+                                    // Try alternate extensions Ã¢â‚¬â€ prefer .mp4 packed-alpha
+                                    if (fb.handle == 0) {
+                                        std::vector<std::string> tryExts;
+                                        if (vp.extension() == ".webm") {
+                                            tryExts = {".mp4", ".mov"};
+                                        } else if (vp.extension() == ".mov") {
+                                            tryExts = {".mp4", ".webm"};
+                                        } else if (vp.extension() == ".mp4") {
+                                            tryExts = {".webm", ".mov"};
+                                        }
+                                        for (const auto& ext : tryExts) {
+                                            if (fb.handle != 0) break;
+                                            fs::path altPath = vp;
+                                            altPath.replace_extension(ext);
+                                            if (altPath != vp) {
+                                                if (fs::exists(altPath))
+                                                    fb.handle = m_mediaPool->open(altPath);
+                                                if (fb.handle == 0) {
+                                                    candidate = fs::path("assets") / "videos" / altPath.filename();
+                                                    if (fs::exists(candidate))
+                                                        fb.handle = m_mediaPool->open(candidate);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if (fb.handle != 0) {
+                                }
+                            }
+                        }
+                    }
+
+                    if (fb.handle != 0) {
+                        int64_t srcTick = localTick + clip->sourceIn();
+                        if (srcTick >= 0) {
+                            double fps = 24.0;
+                            auto* mInfo = m_mediaPool->getInfo(fb.handle);
+                            if (mInfo && mInfo->fps > 0.0) fps = mInfo->fps;
+                            int64_t frameNum = static_cast<int64_t>(ticksToSeconds(srcTick) * fps);
+                            if (mInfo && mInfo->frameCount <= 1) frameNum = 0;
+                            frame = fetchMediaFrame(fb.handle, frameNum,
+                                                    videoTier);
+                        }
+                    } else if (playbackNonBlocking && !m_forceFullResolution.load() && !fb.videoPath.empty()) {
+                        // Spine video fallback async open
+                        if (m_mediaPool->isPathOpen(fb.videoPath)) {
+                            fb.handle = m_mediaPool->open(fb.videoPath);
+                        } else {
+                            m_mediaPool->openAsync(fb.videoPath);
+                        }
+                    }
+                }
+                } // end if (!usedPreRendered)
+
+              } // try
+              catch (const std::exception& ex) {
+                spdlog::error("compositeFrame: SpineClip '{}' exception: {}",
+                              spineClip->characterName(), ex.what());
+              }
+              catch (...) {
+                spdlog::error("compositeFrame: SpineClip '{}' unknown exception",
+                              spineClip->characterName());
+              }
+            }
+#endif
+            else {
+                continue;
+            }
+
+            // GPU zero-copy spine layers bypass the CachedFrame requirement.
+            // GPU-resident decoded frames (gpuReady) may have empty pixels.
+            if (!gpuSpineZeroCopy && (!frame || (frame->pixels.empty() && !frame->gpuReady))) {
+                // Build a character/media-level sticky key — same string
+                // across all clip IDs that reference the same video file.
+                // This is what lets a BRAND NEW shot of Modernia/Chime
+                // reuse the previous shot's last frame while her loop
+                // cache warms up.
+                std::string charKey;
+#ifdef ROUNDTABLE_HAS_SPINE
+                if (auto* sc = dynamic_cast<SpineClip*>(clip)) {
+                    charKey = sc->characterName() + "|" + sc->outfit() + "|" +
+                              sc->animationName() +
+                              (sc->isTalking() ? "|t" : "|m");
+                } else
+#endif
+                if (auto* vc = dynamic_cast<VideoClip*>(clip)) {
+                    charKey = vc->mediaPath();
+                }
+
+                // Sticky last-good-frame fallback: if we've previously
+                // rendered this clip successfully, reuse that frame
+                // instead of dropping the layer.  Eliminates the
+                // "character vanishes for a few frames" pop-out when
+                // loop pre-decode hasn't caught up, a Spine skeleton
+                // is still loading, or a scrub outpaces prefetch.
+                std::shared_ptr<CachedFrame> stickyFrame;
+                auto stickyIt = m_stickyLastClipFrame.find(clipId);
+                if (stickyIt != m_stickyLastClipFrame.end() && stickyIt->second &&
+                    (!stickyIt->second->pixels.empty() || stickyIt->second->gpuReady)) {
+                    stickyFrame = stickyIt->second;
+                } else if (!charKey.empty()) {
+                    auto charIt = m_stickyLastCharFrame.find(charKey);
+                    if (charIt != m_stickyLastCharFrame.end() && charIt->second &&
+                        (!charIt->second->pixels.empty() || charIt->second->gpuReady)) {
+                        stickyFrame = charIt->second;
+                    }
+                }
+                if (stickyFrame) {
+                    frame = stickyFrame;
+                } else {
+                    static int s_skipLog = 0;
+                    if (++s_skipLog <= 30 || s_skipLog % 60 == 0) {
+                        spdlog::info("[FLICKER-DIAG] compositeFrame tick={}: SKIPPING clip '{}' "
+                                     "(frame={} pixels={} gpuReady={})",
+                                     tick, clip->label(),
+                                     frame ? "non-null" : "NULL",
+                                     frame ? frame->pixels.size() : 0,
+                                     frame ? frame->gpuReady : false);
+                    }
+                    continue;
+                }
+            } else if (!gpuSpineZeroCopy && frame &&
+                       (!frame->pixels.empty() || frame->gpuReady)) {
+                // Record this frame as the sticky fallback for future ticks.
+                m_stickyLastClipFrame[clipId] = frame;
+                // Also record under a character/media key so future shots
+                // of the same character can use this as a starting point.
+                std::string charKey;
+#ifdef ROUNDTABLE_HAS_SPINE
+                if (auto* sc = dynamic_cast<SpineClip*>(clip)) {
+                    charKey = sc->characterName() + "|" + sc->outfit() + "|" +
+                              sc->animationName() +
+                              (sc->isTalking() ? "|t" : "|m");
+                } else
+#endif
+                if (auto* vc = dynamic_cast<VideoClip*>(clip)) {
+                    charKey = vc->mediaPath();
+                }
+                if (!charKey.empty())
+                    m_stickyLastCharFrame[charKey] = frame;
+            }
+
+            LayerInfo layer;
+            if (gpuSpineZeroCopy) {
+                // No CachedFrame needed ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â the spine FBO is already on the GPU
+                layer.gpuTextureReady = true;
+                layer.gpuDescriptor   = gpuSpineDescriptor;
+                layer.frameWidth      = gpuSpineW;
+                layer.frameHeight     = gpuSpineH;
+                layer.isPMA           = true;  // Spine FBO uses PMA blending
+            } else if (frame->gpuReady && frame->gpuImageView && frame->gpuSampler) {
+                // GPU-resident decoded frame Ã¢â‚¬â€ use GPU texture directly,
+                // bypassing CPUÃ¢â€ â€™GPU upload in the compositor.
+                layer.frame           = frame;
+                layer.gpuTextureReady = true;
+                VkDescriptorImageInfo gpuInfo{};
+                gpuInfo.imageView   = reinterpret_cast<VkImageView>(frame->gpuImageView);
+                gpuInfo.sampler     = reinterpret_cast<VkSampler>(frame->gpuSampler);
+                gpuInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                layer.gpuDescriptor = gpuInfo;
+                layer.frameWidth    = frame->width;
+                layer.frameHeight   = frame->height;
+
+                // Ã¢â€â‚¬Ã¢â€â‚¬ Bridge CUDA frame into GpuTexCache for dirty-tracking Ã¢â€â‚¬Ã¢â€â‚¬
+                // CUDA zero-copy frames bypass the cache-owned upload path,
+                // so the GpuTexCache never sees them.  Register the frame's
+                // GPU texture here (shared ownership with FrameCache) so
+                // future composites can hit the dirty-tracking early-out
+                // and skip the entire decode + FrameCache lookup.
+                if (m_gpuTexCache && m_gpuCompositeState == 1 &&
+                    frame->mediaId != 0 && frame->gpuTextureOwner) {
+                    // Determine if CUDA frame is still packed-alpha
+                    bool cudaPacked = false;
+                    if (!frame->unpackedAlpha && m_mediaPool) {
+                        auto* fInfo = m_mediaPool->getInfo(frame->mediaId);
+                        cudaPacked = (fInfo && fInfo->packedAlpha);
+                    }
+                    m_gpuTexCache->putShared(
+                        frame->mediaId, frame->frameNumber,
+                        frame->gpuTextureOwner,
+                        gpuInfo,
+                        frame->width, frame->height,
+                        static_cast<size_t>(frame->width) * frame->height * 4,
+                        cudaPacked, frame->premultipliedAlpha,
+                        frame->isLoopFrame);
+                }
+            } else {
+                layer.frame       = frame;
+                layer.frameWidth  = frame->width;
+                layer.frameHeight = frame->height;
+            }
+
+            bool isSpineRendered = false;
+#ifdef ROUNDTABLE_HAS_SPINE
+            if (dynamic_cast<SpineClip*>(clip)) {
+                isSpineRendered = isPreRenderedSpine
+                               || gpuSpineZeroCopy
+                               || cpuSpineRendered;
+            }
+#endif
+            // Detect VideoClip character clips (tall aspect or packed-alpha).
+            bool isVideoCharClip = false;
+            if (!isSpineRendered && frame && frame->width > 0 && frame->height > 0) {
+                float aspect = static_cast<float>(frame->height) /
+                               static_cast<float>(frame->width);
+                if (aspect > 1.5f)
+                    isVideoCharClip = true;
+                if (auto* vc = dynamic_cast<VideoClip*>(clip)) {
+                    auto* mi = m_mediaPool ? m_mediaPool->getInfo(
+                        m_openMediaHandles.count(vc->mediaPath())
+                            ? m_openMediaHandles[vc->mediaPath()] : 0)
+                        : nullptr;
+                    if (mi && mi->packedAlpha)
+                        isVideoCharClip = true;
+                }
+            }
+            float finalSx = sx;
+            float finalSy = sy;
+            // The spine GPU FBO renders characters at 0.9× output height,
+            // but the COMPOSE preview uses 0.85×.  Correct so the timeline
+            // matches what the user sees in COMPOSE.
+            if (isSpineRendered) {
+                constexpr float kComposeFit  = 0.85f;
+                constexpr float kSpinePad    = 0.9f;
+                finalSx *= kComposeFit / kSpinePad;
+                finalSy *= kComposeFit / kSpinePad;
+            }
+            // One-time per-clip-type diagnostic for spine sizing
+            {
+                static bool s_spineLayerLogged = false;
+                static bool s_videoLayerLogged = false;
+                bool doLog = false;
+#ifdef ROUNDTABLE_HAS_SPINE
+                if (!s_spineLayerLogged && dynamic_cast<SpineClip*>(clip)) {
+                    s_spineLayerLogged = true;
+                    doLog = true;
+                }
+#endif
+                if (!s_videoLayerLogged && isVideoCharClip) {
+                    s_videoLayerLogged = true;
+                    doLog = true;
+                }
+                if (doLog) {
+                    spdlog::info("=== LAYER SIZING DIAGNOSTIC ===");
+                    spdlog::info("  clip='{}' isSpineRendered={} isVideoChar={} gpuZeroCopy={}",
+                                 clip->label(), isSpineRendered, isVideoCharClip, gpuSpineZeroCopy);
+                    spdlog::info("  sx={:.4f} sy={:.4f} isSpineRendered={} finalSx={:.4f} finalSy={:.4f}",
+                                 sx, sy, isSpineRendered, finalSx, finalSy);
+                    spdlog::info("  containFit={} frameW={} frameH={} outW={} outH={}",
+                                 isPreRenderedSpine, layer.frameWidth, layer.frameHeight, outW, outH);
+                    spdlog::info("===============================");
+                }
+            }
+
+            layer.opacity = opac;
+            layer.posX    = px;
+            layer.posY    = py;
+            layer.scX     = finalSx;
+            layer.scY     = finalSy;
+            layer.rot     = rot;
+            layer.clipId  = clipId;
+            layer.blendMode = clip->blendMode();
+            layer.needsSwapRB = fromNestedSequence;
+
+            // Packed-alpha: if the frame is still packed (GPU-resident or
+            // not yet unpacked by MediaPool), tell the compositor shader
+            // to split UV (top half = RGB, bottom half = alpha).
+            if (frame && !frame->unpackedAlpha) {
+                // Check if source media is packed-alpha
+                bool srcPacked = false;
+                if (auto* vc = dynamic_cast<VideoClip*>(clip)) {
+                    auto* mi = m_mediaPool ? m_mediaPool->getInfo(
+                        m_openMediaHandles.count(vc->mediaPath())
+                            ? m_openMediaHandles[vc->mediaPath()] : 0)
+                        : nullptr;
+                    srcPacked = (mi && mi->packedAlpha);
+                }
+                if (isPreRenderedSpine && m_mediaPool) {
+                    auto* mi = m_mediaPool->getInfo(frame->mediaId);
+                    if (mi && mi->packedAlpha)
+                        srcPacked = true;
+                }
+                if (srcPacked)
+                    layer.isPacked = true;
+            }
+
+            // Native-alpha video frames are pre-multiplied during decode
+            // to avoid white-fringe from linear texture filtering.
+            if (frame && frame->premultipliedAlpha)
+                layer.isPMA = true;
+
+            // Portrait character frames (pre-rendered spine cache or video char
+            // clips) need contain-fit so the whole character fits within the
+            // output, matching the COMPOSE preview.
+            if (isVideoCharClip || isPreRenderedSpine)
+                layer.containFit = true;
+
+            // One-time diagnostic for character sizing
+            {
+                static bool s_vcDiagLogged = false;
+                if (!s_vcDiagLogged && (isVideoCharClip || isPreRenderedSpine) && frame) {
+                    s_vcDiagLogged = true;
+                    spdlog::info("=== CHAR SIZING DIAGNOSTIC ===");
+                    spdlog::info("  clip='{}' mediaW={} mediaH={} packed={} preRendSpine={}",
+                                 clip->label(), frame->width, frame->height,
+                                 layer.isPacked, isPreRenderedSpine);
+                    spdlog::info("  srcForTransform: {}x{} (halved={})",
+                                 layer.isPacked ? frame->width : frame->width,
+                                 layer.isPacked ? frame->height / 2 : frame->height,
+                                 layer.isPacked);
+                    spdlog::info("  sx={:.4f} sy={:.4f} containFit={}",
+                                 layer.scX, layer.scY, layer.containFit);
+                    float srcW_f = static_cast<float>(frame->width);
+                    float srcH_f = static_cast<float>(layer.isPacked ? frame->height / 2 : frame->height);
+                    float s2fW = static_cast<float>(outW) / srcW_f;
+                    float s2fH = static_cast<float>(outH) / srcH_f;
+                    float fit = layer.containFit ? std::min(s2fW, s2fH) : std::max(s2fW, s2fH);
+                    spdlog::info("  scaleToFitW={:.4f} scaleToFitH={:.4f} fitScale={:.4f}",
+                                 s2fW, s2fH, fit);
+                    spdlog::info("  effectiveCharH={:.0f} (outH={}) ratio={:.2f}%%",
+                                 srcH_f * fit * layer.scY, outH,
+                                 srcH_f * fit * layer.scY / outH * 100.0f);
+                    spdlog::info("====================================");
+                }
+            }
+
+            // Store wipe transition metadata for GPU spatial blending
+            if (activeWipeProgress >= 0.0f) {
+                layer.wipeType        = activeWipeType;
+                layer.wipeProgress    = activeWipeProgress;
+                layer.wipeSoftness    = activeWipeSoftness;
+                layer.wipePeerClipId  = activeWipePeer;
+                layer.isWipeOutgoing  = activeWipeOutgoing;
+            }
+
+            // Read crop from clip if available
+            if (auto* vc = dynamic_cast<VideoClip*>(clip)) {
+                layer.cropL = vc->cropLeft();
+                layer.cropR = vc->cropRight();
+                layer.cropT = vc->cropTop();
+                layer.cropB = vc->cropBottom();
+            }
+#ifdef ROUNDTABLE_HAS_SPINE
+            else if (auto* sc = dynamic_cast<SpineClip*>(clip)) {
+                layer.cropL = sc->cropLeft();
+                layer.cropR = sc->cropRight();
+                layer.cropT = sc->cropTop();
+                layer.cropB = sc->cropBottom();
+
+                // Remap spine crop coordinates: the SHOTS preview crops
+                // relative to the character's visible layer rect, but the
+                // timeline compositor crops relative to the full FBO/texture
+                // UV space which includes transparent margins from the
+                // fitZoom=0.9 centering.  Convert character-relative crop
+                // to FBO-relative crop so visuals match the SHOTS preview.
+                //
+                // Skip for pre-rendered cache frames Ã¢â‚¬â€ the character fills
+                // the texture with minimal padding, so crops apply directly.
+                if (!isPreRenderedSpine &&
+                    (layer.cropL > 0.01f || layer.cropR > 0.01f ||
+                    layer.cropT > 0.01f || layer.cropB > 0.01f)) {
+                    auto cit = m_spineCache.find(sc->id());
+                    if (cit != m_spineCache.end() && cit->second->engine.isLoaded()
+                        && cit->second->shared) {
+                        auto& shared = *cit->second->shared;
+                        float bw = shared.stableBoundsW;
+                        float bh = shared.stableBoundsH;
+                        if (bw > 1.0f && bh > 1.0f) {
+                            float fW = static_cast<float>(outW);
+                            float fH = static_cast<float>(outH);
+                            // Height-based fit to match FBO rendering
+                            float fitZoom = (fH / bh) * 0.9f;
+                            float charFracW = std::min(1.0f, fitZoom * bw / fW);
+                            float charFracH = std::min(1.0f, fitZoom * bh / fH);
+                            float marginH = (1.0f - charFracW) * 0.5f;
+                            float marginV = (1.0f - charFracH) * 0.5f;
+                            // Include transparent margin + proportional character crop.
+                            // Values stay in 0-100 range (divided by 100 later for GPU,
+                            // used directly for CPU blitLayerWithTransform).
+                            layer.cropL = (marginH + (layer.cropL / 100.0f) * charFracW) * 100.0f;
+                            layer.cropR = (marginH + (layer.cropR / 100.0f) * charFracW) * 100.0f;
+                            layer.cropT = (marginV + (layer.cropT / 100.0f) * charFracH) * 100.0f;
+                            layer.cropB = (marginV + (layer.cropB / 100.0f) * charFracH) * 100.0f;
+                        }
+                    }
+                }
+            }
+#endif
+
+            // Evaluate clip effects for GPU processing
+            if (clip->effects().hasActiveEffects()) {
+                const int64_t effectLocalTick = tick - clip->timelineIn();
+                layer.effects = clip->effects().evaluate(effectLocalTick);
+            }
+
+            // PERF: per-clip timing
+            if (perfLog) {
+                auto perfClipT1 = std::chrono::high_resolution_clock::now();
+                double clipMs = std::chrono::duration<double, std::milli>(perfClipT1 - perfClipT0).count();
+                const char* clipType = "Unknown";
+                if (dynamic_cast<VideoClip*>(clip)) clipType = "Video";
+                else if (dynamic_cast<TitleClip*>(clip)) clipType = "Title";
+                else if (dynamic_cast<GraphicClip*>(clip)) clipType = "Graphic";
+#ifdef ROUNDTABLE_HAS_SPINE
+                else if (dynamic_cast<SpineClip*>(clip)) clipType = "Spine";
+#endif
+                spdlog::info("  [PERF] clip '{}' type={} -> {:.1f}ms (frame {}x{}, gpuTex={} tier={})",
+                             clip->label(), clipType, clipMs,
+                             layer.frameWidth, layer.frameHeight,
+                             layer.gpuTextureReady,
+                             playbackNonBlocking ? "Half" : "Full");
+            }
+
+            layer.clipPtr = clip;
+            // Mark loop content so GPU tex cache path is used for character anims
+            if (auto* vc = dynamic_cast<VideoClip*>(clip))
+                layer.isLoopContent = vc->isVideoCharacter();
+
+            // Track layer index of GPU Spine renders for multi-char readback
+            if (m_gpuSpineJustRendered) {
+                m_gpuSpinePrevLayer = m_gpuSpineInsertedLayer;
+                m_gpuSpineInsertedLayer = static_cast<int>(layers.size());
+                m_gpuSpineJustRendered = false;
+            }
+
+            layers.push_back(std::move(layer));
+        }
+    }
+    return layers;
+}
+
+} // namespace rt

@@ -1,0 +1,62 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0, rgba8) uniform writeonly image2D outputImage;
+layout(binding = 1)        uniform sampler2D inputImage;
+
+layout(push_constant) uniform PushConstants {
+    int   width;
+    int   height;
+    int   paramCount;
+    int   _pad;
+    float params[16];
+    // params[0] = aspectWidth  (e.g. 2.39)
+    // params[1] = aspectHeight (e.g. 1.0)
+    // params[2] = barOpacity   (0–1)
+    // params[3] = barR         (0–1)
+    // params[4] = barG         (0–1)
+    // params[5] = barB         (0–1)
+    // params[6] = feather      (0–0.1, normalized)
+} pc;
+
+void main()
+{
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= pc.width || pixel.y >= pc.height) return;
+
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(pc.width, pc.height);
+    vec4 color = texture(inputImage, uv);
+
+    float targetAspect = pc.params[0] / max(pc.params[1], 0.001);
+    float frameAspect  = float(pc.width) / float(pc.height);
+    float barOpacity   = pc.params[2];
+    vec3  barColor     = vec3(pc.params[3], pc.params[4], pc.params[5]);
+    float feather      = max(pc.params[6], 0.0);
+
+    float barMix = 0.0;
+
+    if (targetAspect < frameAspect) {
+        // Pillarbox (bars on left/right)
+        float visibleWidth = targetAspect / frameAspect;
+        float barEdge = (1.0 - visibleWidth) * 0.5;
+        if (uv.x < barEdge) {
+            barMix = feather > 0.0 ? smoothstep(barEdge, barEdge - feather, uv.x) : 1.0;
+        } else if (uv.x > 1.0 - barEdge) {
+            barMix = feather > 0.0 ? smoothstep(1.0 - barEdge, 1.0 - barEdge + feather, uv.x) : 1.0;
+        }
+    } else if (targetAspect > frameAspect) {
+        // Letterbox (bars on top/bottom)
+        float visibleHeight = frameAspect / targetAspect;
+        float barEdge = (1.0 - visibleHeight) * 0.5;
+        if (uv.y < barEdge) {
+            barMix = feather > 0.0 ? smoothstep(barEdge, barEdge - feather, uv.y) : 1.0;
+        } else if (uv.y > 1.0 - barEdge) {
+            barMix = feather > 0.0 ? smoothstep(1.0 - barEdge, 1.0 - barEdge + feather, uv.y) : 1.0;
+        }
+    }
+
+    // Blend bar color over source based on bar mix and opacity
+    vec3 result = mix(color.rgb, barColor, barMix * barOpacity);
+    imageStore(outputImage, pixel, vec4(result, color.a));
+}

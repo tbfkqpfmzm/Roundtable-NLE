@@ -1,0 +1,519 @@
+/*
+ * ShotComposerLibrary.cpp - Library refresh and layer property handlers
+ * extracted from ShotComposerThumbnails.cpp.
+ */
+
+#include "panels/characters/ShotComposer.h"
+#include "panels/characters/ShotComposerInternal.h"
+#include "panels/characters/CharacterThumbnailCache.h"
+#include "Theme.h"
+
+#ifdef ROUNDTABLE_HAS_SPINE
+#include "spine/ModelManager.h"
+#include "spine/SpineEngine.h"
+#include "spine/AnimationVideoCache.h"
+#include "widgets/SpinePreviewWidget.h"
+#endif
+
+#include <QDir>
+#include <QFileInfo>
+#include <QImage>
+#include <QListWidget>
+#include <QPixmap>
+
+#include <spdlog/spdlog.h>
+
+#include <unordered_set>
+
+namespace rt {
+
+void ShotComposer::clearCharacterThumbCache()
+{
+    m_charThumbCache.clear();
+}
+
+void ShotComposer::refreshCharacterLibrary()
+{
+    m_charThumbCache.clear();
+    m_characterLibrary->clear();
+
+    QString searchTerm;
+    if (m_charSearchEdit)
+        searchTerm = m_charSearchEdit->text().toLower();
+
+#ifdef ROUNDTABLE_HAS_SPINE
+    if (m_modelManager && m_modelManager->isScanned()) {
+        auto names = m_modelManager->characterNames();
+
+        // Backfill persistent thumbnails for characters that don't have one yet
+        for (const auto& name : names) {
+            if (!hasCachedCharacterThumbnail(name))
+                renderAndCacheCharacterThumbnail(name);
+        }
+
+        for (const auto& name : names) {
+            // Get display name (with colons) for UI
+            std::string dispName = m_modelManager->getDisplayName(name);
+
+            // Apply search filter
+            if (!searchTerm.isEmpty()) {
+                QString qname = QString::fromStdString(dispName).toLower();
+                if (!qname.contains(searchTerm))
+                    continue;
+            }
+
+            // Add cache status indicator
+            QString displayName = QString::fromStdString(dispName);
+
+            // Generate thumbnail icon
+            QPixmap thumb = makeCharacterThumbnail(name, m_iconSize);
+            auto* item = new QListWidgetItem(QIcon(thumb), displayName);
+            item->setData(Qt::UserRole, QString::fromStdString(name));  // folder name for addCharacter
+
+            if (m_animVideoCache && m_animVideoCache->hasAnyForCharacter(name)) {
+                size_t count = m_animVideoCache->countForCharacter(name);
+                item->setText(QString::fromUtf8("%1\n\u2714 %2 cached")
+                              .arg(displayName).arg(count));
+                item->setForeground(Theme::colors().success);
+            }
+
+            m_characterLibrary->addItem(item);
+        }
+    }
+#endif
+
+    // Add video characters (always available regardless of Spine)
+    static const std::vector<std::pair<std::string, std::pair<std::string, std::string>>> videoCharacters = {
+        {"Wells", {"assets/videos/WELLS-CHRONO-MUTE.mp4", "assets/videos/WELLS-CHRONO-TALK.mp4"}}
+    };
+    for (const auto& [name, paths] : videoCharacters) {
+        if (!searchTerm.isEmpty()) {
+            QString qname = QString::fromStdString(name).toLower();
+            if (!qname.contains(searchTerm))
+                continue;
+        }
+        // Only add if video files exist on disk
+        if (QFileInfo::exists(QString::fromStdString(paths.first)) ||
+            QFileInfo::exists(QString::fromStdString(paths.second))) {
+            // Use makeCharacterThumbnail which crops to the character and produces a square thumb
+            QPixmap thumb = makeCharacterThumbnail(name, m_iconSize);
+
+            auto* item = new QListWidgetItem(QIcon(thumb),
+                QString::fromStdString(name) + "\n(video)");
+            item->setData(Qt::UserRole, QStringLiteral("video"));  // tag as video character
+            item->setData(Qt::UserRole + 1, QString::fromStdString(paths.first));
+            item->setData(Qt::UserRole + 2, QString::fromStdString(paths.second));
+            item->setForeground(Theme::colors().accent);  // blue tint to distinguish
+            m_characterLibrary->addItem(item);
+        }
+    }
+}
+
+void ShotComposer::refreshBackgroundLibrary()
+{
+    m_backgroundLibrary->clear();
+
+    // Scan assets/backgrounds/ directory
+    QDir bgDir("assets/backgrounds");
+    if (!bgDir.exists()) return;
+
+    QStringList filters;
+    filters << "*.png" << "*.jpg" << "*.jpeg" << "*.bmp" << "*.webp";
+    auto entries = bgDir.entryInfoList(filters, QDir::Files, QDir::Name);
+    for (const auto& entry : entries) {
+        QPixmap thumb;
+        // Check image cache
+        std::string pathKey = entry.absoluteFilePath().toStdString();
+        auto cacheIt = m_bgImageCache.find(pathKey);
+        if (cacheIt != m_bgImageCache.end()) {
+            thumb = QPixmap::fromImage(cacheIt->second.scaled(
+                m_iconSize, m_iconSize, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        } else {
+            QImage img(entry.absoluteFilePath());
+            if (!img.isNull()) {
+                m_bgImageCache[pathKey] = img;
+                thumb = QPixmap::fromImage(img.scaled(
+                    m_iconSize, m_iconSize, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+            }
+        }
+        auto* item = new QListWidgetItem(QIcon(thumb), entry.baseName());
+        // Store absolute path for relink/context-menu actions.
+        item->setData(Qt::UserRole, entry.absoluteFilePath());
+        m_backgroundLibrary->addItem(item);
+    }
+
+    spdlog::debug("ShotComposer: Found {} backgrounds", entries.size());
+}
+
+void ShotComposer::refreshVideoLibrary()
+{
+    m_videoLibrary->clear();
+
+    // Scan assets/videos/ directory
+    QDir vidDir("assets/videos");
+    if (!vidDir.exists()) return;
+
+    QStringList filters;
+    filters << "*.mp4" << "*.avi" << "*.mov" << "*.mkv" << "*.webm" << "*.wmv";
+    auto entries = vidDir.entryInfoList(filters, QDir::Files, QDir::Name);
+
+    // Track which video-character names we've already added (avoid duplicates)
+    std::unordered_set<std::string> addedVideoChars;
+
+    for (const auto& entry : entries) {
+        std::string lower = entry.fileName().toLower().toStdString();
+        std::string fullPath = entry.absoluteFilePath().toStdString();
+        auto it = videoCharacterFiles().find(lower);
+        if (it != videoCharacterFiles().end()) {
+            // This file belongs to a video character â€” add as character entry
+            const auto& [charName, mutePath, talkPath] = it->second;
+            if (addedVideoChars.count(charName)) continue;
+            addedVideoChars.insert(charName);
+
+            // Extract thumbnail from mute video
+            QPixmap thumb;
+            QImage frame = extractVideoThumbnail(mutePath);
+            if (!frame.isNull())
+                thumb = QPixmap::fromImage(frame.scaled(m_iconSize, m_iconSize,
+                    Qt::KeepAspectRatio, Qt::SmoothTransformation));
+
+            auto* item = new QListWidgetItem(QIcon(thumb),
+                QString::fromStdString(charName) + "\n(video char)");
+            item->setData(Qt::UserRole, QStringLiteral("videoChar"));
+            item->setData(Qt::UserRole + 1, QString::fromStdString(charName));
+            item->setData(Qt::UserRole + 2, QString::fromStdString(mutePath));
+            item->setData(Qt::UserRole + 3, QString::fromStdString(talkPath));
+            item->setForeground(Theme::colors().accent);
+            m_videoLibrary->addItem(item);
+        } else {
+            // Regular video â€” extract first frame as thumbnail
+            QPixmap thumb;
+            QImage frame = extractVideoThumbnail(fullPath);
+            if (!frame.isNull())
+                thumb = QPixmap::fromImage(frame.scaled(m_iconSize, m_iconSize,
+                    Qt::KeepAspectRatio, Qt::SmoothTransformation));
+
+            auto* item = new QListWidgetItem(QIcon(thumb), entry.baseName());
+            item->setData(Qt::UserRole, QStringLiteral("video_file"));
+            item->setData(Qt::UserRole + 1, entry.absoluteFilePath());
+            m_videoLibrary->addItem(item);
+        }
+    }
+
+    spdlog::debug("ShotComposer: Found {} videos", entries.size());
+}
+
+int ShotComposer::addVideoLayer(const std::string& filename)
+{
+    pushUndoState();
+    BackgroundState bg;
+    bg.path      = "assets/videos/" + filename;
+    bg.layerType = "video";
+    bg.posX      = 0.5f;
+    bg.posY      = 0.5f;
+    bg.scale     = 1.0f;
+
+    int idx = m_currentShot.addBackground(bg);
+    refreshLayerList();
+
+    int layerIdx = m_currentShot.findLayerIndex({LayerType::Background, idx});
+    if (layerIdx >= 0)
+        selectLayer(layerIdx);
+
+    emit shotChanged();
+    return idx;
+}
+
+void ShotComposer::onVideoTimingChanged()
+{
+    if (m_updating) return;
+    if (m_selectedLayer < 0 || m_selectedLayer >= m_currentShot.layerCount())
+        return;
+
+    const auto& ref = m_currentShot.layerOrder()[static_cast<size_t>(m_selectedLayer)];
+    if (ref.type != LayerType::Background)
+        return;
+
+    auto* bg = m_currentShot.background(ref.index);
+    if (!bg || !bg->isVideo()) return;
+
+    bg->inPoint  = static_cast<float>(m_videoInSpin->value());
+    bg->outPoint = static_cast<float>(m_videoOutSpin->value());
+
+    emit shotChanged();
+}
+
+void ShotComposer::populateLayerProperties()
+{
+    if (m_selectedLayer < 0 || m_selectedLayer >= m_currentShot.layerCount()) {
+        clearLayerProperties();
+        updatePreview();
+        return;
+    }
+
+    const auto& ref = m_currentShot.layerOrder()[static_cast<size_t>(m_selectedLayer)];
+    if (ref.type == LayerType::Character) {
+        const auto* ch = m_currentShot.character(ref.index);
+        if (ch)
+            showCharacterProperties(*ch);
+    } else {
+        const auto* bg = m_currentShot.background(ref.index);
+        if (bg)
+            showBackgroundProperties(*bg);
+    }
+
+    updatePreview();
+}
+
+void ShotComposer::clearLayerProperties()
+{
+    if (m_propsStack)
+        m_propsStack->setCurrentIndex(0);  // empty placeholder
+}
+
+void ShotComposer::showCharacterProperties(const CharacterState& ch)
+{
+    m_updating = true;
+
+    // Switch stacked widget to character page
+    if (m_propsStack)
+        m_propsStack->setCurrentIndex(1);
+    m_charPropsGroup->setVisible(true);
+
+    // Convert normalized 0â€“1 storage â†’ percentage display
+    m_posXSpin->setValue(static_cast<double>(ch.posX) * 100.0);
+    m_posYSpin->setValue(static_cast<double>(ch.posY) * 100.0);
+    m_scaleSpin->setValue(static_cast<double>(ch.scale) * 100.0);
+    m_rotationSpin->setValue(static_cast<double>(ch.rotation));
+    m_opacitySpin->setValue(static_cast<double>(ch.opacity) * 100.0);
+    m_blurSpin->setValue(static_cast<double>(ch.blur));
+
+    // Populate outfit combo â€” ensure "default" always appears first
+    m_outfitCombo->clear();
+#ifdef ROUNDTABLE_HAS_SPINE
+    if (m_modelManager) {
+        const auto* entry = m_modelManager->findByName(ch.characterName);
+        if (entry) {
+            // Add "default" first if it exists, then the rest
+            bool hasDefault = false;
+            for (const auto& outfit : entry->outfits) {
+                if (outfit.name == "default") { hasDefault = true; break; }
+            }
+            if (hasDefault)
+                m_outfitCombo->addItem("default");
+            for (const auto& outfit : entry->outfits) {
+                if (outfit.name != "default")
+                    m_outfitCombo->addItem(QString::fromStdString(outfit.name));
+            }
+        }
+    }
+#endif
+    // Select the character's current outfit, fall back to "default"
+    std::string targetOutfit = ch.outfit.empty() ? "default" : ch.outfit;
+    int outfitIdx = m_outfitCombo->findText(QString::fromStdString(targetOutfit));
+    if (outfitIdx >= 0) m_outfitCombo->setCurrentIndex(outfitIdx);
+    else if (m_outfitCombo->count() > 0) {
+        m_outfitCombo->setCurrentIndex(0);
+    } else {
+        m_outfitCombo->addItem(QString::fromStdString(targetOutfit));
+        m_outfitCombo->setCurrentIndex(0);
+    }
+
+    int stanceIdx = static_cast<int>(ch.stance);
+    if (stanceIdx >= 0 && stanceIdx < m_stanceCombo->count())
+        m_stanceCombo->setCurrentIndex(stanceIdx);
+
+    m_animCombo->setCurrentText(QString::fromStdString(ch.animation));
+    m_talkingCheck->setChecked(ch.isTalking);
+    m_flipXCheck->setChecked(ch.flipX);
+    m_visibleCheck->setChecked(ch.visible);
+
+    // Hide Spine-specific controls for video characters
+    bool isVideo = ch.isVideoCharacter();
+    m_outfitCombo->setVisible(!isVideo);
+    m_stanceCombo->setVisible(!isVideo);
+    m_animCombo->setVisible(!isVideo);
+    // Flip is available for ALL character types (Spine + video)
+
+    // Hide the "Character" tab entirely for video characters
+    if (m_layerPropsTabs) {
+        int charTabIdx = 1; // "Character" tab
+        m_layerPropsTabs->setTabEnabled(charTabIdx, !isVideo);
+        m_layerPropsTabs->setTabVisible(charTabIdx, !isVideo);
+    }
+
+    // Crop values are already 0â€“100
+    m_cropLeftSpin->setValue(static_cast<double>(ch.cropLeft));
+    m_cropRightSpin->setValue(static_cast<double>(ch.cropRight));
+    m_cropTopSpin->setValue(static_cast<double>(ch.cropTop));
+    m_cropBottomSpin->setValue(static_cast<double>(ch.cropBottom));
+    m_cropGroup->setChecked(ch.cropLeft > 0 || ch.cropRight > 0 ||
+                            ch.cropTop > 0 || ch.cropBottom > 0);
+
+    m_updating = false;
+}
+
+void ShotComposer::showBackgroundProperties(const BackgroundState& bg)
+{
+    m_updating = true;
+
+    // Switch stacked widget to background page
+    if (m_propsStack)
+        m_propsStack->setCurrentIndex(2);
+    m_bgPropsGroup->setVisible(true);
+
+    m_bgPosXSpin->setValue(static_cast<double>(bg.posX) * 100.0);
+    m_bgPosYSpin->setValue(static_cast<double>(bg.posY) * 100.0);
+    m_bgScaleSpin->setValue(static_cast<double>(bg.scale) * 100.0);
+    m_bgOpacitySpin->setValue(static_cast<double>(bg.opacity) * 100.0);
+    m_bgBlurSpin->setValue(static_cast<double>(bg.blur));
+
+    // Show video timing controls only for video layers
+    bool isVideo = bg.isVideo();
+    m_videoTimingGroup->setVisible(isVideo);
+    if (isVideo) {
+        m_videoInSpin->setValue(static_cast<double>(bg.inPoint));
+        m_videoOutSpin->setValue(static_cast<double>(bg.outPoint));
+    }
+
+    m_updating = false;
+}
+
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// Slots
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+void ShotComposer::onShotListSelectionChanged()
+{
+    auto* current = m_shotList ? m_shotList->currentItem() : nullptr;
+    if (!current) return;
+    auto name = current->data(Qt::UserRole).toString().toStdString();
+    if (name.empty()) return;
+    auto preset = m_presetManager.load(name);
+    if (preset)
+        setCurrentShot(*preset);
+}
+
+void ShotComposer::onLayerListSelectionChanged()
+{
+    int row = m_layerList->currentRow();
+    if (row == m_selectedLayer) return;
+
+    m_selectedLayer = row;
+    populateLayerProperties();
+#ifdef ROUNDTABLE_HAS_SPINE
+    if (m_spinePreview) {
+        m_spinePreview->setSelectedLayer(row);
+        // Pass all selected layer indices for multi-layer transform
+        QSet<int> selectedIndices;
+        const auto selItems = m_layerList->selectionModel()->selectedRows();
+        for (const auto& idx : selItems)
+            selectedIndices.insert(idx.row());
+        // If no multi-selection via selectedRows, include at least the current row
+        if (selectedIndices.isEmpty() && row >= 0)
+            selectedIndices.insert(row);
+        m_spinePreview->setSelectedLayers(selectedIndices);
+    }
+#endif
+    emit layerSelected(row);
+}
+
+void ShotComposer::onShotNameChanged(const QString& name)
+{
+    if (m_updating) return;
+    m_currentShot.setName(name.toStdString());
+}
+
+void ShotComposer::onCharacterPropertyChanged()
+{
+    if (m_updating) return;
+    if (m_selectedLayer < 0 || m_selectedLayer >= m_currentShot.layerCount())
+        return;
+
+    // Push undo before the first change in a burst of edits
+    if (!m_undoPropertyPushed) {
+        pushUndoState();
+        m_undoPropertyPushed = true;
+    }
+    m_undoCoalesceTimer->start();  // restart the 600ms window
+
+    const auto& ref = m_currentShot.layerOrder()[static_cast<size_t>(m_selectedLayer)];
+    if (ref.type != LayerType::Character)
+        return;
+
+    auto* ch = m_currentShot.character(ref.index);
+    if (!ch) return;
+
+    // Convert percentage display â†’ normalized 0â€“1 storage
+    ch->posX      = static_cast<float>(m_posXSpin->value() / 100.0);
+    ch->posY      = static_cast<float>(m_posYSpin->value() / 100.0);
+    ch->scale     = static_cast<float>(m_scaleSpin->value() / 100.0);
+    ch->rotation  = static_cast<float>(m_rotationSpin->value());
+    ch->opacity   = static_cast<float>(m_opacitySpin->value() / 100.0);
+    ch->blur      = static_cast<float>(m_blurSpin->value());
+    ch->outfit    = m_outfitCombo->currentText().toStdString();
+    ch->animation = m_animCombo->currentText().toStdString();
+    ch->isTalking = m_talkingCheck->isChecked();
+    ch->flipX     = m_flipXCheck->isChecked();
+    ch->visible   = m_visibleCheck->isChecked();
+
+    ch->cropLeft   = static_cast<float>(m_cropLeftSpin->value());
+    ch->cropRight  = static_cast<float>(m_cropRightSpin->value());
+    ch->cropTop    = static_cast<float>(m_cropTopSpin->value());
+    ch->cropBottom = static_cast<float>(m_cropBottomSpin->value());
+
+    int stanceIdx = m_stanceCombo->currentIndex();
+    ch->stance = static_cast<CharacterStance>(stanceIdx >= 0 ? stanceIdx : 0);
+
+    updatePreview();
+    emit shotChanged();
+}
+
+void ShotComposer::onBackgroundPropertyChanged()
+{
+    if (m_updating) return;
+    if (m_selectedLayer < 0 || m_selectedLayer >= m_currentShot.layerCount())
+        return;
+
+    // Push undo before the first change in a burst of edits
+    if (!m_undoPropertyPushed) {
+        pushUndoState();
+        m_undoPropertyPushed = true;
+    }
+    m_undoCoalesceTimer->start();  // restart the 600ms window
+
+    const auto& ref = m_currentShot.layerOrder()[static_cast<size_t>(m_selectedLayer)];
+    if (ref.type != LayerType::Background)
+        return;
+
+    auto* bg = m_currentShot.background(ref.index);
+    if (!bg) return;
+
+    bg->posX    = static_cast<float>(m_bgPosXSpin->value() / 100.0);
+    bg->posY    = static_cast<float>(m_bgPosYSpin->value() / 100.0);
+    bg->scale   = static_cast<float>(m_bgScaleSpin->value() / 100.0);
+    bg->opacity = static_cast<float>(m_bgOpacitySpin->value() / 100.0);
+    bg->blur    = static_cast<float>(m_bgBlurSpin->value());
+
+    updatePreview();
+    emit shotChanged();
+}
+
+void ShotComposer::onCameraPropertyChanged()
+{
+    if (m_updating) return;
+    m_currentShot.setCameraZoom(static_cast<float>(m_cameraZoomSpin->value() / 100.0));
+    m_currentShot.setCameraX(static_cast<float>(m_cameraPanXSpin->value() / 100.0));
+    m_currentShot.setCameraY(static_cast<float>(m_cameraPanYSpin->value() / 100.0));
+#ifdef ROUNDTABLE_HAS_SPINE
+    if (m_spinePreview)
+        m_spinePreview->setCameraTransform(
+            m_currentShot.cameraZoom(),
+            m_currentShot.cameraX(),
+            m_currentShot.cameraY());
+#endif
+    emit shotChanged();
+}
+
+} // namespace rt
+

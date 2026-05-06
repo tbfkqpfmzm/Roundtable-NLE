@@ -1,0 +1,171 @@
+# ROUNDTABLE NLE v2 — C++ / Vulkan / CUDA
+
+# Build outputs
+build/
+out/
+cmake-build-*/
+.vs/
+x64/
+
+# IDE
+.idea/
+.vscode/settings.json
+*.user
+*.suo
+*.sln.docstates
+*.swp
+*.swo
+*~
+
+# Compiled
+*.obj
+*.o
+*.exe
+*.dll
+*.lib
+*.so
+*.dylib
+*.pdb
+*.ilk
+*.exp
+
+# Shader compilation output (SPIR-V)
+shaders/*.spv
+*.spv
+
+# Python (old project in _OLD_/)
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+.venv/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Development assets (do not push — user's local content only)
+assets/backgrounds/
+assets/fonts/
+assets/videos/
+assets/characters/
+
+# Asset caches (generated at runtime)
+assets/cache/
+assets/temp/
+
+# AI model checkpoints (downloaded via setup)
+**/checkpoints/
+
+# Runtime logs and build output
+launch_*.txt
+perf_log*.txt
+cut_over.txt
+list.txt
+*.dmp
+
+# Old partial rewrite project (deleted)
+_NEW/
+
+# Large binary assets (downloaded separately by user)
+assets/characters/
+assets/videos/
+assets/videos/_converted/
+
+# ML models (downloaded separately — too large for GitHub)
+models/
+
+# Auto-save & crash
+*.autosave
+*.dmp
+crash_log.txt
+crash_logs/
+temp_meta/
+
+# Project files & thumbnails (user data, not source)
+projects/
+**/thumbs/
+
+# Runtime logs (regenerated each launch)
+perf_log.txt
+*.log
+roundtable_debug.log
+
+# Debug/capture output files
+stdout*.txt
+stderr*.txt
+launch_stdout*.txt
+launch_stderr*.txt
+crash_stdout*.txt
+crash_stderr*.txt
+crash_output.txt
+co_stdout.txt
+co_stderr.txt
+jkl_stdout.txt
+jkl_stderr.txt
+app_output.txt
+build_log.txt
+debug_output.txt
+test_results*.txt
+
+# Runtime log variants
+perf_log_*.txt
+
+# Old project reference
+_OLD_/venv/
+_OLD_/__pycache__/
+nul
+tools/ffmpeg/
+
+# Local Qt installation (downloaded by setup.ps1 via aqtinstall)
+third_party/qt/
+
+# Shaderc/glslc binary (downloaded by setup.ps1)
+tools/shaderc/*.exe
+tools/shaderc/*.dll
+
+# Local CMake installation (downloaded by setup.ps1 if system cmake is too old)
+tools/cmake/shaderc/*.exe
+tools/shaderc/*.dll
+
+# Local CMake installation (downloaded by setup.ps1 if system cmake is too old)
+tools/cmake/
+
+# Temp build directories (leftovers from troubleshooting)
+build3/
+
+# Scratch / dev helper scripts (not part of the project)
+scratch/
+fix.py
+fix2.py
+fix_*.ps1
+fix_*.py
+sample_walls.ps1
+mockup_new_project.html
+original_*.cpp
+temp_*.cpp
+update.bat
+
+# Personal publish scripts (machine-specific paths, git push access)
+publish.bat
+publish_release.ps1
+publish-gui.bat
+publish-gui.ps1
+publish-gui.vbs
+publish.example.ps1
+.publish-state.json
+
+# Internal development notes (not for public)
+MODULARIZATION_PLAN.txt
+docs/
+
+# Runtime user data (personal paths / links)
+assets/script_history.txt
+assets/audio_folder.txt
+
+# Thumbnail caches (generated)
+assets/presets/shots/thumbnails/
+
+# Backup copies
+*.original

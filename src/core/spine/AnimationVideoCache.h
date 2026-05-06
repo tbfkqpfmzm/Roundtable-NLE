@@ -1,0 +1,289 @@
+/*
+ * AnimationVideoCache — manages pre-rendered Spine animation video files.
+ *
+ * Central registry mapping (character, outfit, animation) → pre-rendered
+ * VP9+alpha WebM files.  Provides:
+ *   - Inventory scanning (discovers existing cached .webm files on startup)
+ *   - Lookup by character identity and animation name
+ *   - Background pre-rendering of missing animations via SpinePrerenderer
+ *   - MediaPool integration for video decode during compositing
+ *   - Staleness detection (re-renders when skeleton files change)
+ *
+ * Cache layout on disk:
+ *   assets/cache/animations/{CharName}/{outfit}/{animName}.webm
+ *
+ * Thread safety: all public methods are guarded by a mutex.
+ * Background rendering happens on a worker thread; completed entries
+ * are integrated via a callback on the main thread.
+ */
+
+#pragma once
+
+#ifdef ROUNDTABLE_HAS_SPINE
+
+#include "media/MediaPool.h"
+
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <deque>
+#include <filesystem>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+namespace rt {
+
+class SpinePrerenderer;
+
+/// Encoder format preference for new cache renders
+enum class SpineCacheFormat : uint8_t
+{
+    HEVCPackedAlpha, ///< HEVC packed-alpha (.mp4) — all-intra, ~10-20× smaller
+    ProRes4444,      ///< ProRes 4444 (.mov) — intra-frame, native alpha
+};
+
+/// Information about a single cached animation video
+struct AnimCacheEntry
+{
+    std::string           characterName;
+    std::string           outfit;
+    std::string           animationName;
+    std::filesystem::path videoPath;        ///< Absolute path to .mov or .webm
+    uint32_t              width{0};
+    uint32_t              height{0};
+    float                 duration{0.0f};   ///< Animation duration in seconds
+    int64_t               frameCount{0};
+    int                   fps{60};
+    uint64_t              fileSizeBytes{0};
+    MediaHandle           mediaHandle{0};   ///< Handle in MediaPool (0 = not opened)
+
+    // Staleness tracking
+    std::filesystem::file_time_type skelModTime{};
+};
+
+/// Status of a pre-render job
+enum class PrerenderStatus : uint8_t
+{
+    Queued,
+    InProgress,
+    Completed,
+    Failed
+};
+
+/// Callback when a pre-render job completes
+/// (characterName, outfit, animationName, success)
+using AnimCacheCompleteFn = std::function<void(const std::string&,
+                                                const std::string&,
+                                                const std::string&,
+                                                bool)>;
+
+class AnimationVideoCache
+{
+public:
+    /// Create the cache.
+    /// @param cacheDir  Root directory for cached videos
+    ///                  (e.g., "assets/cache/animations")
+    /// @param assetsDir Root assets directory (containing "characters/")
+    /// @param pool      MediaPool for video decode (non-owning)
+    explicit AnimationVideoCache(MediaPool* pool = nullptr,
+                                  const std::string& cacheDir = "assets/cache/animations",
+                                  const std::string& assetsDir = "assets");
+    ~AnimationVideoCache();
+
+    AnimationVideoCache(const AnimationVideoCache&) = delete;
+    AnimationVideoCache& operator=(const AnimationVideoCache&) = delete;
+
+    // ── Configuration ───────────────────────────────────────────────────
+
+    /// Set a callback for when background pre-renders complete.
+    /// Called on the rendering thread — use QMetaObject::invokeMethod
+    /// to bounce to the UI thread if needed.
+    void setCompletionCallback(AnimCacheCompleteFn fn) { m_completeFn = std::move(fn); }
+
+    /// Set the encoder format for new renders.
+    void setEncoderFormat(SpineCacheFormat fmt) { m_encoderFormat = fmt; }
+    [[nodiscard]] SpineCacheFormat encoderFormat() const { return m_encoderFormat; }
+
+    /// Set the MediaPool (can be set after construction, non-owning).
+    void setMediaPool(MediaPool* pool) { m_mediaPool = pool; }
+
+    // ── Inventory ───────────────────────────────────────────────────────
+
+    /// Scan the cache directory for existing pre-rendered videos.
+    /// Call on startup to populate the inventory.
+    void scanCacheDirectory();
+
+    /// @return Number of cached animation entries
+    [[nodiscard]] size_t entryCount() const;
+
+    // ── Lookup ──────────────────────────────────────────────────────────
+
+    /// Check if a pre-rendered video exists for the given animation.
+    [[nodiscard]] bool hasVideo(const std::string& characterName,
+                                const std::string& outfit,
+                                const std::string& animationName) const;
+
+    /// Get the cache entry for an animation (nullptr if not cached).
+    [[nodiscard]] const AnimCacheEntry* getEntry(const std::string& characterName,
+                                                  const std::string& outfit,
+                                                  const std::string& animationName) const;
+
+    /// Get or open a MediaHandle for a cached video.
+    /// Returns InvalidMedia if the video doesn't exist in cache.
+    [[nodiscard]] MediaHandle getMediaHandle(const std::string& characterName,
+                                              const std::string& outfit,
+                                              const std::string& animationName);
+
+    /// Check if any pre-rendered video exists for a character (any outfit/anim).
+    [[nodiscard]] bool hasAnyForCharacter(const std::string& characterName) const;
+
+    /// Count how many cached entries exist for a character (any outfit/anim).
+    [[nodiscard]] size_t countForCharacter(const std::string& characterName) const;
+
+    /// Count how many cached entries exist for a specific character + outfit.
+    [[nodiscard]] size_t countForCharacterOutfit(const std::string& characterName,
+                                                  const std::string& outfit) const;
+
+    /// Return codec name for a character+outfit's cached files (e.g. "ProRes 4444", "DNxHD", "HEVC").
+    /// Returns empty string if no cached entries exist for this character+outfit.
+    [[nodiscard]] std::string codecForCharacterOutfit(const std::string& characterName,
+                                                      const std::string& outfit) const;
+
+    /// Get a decoded frame from a cached animation video.
+    /// @param characterName  Character name
+    /// @param outfit         Outfit name
+    /// @param animationName  Animation name
+    /// @param frameNumber    Frame index within the loop
+    /// @return Decoded frame, or nullptr if not cached
+    [[nodiscard]] std::shared_ptr<CachedFrame> getFrame(
+        const std::string& characterName,
+        const std::string& outfit,
+        const std::string& animationName,
+        int64_t frameNumber);
+
+    // ── Pre-rendering ───────────────────────────────────────────────────
+
+    /// Queue a pre-render job for a single animation.
+    /// If already cached or in-progress, this is a no-op.
+    /// @param talking  If true, renders with talk track blended → saved as {anim}_talk.mov
+    void queueRender(const std::string& characterName,
+                     const std::string& outfit,
+                     const std::string& animationName,
+                     bool talking = false);
+
+    /// Queue pre-renders for all animations of a character/outfit.
+    /// Discovers animation list from the skeleton file.
+    void queueAllAnimations(const std::string& characterName,
+                            const std::string& outfit);
+
+    /// @return true if any background pre-renders are in progress
+    [[nodiscard]] bool isRendering() const;
+
+    /// @return number of jobs pending (queued + in-progress)
+    [[nodiscard]] size_t pendingCount() const;
+
+    /// @return true if any pending jobs exist for this character+outfit
+    [[nodiscard]] bool hasPendingForCharacterOutfit(const std::string& characterName,
+                                                     const std::string& outfit) const;
+
+    /// @return human-readable description of the currently rendering job,
+    ///         or empty string if idle.
+    [[nodiscard]] std::string currentJobDescription() const;
+
+    /// Wait for all queued pre-renders to complete (blocking).
+    void waitForAll();
+
+    /// Cancel all pending pre-render jobs.
+    void cancelAll();
+
+    // ── Maintenance ─────────────────────────────────────────────────────
+
+    /// Close all media handles and clear the inventory.
+    void clear();
+
+    /// Remove a single cache entry (e.g. for corrupt/0-byte files).
+    /// Also releases the media handle and deletes the file on disk.
+    void removeEntry(const std::string& characterName,
+                     const std::string& outfit,
+                     const std::string& animationName);
+
+    /// Remove all cache entries and files for a character.
+    /// Releases media handles and deletes the cache directory from disk.
+    void removeAllForCharacter(const std::string& characterName);
+
+    /// Remove all cache entries and files for a single character outfit.
+    /// Releases media handles and deletes the outfit subdirectory.  Does NOT
+    /// touch the underlying Spine/Live2D assets in `assets/characters/`.
+    void removeAllForCharacterOutfit(const std::string& characterName,
+                                     const std::string& outfit);
+
+    /// Check if cached videos are stale (skeleton modified after render)
+    /// and queue re-renders for any stale entries.
+    void recheckStaleness();
+
+    /// Migrate legacy HEVC packed-alpha .mp4 cache files to ProRes 4444 .mov.
+    /// Deletes old .mp4 files and queues background re-renders in ProRes format.
+    /// Safe to call multiple times (no-op if no .mp4 files exist).
+    void migrateToProRes();
+
+private:
+    /// Build cache key: "charName|outfit|animName"
+    static std::string makeKey(const std::string& charName,
+                                const std::string& outfit,
+                                const std::string& animName);
+
+    /// Build cache file path for a given animation
+    std::filesystem::path cachePath(const std::string& charName,
+                                     const std::string& outfit,
+                                     const std::string& animName) const;
+
+    /// Worker function for background render threads.
+    /// Each worker owns its own SpinePrerenderer and processes jobs
+    /// from the shared m_jobQueue concurrently.
+    void workerLoop();
+
+    /// Holds a single render job description (queued from main thread).
+    struct RenderJob {
+        std::string charName;
+        std::string outfit;
+        std::string animName;
+        bool        isTalking{false};  ///< Render with talk track blended
+    };
+
+    // Configuration
+    std::filesystem::path       m_cacheDir;
+    std::string                 m_assetsDir;
+    MediaPool*                   m_mediaPool{nullptr};
+    AnimCacheCompleteFn         m_completeFn;
+    SpineCacheFormat            m_encoderFormat{SpineCacheFormat::HEVCPackedAlpha};
+
+    // Inventory: key → entry
+    mutable std::mutex m_mutex;
+    std::unordered_map<std::string, AnimCacheEntry> m_entries;
+
+    // In-progress / queued renders — concurrent worker thread pool
+    std::unordered_set<std::string> m_pendingKeys;
+    std::deque<RenderJob>           m_jobQueue;
+    std::condition_variable         m_jobCv;
+    std::vector<std::thread>        m_workerThreads;
+    bool                            m_stopWorker{false};
+    std::string                     m_currentJobDesc;  ///< Set by worker thread
+
+    // Outfits explicitly deleted while a render may be in-flight.
+    // Worker threads check this set before re-adding a completed render
+    // to m_entries, and delete the rendered file instead if the outfit
+    // was deleted mid-render.  Format: "charName|outfit"
+    std::unordered_set<std::string> m_deletingOutfits;
+
+    // Prerenderers are owned by each worker thread locally — not stored here.
+};
+
+} // namespace rt
+
+#endif // ROUNDTABLE_HAS_SPINE
