@@ -197,8 +197,11 @@ public:
     [[nodiscard]] const SnapEngine& snapEngine() const { return m_snapEngine; }
     [[nodiscard]] SnapEngine& snapEngine() { return m_snapEngine; }
 
-    /// Get the clipboard.
+    /// Get the clipboard (const).
     [[nodiscard]] const ClipboardContents& clipboard() const { return m_clipboard; }
+
+    /// Get the clipboard (mutable — for populating from workspace shortcuts).
+    [[nodiscard]] ClipboardContents& mutableClipboard() { return m_clipboard; }
 
     /// Toggle snapping on/off.
     void setSnappingEnabled(bool enabled);
@@ -418,7 +421,7 @@ private:
 
     // Persistent paste-attribute checkbox state (Premiere-style: remembers last selection)
     // Bit flags: 0=opacity, 1=posX, 2=posY, 3=scaleX, 4=scaleY, 5=rotation, 6=speed, 7=speedRamp
-    uint8_t m_pasteAttrMask{0xFF}; // All checked by default
+    uint8_t m_pasteAttrMask{0x3F}; // Transform bits default on; speed/speedramp default off
 
     // Drag state
     enum class DragMode { None, ClipMove, ClipTrimHead, ClipTrimTail,

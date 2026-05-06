@@ -122,6 +122,7 @@ add_library(roundtable_ui STATIC
 
     # Dialogs
     dialogs/ProjectSettingsDialog.cpp
+    dialogs/SequenceDialog.cpp
     dialogs/KeyboardShortcutsDialog.cpp
     dialogs/AppPreferencesDialog.cpp
     dialogs/RelinkMediaDialog.cpp

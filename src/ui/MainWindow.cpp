@@ -198,6 +198,22 @@ void MainWindow::closeEvent(QCloseEvent* event)
     }
 
     saveWorkspace("last_session");
+
+    // Also save to the bundled layout file so the installer always captures
+    // the latest panel arrangement.  When running from the build tree this
+    // writes to assets/default_layout.bin; when installed it's silently
+    // ignored (the file path won't be writable).
+    {
+        QString layoutFile = QCoreApplication::applicationDirPath()
+            + QStringLiteral("/assets/default_layout.bin");
+        // Only save if the file already exists OR we're in the dev tree
+        // (to avoid spewing layout files in Program Files on first close).
+        if (QFileInfo::exists(layoutFile) ||
+            QDir(QCoreApplication::applicationDirPath()).exists("assets")) {
+            saveWorkspaceToFile(layoutFile);
+        }
+    }
+
     spdlog::info("MainWindow closing — workspace saved");
     event->accept();
 

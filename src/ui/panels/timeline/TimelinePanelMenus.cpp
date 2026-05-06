@@ -901,28 +901,68 @@ void TimelinePanel::showPasteAttributesDialog()
                 m_pasteAttrMask |= (1 << i);
         }
 
-        // Apply to all selected clips
+        // Wrap paste attributes in an undoable command
+        // Capture old property values for each modified clip
+        struct AttrSnapshot {
+            size_t trackIdx;
+            uint64_t clipId;
+            // Common
+            float oldSpeed{1.0f};
+            // Transform (video)
+            float oldOpacity{1.0f};
+            float oldPosX{0.0f}, oldPosY{0.0f};
+            float oldScaleX{1.0f}, oldScaleY{1.0f};
+            float oldRotation{0.0f};
+            // Speed ramp
+            KeyframeTrack<float> oldSpeedRamp{1.0f};
+            // Audio
+            float oldVolume{0.0f}, oldPan{0.0f};
+        };
+        std::vector<AttrSnapshot> snapshots;
+
         for (const auto& sel : m_selection.clips()) {
             Track* st = m_timeline->track(sel.trackIndex);
             if (!st) continue;
             size_t si = st->findClipIndexById(sel.clipId);
             if (si >= st->clipCount()) continue;
             Clip* target = st->clip(si);
+
+            AttrSnapshot snap;
+            snap.trackIdx = sel.trackIndex;
+            snap.clipId = sel.clipId;
+
             if (isAudio && !isVideo) {
-                // Audio: volume, pan, speed
+                if (auto* ac = dynamic_cast<AudioClip*>(target)) {
+                    snap.oldVolume = ac->volume().defaultValue();
+                    snap.oldPan = ac->pan().defaultValue();
+                }
+                snap.oldSpeed = target->speed();
+            } else {
+                snap.oldOpacity  = target->opacity().defaultValue();
+                snap.oldPosX     = target->positionX().defaultValue();
+                snap.oldPosY     = target->positionY().defaultValue();
+                snap.oldScaleX   = target->scaleX().defaultValue();
+                snap.oldScaleY   = target->scaleY().defaultValue();
+                snap.oldRotation = target->rotation().defaultValue();
+                snap.oldSpeed    = target->speed();
+                snap.oldSpeedRamp = target->speedRamp();
+            }
+            snapshots.push_back(snap);
+
+            // Apply new values
+            if (isAudio && !isVideo) {
                 if (checks.size() > 0 && checks[0]->isChecked()) {
                     if (auto* ac = dynamic_cast<AudioClip*>(target))
-                        ac->volume() = m_attrClipboard->opacity; // reuse opacity for volume
+                        ac->volume() = m_attrClipboard->opacity;
                 }
                 if (checks.size() > 1 && checks[1]->isChecked()) {
                     if (auto* ac = dynamic_cast<AudioClip*>(target))
-                        ac->pan() = m_attrClipboard->posX; // reuse posX for pan
+                        ac->pan() = m_attrClipboard->posX;
                 }
                 if (checks.size() > 2 && checks[2]->isChecked()) {
                     target->setSpeed(m_attrClipboard->speed);
                 }
             } else {
-                // Video/image/sequence: transform, speed
                 if (checks.size() > 0 && checks[0]->isChecked()) target->opacity()   = m_attrClipboard->opacity;
                 if (checks.size() > 1 && checks[1]->isChecked()) target->positionX() = m_attrClipboard->posX;
                 if (checks.size() > 2 && checks[2]->isChecked()) target->positionY() = m_attrClipboard->posY;
@@ -933,8 +973,79 @@ void TimelinePanel::showPasteAttributesDialog()
                 if (checks.size() > 7 && checks[7]->isChecked()) target->speedRamp() = m_attrClipboard->speedRamp;
             }
         }
-        onScrollChanged();
-        emit contentChanged();
+
+        // Wrap the entire operation in a LambdaCommand for undo/redo
+        if (m_commandStack) {
+            m_commandStack->execute(std::make_unique<LambdaCommand>(
+                "Paste Attributes",
+                [this, snapshots, checks_states = [&]() {
+                    std::vector<bool> states;
+                    for (auto* ck : checks) states.push_back(ck->isChecked());
+                    return states;
+                }(), isAudio, isVideo]() {
+                    // Redo: re-apply from clipboard
+                    if (!m_timeline || !m_attrClipboard) return;
+                    for (const auto& snap : snapshots) {
+                        Track* st = m_timeline->track(snap.trackIdx);
+                        if (!st) continue;
+                        size_t si = st->findClipIndexById(snap.clipId);
+                        if (si >= st->clipCount()) continue;
+                        Clip* target = st->clip(si);
+                        if (isAudio && !isVideo) {
+                            if (checks_states.size() > 0 && checks_states[0]) {
+                                if (auto* ac = dynamic_cast<AudioClip*>(target))
+                                    ac->volume() = m_attrClipboard->opacity;
+                            }
+                            if (checks_states.size() > 1 && checks_states[1]) {
+                                if (auto* ac = dynamic_cast<AudioClip*>(target))
+                                    ac->pan() = m_attrClipboard->posX;
+                            }
+                            if (checks_states.size() > 2 && checks_states[2])
+                                target->setSpeed(m_attrClipboard->speed);
+                        } else {
+                            if (checks_states.size() > 0 && checks_states[0]) target->opacity()   = m_attrClipboard->opacity;
+                            if (checks_states.size() > 1 && checks_states[1]) target->positionX() = m_attrClipboard->posX;
+                            if (checks_states.size() > 2 && checks_states[2]) target->positionY() = m_attrClipboard->posY;
+                            if (checks_states.size() > 3 && checks_states[3]) target->scaleX()    = m_attrClipboard->scaleX;
+                            if (checks_states.size() > 4 && checks_states[4]) target->scaleY()    = m_attrClipboard->scaleY;
+                            if (checks_states.size() > 5 && checks_states[5]) target->rotation()  = m_attrClipboard->rotation;
+                            if (checks_states.size() > 6 && checks_states[6]) target->setSpeed(m_attrClipboard->speed);
+                            if (checks_states.size() > 7 && checks_states[7]) target->speedRamp() = m_attrClipboard->speedRamp;
+                        }
+                    }
+                    onScrollChanged();
+                    emit contentChanged();
+                },
+                [this, snapshots, isAudio, isVideo]() {
+                    // Undo: restore old values
+                    if (!m_timeline) return;
+                    for (const auto& snap : snapshots) {
+                        Track* st = m_timeline->track(snap.trackIdx);
+                        if (!st) continue;
+                        size_t si = st->findClipIndexById(snap.clipId);
+                        if (si >= st->clipCount()) continue;
+                        Clip* target = st->clip(si);
+                        if (isAudio && !isVideo) {
+                            if (auto* ac = dynamic_cast<AudioClip*>(target)) {
+                                ac->volume().setDefaultValue(snap.oldVolume);
+                                ac->pan().setDefaultValue(snap.oldPan);
+                            }
+                            target->setSpeed(snap.oldSpeed);
+                        } else {
+                            target->opacity().setDefaultValue(snap.oldOpacity);
+                            target->positionX().setDefaultValue(snap.oldPosX);
+                            target->positionY().setDefaultValue(snap.oldPosY);
+                            target->scaleX().setDefaultValue(snap.oldScaleX);
+                            target->scaleY().setDefaultValue(snap.oldScaleY);
+                            target->rotation().setDefaultValue(snap.oldRotation);
+                            target->setSpeed(snap.oldSpeed);
+                            target->speedRamp() = snap.oldSpeedRamp;
+                        }
+                    }
+                    onScrollChanged();
+                    emit contentChanged();
+                }));
+        }
     }
 }
 

@@ -931,7 +931,7 @@ void EffectControlsPanel::setupUI()
     m_splitter->setChildrenCollapsible(false);
     m_splitter->setHandleWidth(2);
     m_splitter->setStyleSheet(QStringLiteral(
-        "QSplitter::handle { background: %1; }"
+        "QSplitter::handle { background: %1; cursor: SplitHCursor; }"
         "QSplitter::handle:hover { background: %2; }")
         .arg(Theme::hex(tc.border), Theme::hex(tc.accent)));
 

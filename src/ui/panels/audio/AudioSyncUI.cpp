@@ -865,7 +865,7 @@ void AudioSync::setupUi()
     m_splitter = new QSplitter(Qt::Horizontal);
     m_splitter->setStyleSheet(
         QString("QSplitter { background: %1; }"
-        "QSplitter::handle { background: %2; width: 3px; }").arg(surf0, brd));
+        "QSplitter::handle { background: %2; width: 3px; cursor: SplitHCursor; }").arg(surf0, brd));
 
     // â”€â”€ LEFT PANE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     auto* leftPane = new QWidget;

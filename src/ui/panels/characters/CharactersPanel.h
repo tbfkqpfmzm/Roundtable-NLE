@@ -1,6 +1,10 @@
 /*
- * CharactersPanel — lists downloaded characters with cached ProRes animations,
- * draggable to the timeline or project bin.
+ * CharactersPanel — lists downloaded characters with their Spine poses and
+ * animation names, draggable to the timeline.
+ *
+ * Stances (Default / Aim / Cover) are shown as expandable groups; animation
+ * names are loaded lazily from the skeleton file when the user expands a
+ * stance node.  Dragging an animation leaf creates a SpineClip on the timeline.
  *
  * Uses a QTreeWidget so the timeline's existing drop handler
  * (which checks qobject_cast<QTreeWidget*>(event->source())) accepts it.
@@ -15,6 +19,7 @@ class QLineEdit;
 class QTimer;
 class QToolButton;
 class QTreeWidget;
+class QTreeWidgetItem;
 namespace rt { class MediaDragTreeWidget; }
 
 namespace rt {
@@ -35,7 +40,7 @@ public:
     void setAnimVideoCache(AnimationVideoCache* cache){ m_animVideoCache = cache; }
     void setMediaPool(MediaPool* pool)                { m_mediaPool = pool; }
 
-    /// Rebuild the tree from current ModelManager + AnimationVideoCache state.
+    /// Rebuild the tree from current ModelManager state.
     void refresh();
 
     /// Access the tree widget (for timeline drop-source checks).
@@ -43,6 +48,13 @@ public:
 
 private:
     void buildUI();
+
+    /// Lazily populate animation names under a stance group item.
+    /// Called when the user expands a stance node.
+    void populateStanceAnims(QTreeWidgetItem* stanceItem,
+                             const std::string& charName,
+                             const std::string& outfit,
+                             int stanceInt);
 
     ModelManager*          m_modelManager{nullptr};
     AnimationVideoCache*   m_animVideoCache{nullptr};

@@ -230,6 +230,26 @@ bool App::createMainWindow()
     m_mainWindow->buildMenuBar();
     m_mainWindow->applyDefaultLayout();
 
+    // ── Handle --capture-workspace ──────────────────────────────────────
+    // If launched with --capture-workspace <path>, save the layout and exit
+    // before showing the window (used during publish to bundle the default
+    // panel arrangement for new users).
+    {
+        QStringList args = QCoreApplication::arguments();
+        int idx = args.indexOf("--capture-workspace");
+        if (idx >= 0 && idx + 1 < args.size()) {
+            QString outputPath = args[idx + 1];
+            spdlog::info("Capturing workspace layout to {}", outputPath.toStdString());
+            m_mainWindow->saveWorkspaceToFile(outputPath);
+            spdlog::info("Workspace captured — exiting");
+            // Schedule a clean exit — can't return false because App
+            // is partially constructed; use a zero-shot quit instead.
+            QMetaObject::invokeMethod(QCoreApplication::instance(), "quit",
+                                      Qt::QueuedConnection);
+            return true;
+        }
+    }
+
     m_mainWindow->showMaximized();
 
     // Finish async model scan — by now the scan thread has been running

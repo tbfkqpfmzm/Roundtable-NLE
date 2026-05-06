@@ -675,7 +675,7 @@ void MainWindow::onNewProjectForMedia(const QString& filePath, int64_t /*atTick*
     // Read media properties to set sequence resolution / frame rate
     uint32_t mediaW = 1920, mediaH = 1080;
     double mediaFps = 30.0;
-    if (m_mediaPool) {
+    if (!filePath.isEmpty() && m_mediaPool) {
         uint64_t h = m_mediaPool->open(filePath.toStdString());
         if (h != 0) {
             const auto* info = m_mediaPool->getInfo(h);
@@ -691,7 +691,9 @@ void MainWindow::onNewProjectForMedia(const QString& filePath, int64_t /*atTick*
     if (mediaFps <= 0.0) mediaFps = 30.0;
 
     // Derive project name from the dropped file
-    QString baseName = QFileInfo(filePath).completeBaseName();
+    QString baseName = filePath.isEmpty()
+        ? QStringLiteral("New Project")
+        : QFileInfo(filePath).completeBaseName();
     QString projName = baseName;
     // Ensure unique name in the projects directory
     QString projDir = projectsDirectory();

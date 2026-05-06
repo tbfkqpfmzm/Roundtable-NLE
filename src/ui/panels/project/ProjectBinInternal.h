@@ -70,13 +70,33 @@ inline QIcon makePremiereBinIcon(const QColor& color, const QString& shape, int 
         p.drawRoundedRect(QRectF(1, 4, sz - 2, sz - 5), 1.5, 1.5);
     }
     else if (shape == "sequence") {
+        // Film reel frame: frame rectangle with sprocket holes on sides
         p.setBrush(color);
-        double barH = (sz - 4) / 4.0;
+        // Main film frame
+        p.drawRoundedRect(QRectF(3, 2, sz - 6, sz - 4), 1.5, 1.5);
+        // Inner darker frame area
+        QColor inner = color.darker(130);
+        inner.setAlpha(200);
+        p.setBrush(inner);
+        p.drawRoundedRect(QRectF(5, 4, sz - 10, sz - 8), 1, 1);
+        // Sprocket holes - left side
+        p.setBrush(color.lighter(150));
+        double holeH = std::max(1.5, (sz - 8) / 5.0);
         for (int i = 0; i < 4; ++i) {
-            double y = 2 + i * barH;
-            double w = (i < 2) ? sz - 4 : sz - 6;
-            p.drawRoundedRect(QRectF(2, y, w, barH - 1), 1, 1);
+            double y = 3 + (i + 0.5) * ((sz - 6) / 4.0);
+            p.drawRoundedRect(QRectF(1, y - holeH / 2, 2.5, holeH), 0.5, 0.5);
+            p.drawRoundedRect(QRectF(sz - 3.5, y - holeH / 2, 2.5, holeH), 0.5, 0.5);
         }
+        // Center play triangle
+        p.setBrush(color.lighter(180));
+        QPainterPath tri;
+        double cx = sz / 2.0 + 1.5;
+        double cy = sz / 2.0;
+        tri.moveTo(cx - 3, cy - 2.5);
+        tri.lineTo(cx + 2.5, cy);
+        tri.lineTo(cx - 3, cy + 2.5);
+        tri.closeSubpath();
+        p.drawPath(tri);
     }
     else if (shape == "video") {
         p.setBrush(color);

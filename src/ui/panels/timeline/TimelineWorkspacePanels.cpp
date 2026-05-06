@@ -1290,7 +1290,24 @@ void TimelineWorkspace::buildPanels()
     addShortcut(Qt::CTRL | Qt::SHIFT | Qt::Key_V, [this]() {
         if (m_timelinePanel) m_timelinePanel->showPasteAttributesDialog();
     });
-    // Ctrl+V: add edit (blade) at playhead (or paste layer if Essential Graphics focused)
+    // Ctrl+Shift+C: Paste Insert (Premiere Pro-style — push clips right)
+    addShortcut(Qt::CTRL | Qt::SHIFT | Qt::Key_C, [this]() {
+        if (m_timeline && m_timelinePanel && m_commandStack && !m_timelinePanel->clipboard().empty()) {
+            auto cmd = EditOperations::pasteInsert(
+                *m_timeline, m_timelinePanel->clipboard(),
+                m_playbackController ? m_playbackController->currentTick() : 0);
+            if (cmd) {
+                m_commandStack->execute(std::move(cmd));
+                if (m_timelinePanel) m_timelinePanel->refreshTrackContents();
+                invalidateAudioSources();
+                invalidateCompositeCache();
+                updateTransformOverlay();
+                if (m_programMonitor) m_programMonitor->requestRefresh();
+                schedulePostEditWork();
+            }
+        }
+    });
+    // Ctrl+V: paste at playhead (or paste layer if Essential Graphics focused)
     addShortcut(Qt::CTRL | Qt::Key_V, [this]() {
         // If focus is inside Essential Graphics or Program Monitor with a graphic layer selected, paste layer
         auto* fw = QApplication::focusWidget();
@@ -1303,9 +1320,10 @@ void TimelineWorkspace::buildPanels()
             if (m_programMonitor) m_programMonitor->requestRefresh();
             return;
         }
-        if (m_timeline && m_playbackController && m_commandStack) {
-            auto cmd = EditOperations::splitAllAtPlayhead(
-                *m_timeline, m_playbackController->currentTick());
+        if (m_timeline && m_timelinePanel && m_commandStack && !m_timelinePanel->clipboard().empty()) {
+            auto cmd = EditOperations::paste(
+                *m_timeline, m_timelinePanel->clipboard(),
+                m_playbackController ? m_playbackController->currentTick() : 0);
             if (cmd) {
                 m_commandStack->execute(std::move(cmd));
                 if (m_timelinePanel) m_timelinePanel->refreshTrackContents();
@@ -1317,15 +1335,20 @@ void TimelineWorkspace::buildPanels()
             }
         }
     });
-    // Ctrl+X: cut
+    // Ctrl+X: cut (populates panel's clipboard so paste works)
     addShortcut(Qt::CTRL | Qt::Key_X, [this]() {
         if (!m_timeline || !m_timelinePanel || !m_commandStack) return;
-        ClipboardContents cb;
+        auto& cb = m_timelinePanel->mutableClipboard();
         auto cmd = EditOperations::cutSelection(*m_timeline,
             m_timelinePanel->selection(), cb);
         if (cmd) {
             m_timelinePanel->selection().clear();
             m_commandStack->execute(std::move(cmd));
+            m_timelinePanel->refreshTrackContents();
+            invalidateAudioSources();
+            invalidateCompositeCache();
+            updateTransformOverlay();
+            if (m_programMonitor) m_programMonitor->requestRefresh();
         }
     });
     // Ctrl+C: copy (or copy layer if Essential Graphics focused)
@@ -1339,9 +1362,10 @@ void TimelineWorkspace::buildPanels()
             return;
         }
         if (!m_timeline || !m_timelinePanel) return;
-        ClipboardContents cb;
+        // Copy into the panel's clipboard so paste can find it
         EditOperations::copySelection(*m_timeline,
-            m_timelinePanel->selection(), cb);
+            m_timelinePanel->selection(),
+            m_timelinePanel->mutableClipboard());
         // Also populate the attributes clipboard so Ctrl+Shift+V is ready
         m_timelinePanel->copyAttributesFromSelection();
     });

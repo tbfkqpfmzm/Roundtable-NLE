@@ -177,7 +177,7 @@ void TimelinePanel::setupLayout()
     m_headerSplitter->setHandleWidth(3);
     m_headerSplitter->setStyleSheet(QStringLiteral(
         "QSplitter { background: #16161e; }"
-        "QSplitter::handle { background: #000000; }"));
+        "QSplitter::handle { background: #000000; cursor: SplitHCursor; }"));
 
     // Keep header spacer and scroll spacer in sync with the splitter.
     // Spacer must cover header width + handle so ruler aligns with viewport.
@@ -1584,8 +1584,129 @@ void TimelinePanel::wireShortcuts()
 {
     if (!m_shortcuts) return;
 
-    // Note: These are placeholder wirings. The actual callbacks will be
-    // connected when the main window sets up the panel.
+    // ── Copy: copy selected clips to clipboard + copy attributes ──────
+    m_shortcuts->setActionCallback(ShortcutManager::kCopy, [this]() {
+        if (!m_timeline) return;
+        EditOperations::copySelection(*m_timeline, m_selection, m_clipboard);
+        copyAttributesFromSelection();
+    });
+
+    // ── Cut: copy + delete selection ──────────────────────────────────
+    m_shortcuts->setActionCallback(ShortcutManager::kCut, [this]() {
+        if (!m_timeline || !m_commandStack) return;
+        ClipboardContents cb;
+        auto cmd = EditOperations::cutSelection(*m_timeline, m_selection, cb);
+        if (cmd) {
+            m_selection.clear();
+            m_commandStack->execute(std::move(cmd));
+            refreshTrackContents();
+            emit selectionChanged();
+            emit contentChanged();
+        }
+    });
+
+    // ── Paste: overwrite at playhead ──────────────────────────────────
+    m_shortcuts->setActionCallback(ShortcutManager::kPaste, [this]() {
+        if (!m_timeline || !m_commandStack || m_clipboard.empty()) return;
+        auto cmd = EditOperations::paste(*m_timeline, m_clipboard, m_playheadTick);
+        if (cmd) {
+            m_commandStack->execute(std::move(cmd));
+            refreshTrackContents();
+            emit contentChanged();
+        }
+    });
+
+    // ── Paste Insert: push clips right, insert at playhead ────────────
+    m_shortcuts->setActionCallback(ShortcutManager::kPasteInsert, [this]() {
+        if (!m_timeline || !m_commandStack || m_clipboard.empty()) return;
+        auto cmd = EditOperations::pasteInsert(*m_timeline, m_clipboard, m_playheadTick);
+        if (cmd) {
+            m_commandStack->execute(std::move(cmd));
+            refreshTrackContents();
+            emit contentChanged();
+        }
+    });
+
+    // ── Paste Attributes: open dialog to choose which attributes ──────
+    m_shortcuts->setActionCallback(ShortcutManager::kPasteAttributes, [this]() {
+        showPasteAttributesDialog();
+    });
+
+    // ── Delete (Lift): remove selected clips ──────────────────────────
+    m_shortcuts->setActionCallback(ShortcutManager::kDelete, [this]() {
+        if (!m_timeline || !m_commandStack) return;
+        auto cmd = EditOperations::deleteSelection(*m_timeline, m_selection);
+        if (cmd) {
+            m_selection.clear();
+            m_commandStack->execute(std::move(cmd));
+            refreshTrackContents();
+            emit selectionChanged();
+            emit contentChanged();
+        }
+    });
+
+    // ── Ripple Delete: remove clips and close gaps ────────────────────
+    m_shortcuts->setActionCallback(ShortcutManager::kRippleDel, [this]() {
+        if (!m_timeline || !m_commandStack) return;
+        auto cmd = EditOperations::rippleDelete(*m_timeline, m_selection);
+        if (cmd) {
+            m_selection.clear();
+            m_commandStack->execute(std::move(cmd));
+            refreshTrackContents();
+            emit selectionChanged();
+            emit contentChanged();
+        }
+    });
+
+    // ── Duplicate: paste in-place offset ──────────────────────────────
+    m_shortcuts->setActionCallback(ShortcutManager::kDuplicate, [this]() {
+        if (!m_timeline || !m_commandStack) return;
+        auto cmd = EditOperations::duplicateSelection(*m_timeline, m_selection);
+        if (cmd) {
+            m_commandStack->execute(std::move(cmd));
+            refreshTrackContents();
+            emit contentChanged();
+        }
+    });
+
+    // ── Select All ────────────────────────────────────────────────────
+    m_shortcuts->setActionCallback(ShortcutManager::kSelectAll, [this]() {
+        if (!m_timeline) return;
+        m_selection.selectAll(*m_timeline);
+        refreshTrackContents();
+        emit selectionChanged();
+    });
+
+    // ── Split Selected Clips (F) ────────────────────────────────────
+    m_shortcuts->setActionCallback(ShortcutManager::kSplitAt, [this]() {
+        if (!m_timeline || !m_commandStack || m_selection.empty()) return;
+        // Build a compound command that splits each selected clip
+        auto compound = std::make_unique<CompoundCommand>("Split Selected Clips");
+        for (const auto& ref : m_selection.clips()) {
+            if (ref.trackIndex < m_timeline->trackCount()) {
+                auto cmd = EditOperations::splitClip(
+                    *m_timeline, ref.trackIndex, ref.clipId, m_playheadTick);
+                if (cmd)
+                    compound->addCommand(std::move(cmd));
+            }
+        }
+        if (compound->size() > 0) {
+            m_commandStack->execute(std::move(compound));
+            refreshTrackContents();
+            emit contentChanged();
+        }
+    });
+
+    // ── Split All Tracks (Shift+F) ───────────────────────────────────
+    m_shortcuts->setActionCallback(ShortcutManager::kSplitAll, [this]() {
+        if (!m_timeline || !m_commandStack) return;
+        auto cmd = EditOperations::splitAllAtPlayhead(*m_timeline, m_playheadTick);
+        if (cmd) {
+            m_commandStack->execute(std::move(cmd));
+            refreshTrackContents();
+            emit contentChanged();
+        }
+    });
 }
 
 void TimelinePanel::setSnapIndicator(int64_t tick)

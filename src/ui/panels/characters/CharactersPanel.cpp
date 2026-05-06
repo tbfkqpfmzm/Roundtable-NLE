@@ -1,6 +1,11 @@
 /*
- * CharactersPanel.cpp — lists downloaded characters and their cached
- * ProRes animations, draggable to the timeline or project bin.
+ * CharactersPanel.cpp — lists downloaded characters with their Spine poses
+ * and animation names, draggable to the timeline.
+ *
+ * Stances (Default / Aim / Cover) are shown as expandable groups.
+ * Animation names are loaded lazily from the skeleton file when the user
+ * expands a stance node.  Dragging an animation leaf creates a SpineClip
+ * on the timeline via the "spine:" URI scheme.
  */
 
 #include "panels/characters/CharactersPanel.h"
@@ -9,7 +14,7 @@
 
 #ifdef ROUNDTABLE_HAS_SPINE
 #include "spine/ModelManager.h"
-#include "spine/AnimationVideoCache.h"
+#include "spine/SpineEngine.h"
 #endif
 #include "media/MediaPool.h"
 
@@ -24,6 +29,7 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QTreeWidget>
+#include <QTreeWidgetItem>
 #include <QVBoxLayout>
 
 #include <spdlog/spdlog.h>
@@ -31,6 +37,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <set>
+#include <unordered_map>
 
 namespace rt {
 
@@ -184,14 +191,12 @@ void CharactersPanel::refresh()
     QString searchTerm = m_searchEdit ? m_searchEdit->text().trimmed().toLower() : QString();
 
 #ifdef ROUNDTABLE_HAS_SPINE
-    spdlog::info("CharactersPanel::refresh — mgr={}, scanned={}, cache={}",
+    spdlog::info("CharactersPanel::refresh — mgr={}, scanned={}",
                  static_cast<const void*>(m_modelManager),
-                 m_modelManager ? m_modelManager->isScanned() : false,
-                 static_cast<const void*>(m_animVideoCache));
+                 m_modelManager ? m_modelManager->isScanned() : false);
 
-    if (m_modelManager && m_modelManager->isScanned() && m_animVideoCache) {
+    if (m_modelManager && m_modelManager->isScanned()) {
 
-    // Collect character names that have at least one cached video
     auto charNames = m_modelManager->characterNames();
     bool ascending = !m_btnSortAZ || m_btnSortAZ->isChecked();
     if (ascending)
@@ -200,8 +205,6 @@ void CharactersPanel::refresh()
         std::sort(charNames.begin(), charNames.end(), std::greater<>());
 
     for (const auto& charName : charNames) {
-        bool hasCache = m_animVideoCache->hasAnyForCharacter(charName);
-
         // Use display name for UI
         std::string dispName = m_modelManager->getDisplayName(charName);
         QString qName = QString::fromStdString(dispName);
@@ -210,32 +213,49 @@ void CharactersPanel::refresh()
 
         // Parent item for this character
         auto* charItem = new QTreeWidgetItem;
-        if (hasCache) {
-            size_t count = m_animVideoCache->countForCharacter(charName);
-            charItem->setText(0, QString("%1  (%2)").arg(qName).arg(count));
-            charItem->setForeground(0, tc.text);
-        } else {
-            charItem->setText(0, qName);
-            charItem->setForeground(0, tc.textDisabled);
-        }
-        // Will be made draggable below if cached animations are found
+        charItem->setText(0, qName);
+        charItem->setForeground(0, tc.text);
+        // Not draggable directly — user must pick a specific animation
         charItem->setFlags(charItem->flags() & ~Qt::ItemIsDragEnabled);
 
-        // Track the first available anim as a fallback for drag data
-        bool charDragDataSet = false;
-
-        // Iterate outfits
         const auto* entry = m_modelManager->findByName(charName);
-        if (!entry) continue;
+        if (!entry) { delete charItem; continue; }
 
+        // Scan the skeleton directories for each outfit+stance combination.
+        // We look for .skel files in:
+        //   assets/characters/<charName>/<outfit>/          (Default stance)
+        //   assets/characters/<charName>/<outfit>/aim/      (Aim stance)
+        //   assets/characters/<charName>/<outfit>/cover/    (Cover stance)
         for (const auto& outfit : entry->outfits) {
-            size_t outfitCount = m_animVideoCache->countForCharacterOutfit(
-                charName, outfit.name);
-            if (outfitCount == 0) continue;
+            // Determine the base directory for this outfit
+            std::string baseDir = "assets/characters/" + charName + "/" + outfit.name;
 
-            // If multiple outfits have cached anims, add an outfit sub-level;
-            // otherwise flatten directly into the character node.
-            QTreeWidgetItem* parentForAnims = charItem;
+            // Collect stances that have skeleton files
+            struct StanceInfo {
+                std::string displayName;
+                int stanceInt; // 0=Default, 1=Aim, 2=Cover
+                std::string skelPath;
+            };
+            std::vector<StanceInfo> stances;
+
+            // Check Default stance (files directly in outfit dir)
+            {
+                std::string defPath = baseDir;
+                for (const auto& variant : outfit.variants) {
+                    if (!variant.skelPath.empty()) {
+                        int si = static_cast<int>(variant.stance);
+                        std::string sName = "Default";
+                        if (variant.stance == CharacterStance::Aim) sName = "Aim";
+                        else if (variant.stance == CharacterStance::Cover) sName = "Cover";
+                        stances.push_back({sName, si, variant.skelPath});
+                    }
+                }
+            }
+
+            if (stances.empty()) continue;
+
+            // Determine parent for stance items
+            QTreeWidgetItem* parentForStances = charItem;
             bool multiOutfit = (entry->outfits.size() > 1);
             if (multiOutfit) {
                 auto* outfitItem = new QTreeWidgetItem(charItem);
@@ -245,87 +265,29 @@ void CharactersPanel::refresh()
                 outfitItem->setText(0, oName);
                 outfitItem->setForeground(0, tc.textSecondary);
                 outfitItem->setFlags(outfitItem->flags() & ~Qt::ItemIsDragEnabled);
-                parentForAnims = outfitItem;
+                parentForStances = outfitItem;
             }
 
-            // Add each cached animation as a draggable leaf
-            // We iterate the cache entries directly since AnimationVideoCache
-            // doesn't expose per-outfit iteration — filter from full list
-            // by checking getEntry for known animation names from skeleton.
-            // Instead, enumerate using the skeleton's animation list.
-            // ModelManager doesn't expose anim names, but we can rely on
-            // the cache's entry count. Let's iterate all known entries.
-            // We'll collect entries that match this character+outfit.
-            // AnimationVideoCache stores entries keyed by "char|outfit|anim"
-            // but doesn't expose iteration. We need to get specific entries.
-            // Alternative: use getEntry with animation names from the outfit's
-            // skeleton. But we can just list the cache directory.
-            //
-            // Simplest approach: ask the cache for specific standard animation names,
-            // or list the directory on disk.
-            
-            // List the cache directory for this character/outfit
-            std::filesystem::path outfitDir = std::filesystem::path("assets/cache/animations")
-                / charName / outfit.name;
-            if (!std::filesystem::exists(outfitDir))
-                continue;
+            // Create a stance group item for each stance
+            for (const auto& si : stances) {
+                auto* stanceItem = new QTreeWidgetItem(parentForStances);
+                stanceItem->setText(0, QString::fromStdString(si.displayName));
+                stanceItem->setForeground(0, tc.textSecondary);
+                stanceItem->setFlags(stanceItem->flags() & ~Qt::ItemIsDragEnabled);
 
-            std::vector<std::string> animFiles;
-            for (const auto& dirEntry : std::filesystem::directory_iterator(outfitDir)) {
-                if (!dirEntry.is_regular_file()) continue;
-                auto ext = dirEntry.path().extension().string();
-                // Accept .mov (ProRes), .mp4, .webm
-                if (ext == ".mov" || ext == ".mp4" || ext == ".webm") {
-                    animFiles.push_back(dirEntry.path().stem().string());
-                }
+                // Store metadata for lazy loading: we'll populate children
+                // when the user expands this item. Use a placeholder child
+                // so the expansion arrow appears.
+                auto* placeholder = new QTreeWidgetItem(stanceItem);
+                placeholder->setText(0, QStringLiteral("(loading\u2026)"));
+                placeholder->setForeground(0, tc.textDisabled);
+                placeholder->setFlags(placeholder->flags() & ~Qt::ItemIsDragEnabled);
+
+                // Store stance metadata for lazy loading callback
+                QString stanceKey = QString::fromStdString(
+                    charName + "|" + outfit.name + "|" + std::to_string(si.stanceInt));
+                stanceItem->setData(0, Qt::UserRole, stanceKey);
             }
-            std::sort(animFiles.begin(), animFiles.end());
-
-            for (const auto& animName : animFiles) {
-                const auto* cacheEntry = m_animVideoCache->getEntry(
-                    charName, outfit.name, animName);
-                if (!cacheEntry) continue;
-
-                auto* animItem = new QTreeWidgetItem(parentForAnims);
-                animItem->setText(0, QString::fromStdString(animName));
-                animItem->setForeground(0, tc.success);
-
-                // Store file path and media handle for timeline drag-drop
-                QString videoPath = QString::fromStdString(
-                    cacheEntry->videoPath.string());
-                animItem->setData(0, Qt::UserRole, videoPath);
-
-                // Open media handle lazily — the timeline wiring will open it
-                // on drop if needed. Store 0 for now; getMediaHandle is called
-                // when the drag actually starts (in case cache changed).
-                animItem->setData(0, Qt::UserRole + 1,
-                    QVariant::fromValue(static_cast<quint64>(cacheEntry->mediaHandle)));
-
-                // Not a bin item
-                animItem->setData(0, Qt::UserRole + 2, false);
-
-                animItem->setFlags(animItem->flags() | Qt::ItemIsDragEnabled);
-
-                // Track drag data for the character header item.
-                // Prefer "default", otherwise fall back to the first anim found.
-                if (!charDragDataSet || animName == "default") {
-                    charItem->setData(0, Qt::UserRole, videoPath);
-                    charItem->setData(0, Qt::UserRole + 1,
-                        QVariant::fromValue(static_cast<quint64>(cacheEntry->mediaHandle)));
-                    charItem->setData(0, Qt::UserRole + 2, false);
-                    charItem->setFlags(charItem->flags() | Qt::ItemIsDragEnabled);
-                    charDragDataSet = true;
-                }
-            }
-        }
-
-        // For characters with no cached animations at all, add a muted
-        // child item indicating they have no pre-rendered videos.
-        if (charItem->childCount() == 0 && !hasCache) {
-            auto* noCacheItem = new QTreeWidgetItem(charItem);
-            noCacheItem->setText(0, QStringLiteral("(no cached animations)"));
-            noCacheItem->setForeground(0, tc.textDisabled);
-            noCacheItem->setFlags(noCacheItem->flags() & ~Qt::ItemIsDragEnabled);
         }
 
         if (charItem->childCount() > 0)
@@ -336,6 +298,38 @@ void CharactersPanel::refresh()
 
     spdlog::info("CharactersPanel::refresh — {} characters scanned, {} tree items",
                  charNames.size(), m_tree->topLevelItemCount());
+
+    // ── Connect itemExpanded for lazy loading ──────────────────────────
+    // Disconnect old connections first to avoid duplicates on re-refresh.
+    disconnect(m_tree, &QTreeWidget::itemExpanded, nullptr, nullptr);
+    connect(m_tree, &QTreeWidget::itemExpanded,
+            this, [this](QTreeWidgetItem* item) {
+        // Check if this item has the stance metadata
+        QString key = item->data(0, Qt::UserRole).toString();
+        if (key.isEmpty()) return;
+
+        // Parse key: "charName|outfit|stanceInt"
+        QStringList parts = key.split('|');
+        if (parts.size() != 3) return;
+
+        std::string charName = parts[0].toStdString();
+        std::string outfit   = parts[1].toStdString();
+        int stanceInt        = parts[2].toInt();
+
+        // Only load if the first child is still the placeholder
+        if (item->childCount() == 1) {
+            auto* firstChild = item->child(0);
+            if (firstChild && firstChild->text(0) == QStringLiteral("(loading\u2026)")) {
+                // Remove the placeholder
+                item->removeChild(firstChild);
+                delete firstChild;
+
+                // Load animation names from skeleton
+                populateStanceAnims(item, charName, outfit, stanceInt);
+            }
+        }
+    });
+
     } // end if (m_modelManager && ...)
 #endif
 
@@ -437,6 +431,94 @@ void CharactersPanel::refresh()
     m_statusLabel->setText(empty ? tr("0 items")
         : (totalItems == 1 ? tr("1 item")
                            : tr("%1 items").arg(totalItems)));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Lazy loading: populate animation names under a stance group item
+// ─────────────────────────────────────────────────────────────────────────────
+
+void CharactersPanel::populateStanceAnims(QTreeWidgetItem* stanceItem,
+                                           const std::string& charName,
+                                           const std::string& outfit,
+                                           int stanceInt)
+{
+    const auto& tc = Theme::colors();
+
+#ifdef ROUNDTABLE_HAS_SPINE
+    // Resolve the skeleton path for this character/outfit/stance
+    CharacterStance stance = CharacterStance::Default;
+    if (stanceInt == 1) stance = CharacterStance::Aim;
+    else if (stanceInt == 2) stance = CharacterStance::Cover;
+
+    // Get the working assets directory from ModelManager
+    std::string assetsDir = m_modelManager ? m_modelManager->assetsDir() : "assets";
+
+    auto paths = SpineEngine::resolvePaths(assetsDir, charName, outfit, stance);
+    if (!paths.valid) {
+        spdlog::warn("CharactersPanel: cannot resolve skeleton for {} / {} / stance={}",
+                     charName, outfit, stanceInt);
+        auto* errItem = new QTreeWidgetItem(stanceItem);
+        errItem->setText(0, QStringLiteral("(skeleton not found)"));
+        errItem->setForeground(0, tc.textDisabled);
+        errItem->setFlags(errItem->flags() & ~Qt::ItemIsDragEnabled);
+        return;
+    }
+
+    // Load the skeleton temporarily to get animation names
+    SpineEngine engine;
+    if (!engine.loadSkeleton(paths.skelPath, paths.atlasPath)) {
+        spdlog::warn("CharactersPanel: failed to load skeleton for {} / {} / stance={}",
+                     charName, outfit, stanceInt);
+        auto* errItem = new QTreeWidgetItem(stanceItem);
+        errItem->setText(0, QStringLiteral("(failed to load)"));
+        errItem->setForeground(0, tc.textDisabled);
+        errItem->setFlags(errItem->flags() & ~Qt::ItemIsDragEnabled);
+        return;
+    }
+
+    auto animInfos = engine.animation().listAnimations();
+    spdlog::info("CharactersPanel: loaded {} animations for {} / {} / stance={}",
+                 animInfos.size(), charName, outfit, stanceInt);
+
+    // Sort animations alphabetically
+    std::sort(animInfos.begin(), animInfos.end(),
+              [](const AnimationInfo& a, const AnimationInfo& b) {
+                  return a.name < b.name;
+              });
+
+    for (const auto& info : animInfos) {
+        // Skip zero-duration / internal animations
+        if (info.duration <= 0.0f) continue;
+        if (info.name == "talk_start" || info.name == "talk_end") continue;
+
+        auto* animItem = new QTreeWidgetItem(stanceItem);
+        animItem->setText(0, QString::fromStdString(info.name));
+        animItem->setForeground(0, tc.success);
+
+        // Store Spine animation data for drag-drop.
+        // Format: "spine:charName|outfit|stanceInt|animName"
+        QString spineData = QString::fromStdString(
+            "spine:" + charName + "|" + outfit + "|"
+            + std::to_string(stanceInt) + "|" + info.name);
+        animItem->setData(0, Qt::UserRole, spineData);
+        animItem->setData(0, Qt::UserRole + 1, QVariant::fromValue(static_cast<quint64>(0)));
+        animItem->setData(0, Qt::UserRole + 2, false);
+        animItem->setFlags(animItem->flags() | Qt::ItemIsDragEnabled);
+    }
+
+    if (stanceItem->childCount() == 0) {
+        // No valid animations found
+        auto* emptyItem = new QTreeWidgetItem(stanceItem);
+        emptyItem->setText(0, QStringLiteral("(no animations)"));
+        emptyItem->setForeground(0, tc.textDisabled);
+        emptyItem->setFlags(emptyItem->flags() & ~Qt::ItemIsDragEnabled);
+    }
+#else
+    (void)stanceItem;
+    (void)charName;
+    (void)outfit;
+    (void)stanceInt;
+#endif
 }
 
 } // namespace rt

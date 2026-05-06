@@ -13,6 +13,7 @@
 [Setup]
 AppId={{B8A7C3D1-2E5F-4A9C-8B7D-6F1E3A2C5D8B}
 AppName={#MyAppName}
+AppVerName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
@@ -46,6 +47,7 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 ; fonts, etc.) even when installed under Program Files.
 ; Subdirectories created inside these will inherit the permissions.
 Name: "{app}\assets"; Permissions: users-modify
+Name: "{app}\assets\presets\shots"; Permissions: users-modify
 Name: "{app}\projects"; Permissions: users-modify
 
 [Files]
@@ -70,10 +72,11 @@ Source: "build\bin\Release\tls\*"; DestDir: "{app}\tls"; Flags: ignoreversion re
 Source: "build\shaders\*"; DestDir: "{app}\shaders"; Flags: ignoreversion recursesubdirs
 
 ; Runtime assets (presets, libs, and config — NOT development assets)
-Source: "assets\presets\*"; DestDir: "{app}\assets\presets"; Flags: ignoreversion recursesubdirs skipifsourcedoesntexist
+; Note: assets/presets/shots/ is excluded entirely — fresh install has no shots.
+Source: "assets\presets\effects\*"; DestDir: "{app}\assets\presets\effects"; Flags: ignoreversion recursesubdirs skipifsourcedoesntexist
 Source: "assets\lib\*"; DestDir: "{app}\assets\lib"; Flags: ignoreversion recursesubdirs skipifsourcedoesntexist
 Source: "assets\character_metadata.json"; DestDir: "{app}\assets"; Flags: ignoreversion
-Source: "assets\audio_folder.txt"; DestDir: "{app}\assets"; Flags: ignoreversion
+Source: "assets\default_layout.bin"; DestDir: "{app}\assets"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "icon.png"; DestDir: "{app}"; Flags: ignoreversion
 
 ; Launcher

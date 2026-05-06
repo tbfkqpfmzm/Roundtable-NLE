@@ -23,6 +23,7 @@
 #include "panels/project/ProjectPanel.h"
 #include "panels/characters/ShotComposer.h"
 #include "panels/timeline/TimelineWorkspace.h"
+#include "panels/library/LibraryPanel.h"
 
 // Delegated panel headers (for accessor forwarding)
 #include "panels/audio/AudioMixer.h"
@@ -60,6 +61,7 @@
 #include <QCloseEvent>
 #include <QDir>
 #include <QDockWidget>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QMenuBar>
@@ -67,6 +69,7 @@
 #include <QMessageBox>
 #include <QProcess>
 #include <QProgressBar>
+#include <QTemporaryDir>
 #include <QWindow>
 #include <QScreen>
 #include <QStyle>
@@ -450,9 +453,26 @@ void MainWindow::buildPanels()
     m_characterShotPanel = new CharacterShotPanel(this);
     if (m_modelManager) m_characterShotPanel->setModelManager(m_modelManager);
     {
-        // Use writable user data dir for shot presets (saved by user)
-        std::filesystem::path presetsDir =
-            rt::userDataDir().toStdString() + "/presets/shots";
+        // Resolve shot presets directory relative to the application folder.
+        // In the dev tree this walks up from build/bin/Release/ to the
+        // project root; when installed it uses {app}\assets\presets\shots\.
+        // The installer creates this with users-modify permissions so users
+        // can save their own presets.
+        std::filesystem::path presetsDir;
+        QString appDir = QCoreApplication::applicationDirPath();
+        QDir dir(appDir);
+        bool found = false;
+        for (int i = 0; i < 5; ++i) {
+            QString candidate = dir.absoluteFilePath("assets/presets/shots");
+            if (QDir(candidate).exists()) {
+                presetsDir = candidate.toStdString();
+                found = true;
+                break;
+            }
+            dir.cdUp();
+        }
+        if (!found)
+            presetsDir = (appDir + "/assets/presets/shots").toStdString();
         std::filesystem::create_directories(presetsDir);
         m_characterShotPanel->setPresetsDirectory(presetsDir);
     }
@@ -603,6 +623,15 @@ void MainWindow::buildPanels()
     // Wire animation video cache (non-const) to ConversionPanel for manual conversion
     if (m_characterShotPanel)
         m_characterShotPanel->setAnimVideoCache(m_timelineWorkspace->animVideoCacheMutable());
+
+    // When a character is downloaded, refresh the Library panel's CharactersPanel tree
+    if (m_characterShotPanel && m_characterShotPanel->characterBrowser() && m_timelineWorkspace) {
+        connect(m_characterShotPanel->characterBrowser(), &CharacterBrowser::downloadRequested,
+                this, [this]() {
+            if (m_timelineWorkspace && m_timelineWorkspace->libraryPanel())
+                m_timelineWorkspace->libraryPanel()->refreshCurrentTab();
+        });
+    }
 
     m_pageStack->addWidget(m_timelineWorkspace);
 
@@ -1061,10 +1090,28 @@ void MainWindow::applyDefaultLayout()
 
     QByteArray geo = settings.value("geometry").toByteArray();
     bool savedCollapsed = settings.value("navCollapsed", false).toBool();
-    if (!geo.isEmpty())
+    if (!geo.isEmpty()) {
         restoreGeometry(geo);
+        // Restore dock layout while still inside the workspace group
+        if (m_timelineWorkspace)
+            m_timelineWorkspace->restoreDockLayout(settings);
+    }
 
     settings.endGroup();
+
+    if (geo.isEmpty()) {
+        // No saved workspace — try the bundled default layout file.
+        // This ships with the installer so new users get the developer's
+        // panel arrangement (dock positions, sizes, tab order).
+        QString bundledLayout = QCoreApplication::applicationDirPath()
+            + QStringLiteral("/assets/default_layout.bin");
+        if (QFile::exists(bundledLayout)) {
+            spdlog::info("applyDefaultLayout: loading bundled layout from {}",
+                         bundledLayout.toStdString());
+            restoreWorkspaceFromFile(bundledLayout);
+            return; // restoreWorkspaceFromFile already calls setCurrentPage
+        }
+    }
 
     setCurrentPage(Page::Projects);
 
@@ -1124,6 +1171,96 @@ bool MainWindow::restoreWorkspace(const QString& name)
 
     settings.endGroup();
     spdlog::info("Workspace '{}' restored", name.toStdString());
+    return true;
+}
+
+void MainWindow::saveWorkspaceToFile(const QString& filePath)
+{
+    QFile file(filePath);
+    if (!file.open(QIODevice::WriteOnly)) {
+        spdlog::warn("saveWorkspaceToFile: cannot write {}", filePath.toStdString());
+        return;
+    }
+
+    QDataStream stream(&file);
+    stream.setVersion(QDataStream::Qt_6_5);
+
+    // Serialize the workspace to a temporary QSettings (IniFormat),
+    // then write and read back as a single QByteArray blob.
+    {
+        QTemporaryDir tmpDir;
+        QString iniPath = tmpDir.filePath("workspace.ini");
+        QSettings tmpSettings(iniPath, QSettings::IniFormat);
+        tmpSettings.beginGroup("workspace/last_session");
+        tmpSettings.setValue("geometry", saveGeometry());
+        tmpSettings.setValue("activePage", static_cast<qint32>(currentPage()));
+        tmpSettings.setValue("navCollapsed", m_navCollapsed);
+        if (m_timelineWorkspace)
+            m_timelineWorkspace->saveDockLayout(tmpSettings);
+        tmpSettings.endGroup();
+        tmpSettings.sync();
+
+        // Read the ini file back into a byte array
+        QFile iniFile(iniPath);
+        if (iniFile.open(QIODevice::ReadOnly)) {
+            QByteArray fileBytes = iniFile.readAll();
+            stream << fileBytes;
+        }
+    }
+
+    file.close();
+    spdlog::info("Workspace layout saved to {}", filePath.toStdString());
+}
+
+bool MainWindow::restoreWorkspaceFromFile(const QString& filePath)
+{
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly))
+        return false;
+
+    QDataStream stream(&file);
+    stream.setVersion(QDataStream::Qt_6_5);
+
+    QByteArray iniData;
+    stream >> iniData;
+    if (iniData.isEmpty()) {
+        file.close();
+        return false;
+    }
+    file.close();
+
+    // Write the ini data to a temp file and load via QSettings(IniFormat)
+    QTemporaryDir tmpDir;
+    QString iniPath = tmpDir.filePath("workspace.ini");
+    {
+        QFile iniFile(iniPath);
+        if (!iniFile.open(QIODevice::WriteOnly)) return false;
+        iniFile.write(iniData);
+        iniFile.close();
+    }
+
+    QSettings fileSettings(iniPath, QSettings::IniFormat);
+    fileSettings.beginGroup("workspace/last_session");
+
+    QByteArray geo = fileSettings.value("geometry").toByteArray();
+    if (geo.isEmpty()) {
+        fileSettings.endGroup();
+        return false;
+    }
+
+    restoreGeometry(geo);
+    setCurrentPage(Page::Projects);
+
+    bool savedCollapsed = fileSettings.value("navCollapsed", false).toBool();
+    if (savedCollapsed != m_navCollapsed)
+        toggleNavRail();
+
+    // Restore dock layout (deferred if widget not yet visible)
+    if (m_timelineWorkspace)
+        m_timelineWorkspace->restoreDockLayout(fileSettings);
+
+    fileSettings.endGroup();
+    spdlog::info("Workspace layout restored from {}", filePath.toStdString());
     return true;
 }
 

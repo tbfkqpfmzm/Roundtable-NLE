@@ -285,8 +285,8 @@ QTabWidget::pane {
 QSplitter::handle {
     background: %1;
 }
-QSplitter::handle:horizontal { width: 6px; }
-QSplitter::handle:vertical { height: 6px; }
+QSplitter::handle:horizontal { width: 6px; cursor: SplitHCursor; }
+QSplitter::handle:vertical { height: 6px; cursor: SplitVCursor; }
 QSplitter::handle:hover {
     background: %2;
 }
@@ -297,6 +297,8 @@ QMainWindow::separator {
     width: 6px;
     height: 6px;
 }
+QMainWindow::separator:horizontal { cursor: SplitHCursor; }
+QMainWindow::separator:vertical { cursor: SplitVCursor; }
 QMainWindow::separator:hover {
     background: %2;
 }

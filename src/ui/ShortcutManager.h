@@ -89,6 +89,10 @@ public:
     /// Enable/disable an action.
     void setActionEnabled(const QString& id, bool enabled);
 
+    /// Update the callback for an already-registered action.
+    /// Does NOT change the key binding or display name.
+    void setActionCallback(const QString& id, std::function<void()> callback);
+
     // ── NLE defaults ────────────────────────────────────────────────────
 
     /// Register all standard NLE keyboard shortcuts.
@@ -120,6 +124,7 @@ public:
     static constexpr const char* kDuplicate = "edit.duplicate";
     static constexpr const char* kSelectAll = "edit.select_all";
     static constexpr const char* kSplitAt   = "edit.split";
+    static constexpr const char* kSplitAll   = "edit.split_all";
 
     // Tools
     static constexpr const char* kToolSelection = "tool.selection";
@@ -131,7 +136,7 @@ public:
 
     // Additional editing
     static constexpr const char* kMarkSelection = "edit.mark_selection";  ///< FCP7: X
-    static constexpr const char* kMatchFrame    = "edit.match_frame";     ///< FCP7: F
+    static constexpr const char* kMatchFrame    = "edit.match_frame";     ///< G (select clip under playhead)
     static constexpr const char* kAddMarker     = "edit.add_marker";      ///< FCP7: M
 
     // Transport
@@ -143,6 +148,10 @@ public:
     static constexpr const char* kPrevEdit     = "transport.prev_edit";
     static constexpr const char* kGoStart      = "transport.go_start";
     static constexpr const char* kGoEnd        = "transport.go_end";
+
+    // Paste variants
+    static constexpr const char* kPasteInsert     = "edit.paste_insert";
+    static constexpr const char* kPasteAttributes = "edit.paste_attributes";
 
     // In/Out
     static constexpr const char* kSetIn      = "io.set_in";

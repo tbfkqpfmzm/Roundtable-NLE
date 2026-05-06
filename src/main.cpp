@@ -241,6 +241,26 @@ int main(int argc, char* argv[])
 #endif
     }
 
+    // ── Handle --capture-workspace (continued from createMainWindow) ────
+    // If we captured the workspace, skip the splash fade and timers —
+    // the app will quit as soon as the event loop starts.
+    bool capturing = false;
+    for (int i = 1; i < argc; ++i) {
+        if (QString::fromLocal8Bit(argv[i]) == "--capture-workspace") {
+            capturing = true;
+            break;
+        }
+    }
+    if (capturing) {
+        splash.setStatus("Done");
+        splash.setProgress(100);
+        splash.finish(nullptr);
+        spdlog::info("Workspace captured — entering event loop for clean exit");
+        int result = qtApp.exec();
+        spdlog::info("ROUNDTABLE NLE shutdown complete");
+        return result;
+    }
+
     splash.setStatus("Ready");
     splash.setProgress(100);
 

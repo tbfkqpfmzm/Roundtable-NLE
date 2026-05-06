@@ -132,6 +132,13 @@ void ShortcutManager::setActionEnabled(const QString& id, bool enabled)
         it->second.enabled = enabled;
 }
 
+void ShortcutManager::setActionCallback(const QString& id, std::function<void()> callback)
+{
+    auto it = m_actions.find(id);
+    if (it != m_actions.end())
+        it->second.callback = std::move(callback);
+}
+
 // ── NLE defaults ────────────────────────────────────────────────────────────
 
 void ShortcutManager::registerNLEDefaults()
@@ -147,7 +154,8 @@ void ShortcutManager::registerNLEDefaults()
     registerAction(kRippleDel, "Ripple Delete", QKeySequence(Qt::SHIFT | Qt::Key_Delete), empty, "Edit");
     registerAction(kDuplicate, "Duplicate", QKeySequence(Qt::CTRL | Qt::Key_D), empty, "Edit");
     registerAction(kSelectAll, "Select All", QKeySequence(Qt::CTRL | Qt::Key_A), empty, "Edit");
-    registerAction(kSplitAt, "Split at Playhead", QKeySequence(Qt::CTRL | Qt::Key_B), empty, "Edit");
+    registerAction(kSplitAt, "Split Selected Clips", QKeySequence(Qt::Key_F), empty, "Edit");
+    registerAction(kSplitAll, "Split All Tracks", QKeySequence(Qt::SHIFT | Qt::Key_F), empty, "Edit");
 
     // Tools (FCP7 bindings)
     registerAction(kToolSelection, "Selection Tool", QKeySequence(Qt::Key_A), empty, "Tools");
@@ -159,7 +167,7 @@ void ShortcutManager::registerNLEDefaults()
 
     // Additional editing (FCP7)
     registerAction(kMarkSelection, "Mark Selection", QKeySequence(Qt::Key_X), empty, "Edit");
-    registerAction(kMatchFrame, "Match Frame", QKeySequence(Qt::Key_F), empty, "Edit");
+    registerAction(kMatchFrame, "Match Frame", QKeySequence(Qt::Key_G), empty, "Edit");
     registerAction(kAddMarker, "Add Marker", QKeySequence(Qt::Key_M), empty, "Edit");
 
     // Transport
@@ -180,6 +188,9 @@ void ShortcutManager::registerNLEDefaults()
     // so they fire regardless of which panel has focus.  Empty callbacks here would
     // silently consume the events in TimelinePanel::keyPressEvent, preventing the
     // workspace handler from ever seeing them.  Register with no key binding instead.
+    registerAction(kPasteInsert, "Paste Insert", QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_C), empty, "Edit");
+    registerAction(kPasteAttributes, "Paste Attributes", QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_V), empty, "Edit");
+
     registerAction(kSetIn, "Set In Point", QKeySequence(), empty, "In/Out");
     registerAction(kSetOut, "Set Out Point", QKeySequence(), empty, "In/Out");
     registerAction(kClearIO, "Clear In/Out", QKeySequence(Qt::ALT | Qt::Key_X), empty, "In/Out");

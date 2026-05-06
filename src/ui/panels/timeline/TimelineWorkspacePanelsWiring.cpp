@@ -140,6 +140,11 @@ void TimelineWorkspace::wirePanelSignals()
 
             // If no project or no sequences exist, prompt to create one
             if (!m_project || m_project->sequenceCount() == 0) {
+                // For Spine animation drops, just create a default sequence
+                if (filePath.startsWith(QStringLiteral("spine:"))) {
+                    emit requestNewProjectForMedia(QString(), atTick, trackIndex);
+                    return;
+                }
                 uint32_t fileW = 0, fileH = 0;
                 double fileFps = 30.0;
                 if (m_mediaPool) {
@@ -173,6 +178,24 @@ void TimelineWorkspace::wirePanelSignals()
                 return;
             }
 
+            // ── Detect Spine animation drops (from Library CharactersPanel) ──
+            // Format: "spine:charName|outfit|stanceInt|animName"
+            bool isSpineAnimDrop = filePath.startsWith(QStringLiteral("spine:"));
+            std::string spineCharName, spineOutfit, spineAnimName;
+            int spineStanceInt = 0;
+            if (isSpineAnimDrop) {
+                QString payload = filePath.mid(6); // strip "spine:"
+                QStringList parts = payload.split('|');
+                if (parts.size() >= 4) {
+                    spineCharName = parts[0].toStdString();
+                    spineOutfit   = parts[1].toStdString();
+                    spineStanceInt = parts[2].toInt();
+                    spineAnimName = parts[3].toStdString();
+                }
+                spdlog::info("DIAG-DROP detected Spine animation: {} / {} / stance={} / {}",
+                             spineCharName, spineOutfit, spineStanceInt, spineAnimName);
+            }
+
             // Determine if this is an audio file by extension
             QString ext = QFileInfo(filePath).suffix().toLower();
             static const QStringList audioExts = {
@@ -181,7 +204,9 @@ void TimelineWorkspace::wirePanelSignals()
             bool isAudio = audioExts.contains(ext);
 
             // Pre-compute clip properties before the lambda captures
-            std::string label = QFileInfo(filePath).baseName().toStdString();
+            std::string label = isSpineAnimDrop
+                ? spineCharName + " - " + spineAnimName
+                : QFileInfo(filePath).baseName().toStdString();
             std::string path  = filePath.toStdString();
 
             // Detect video character files so the clip gets full metadata
@@ -293,7 +318,9 @@ void TimelineWorkspace::wirePanelSignals()
                                      info->hasAudio, info->videoStreamIndex, info->audioStreamIndex);
                         sourceFps = info->fps;
                     }
-                    if (info && info->duration > 0)
+                    // Keep the 5-second default for character animation clips so
+                    // the animation loops for a full 5 seconds (Premiere Pro behavior).
+                    if (info && info->duration > 0 && !isCharacterClip)
                         dur = secondsToTicks(info->duration);
                     if (info && info->hasAudio && !isAudio)
                         mediaHasAudio = true;
@@ -393,13 +420,14 @@ void TimelineWorkspace::wirePanelSignals()
                 m_commandStack->execute(std::make_unique<LambdaCommand>(
                     "Add Media to Timeline",
                     /* execute / redo */
-                    [this, isAudio, mediaHasAudio, path, label, atTick, dur, sourceFps,
+                    [this, isAudio, isSpineAnimDrop, mediaHasAudio, path, label, atTick, dur, sourceFps,
                      needsNewTrack, needsNewAudioTrack, forceGhostVideoTrack, forceGhostAudioTrack,
                      clipId, createdTk, tkIdx, overlapCmd,
                      audioClipId, audioCreatedTk, audioTkIdx, audioOverlapCmd,
                      refreshAfter,
                      vcCharName, vcMutePath, vcTalkPath, vcOutfit, vcAnimName,
-                     vcPosX, vcPosY, vcScale, vcOpacity, vcIsTalking]() {
+                     vcPosX, vcPosY, vcScale, vcOpacity, vcIsTalking,
+                     spineCharName, spineOutfit, spineStanceInt, spineAnimName]() {
                         // Create track if needed
                         if (needsNewTrack && *tkIdx == SIZE_MAX) {
                             Track* t = nullptr;
@@ -425,7 +453,20 @@ void TimelineWorkspace::wirePanelSignals()
                                      track->type() == TrackType::Video ? "video" : "audio");
 
                         std::unique_ptr<Clip> clip;
-                        if (isAudio) {
+                        if (isSpineAnimDrop) {
+                            // Create a SpineClip for animation drops from the Library panel
+                            auto sc = std::make_unique<SpineClip>(spineCharName, spineOutfit);
+                            CharacterStance stance = CharacterStance::Default;
+                            if (spineStanceInt == 1) stance = CharacterStance::Aim;
+                            else if (spineStanceInt == 2) stance = CharacterStance::Cover;
+                            sc->setStance(stance);
+                            sc->setAnimationName(spineAnimName);
+                            sc->setLooping(true);
+                            sc->setTimelineIn(atTick);
+                            sc->setDuration(dur);
+                            sc->setLabel(label);
+                            clip = std::move(sc);
+                        } else if (isAudio) {
                             auto ac = std::make_unique<AudioClip>(path);
                             ac->setTimelineIn(atTick);
                             ac->setDuration(dur);
@@ -488,6 +529,18 @@ void TimelineWorkspace::wirePanelSignals()
                                     if (m_timeline->track(i) == at) { *audioTkIdx = i; break; }
                                 }
                                 *audioCreatedTk = true;
+                            } else if (*audioTkIdx != SIZE_MAX) {
+                                // Re-validate audio track index — a new video track may have been
+                                // inserted at index 0 above, shifting all existing track indices.
+                                if (*audioTkIdx >= m_timeline->trackCount() ||
+                                    m_timeline->track(*audioTkIdx)->type() != TrackType::Audio) {
+                                    for (size_t i = 0; i < m_timeline->trackCount(); ++i) {
+                                        if (m_timeline->track(i)->type() == TrackType::Audio) {
+                                            *audioTkIdx = i;
+                                            break;
+                                        }
+                                    }
+                                }
                             }
                             Track* audioTrack = m_timeline->track(*audioTkIdx);
                             if (audioTrack) {
@@ -946,6 +999,18 @@ void TimelineWorkspace::wirePanelSignals()
                                     if (m_timeline->track(i) == at) { *audioTkIdx2 = i; break; }
                                 }
                                 *audioCreatedTk2 = true;
+                            } else if (*audioTkIdx2 != SIZE_MAX) {
+                                // Re-validate audio track index — a new video track may have been
+                                // inserted at index 0 above, shifting all existing track indices.
+                                if (*audioTkIdx2 >= m_timeline->trackCount() ||
+                                    m_timeline->track(*audioTkIdx2)->type() != TrackType::Audio) {
+                                    for (size_t i = 0; i < m_timeline->trackCount(); ++i) {
+                                        if (m_timeline->track(i)->type() == TrackType::Audio) {
+                                            *audioTkIdx2 = i;
+                                            break;
+                                        }
+                                    }
+                                }
                             }
                             Track* audioTrack = m_timeline->track(*audioTkIdx2);
                             if (audioTrack) {

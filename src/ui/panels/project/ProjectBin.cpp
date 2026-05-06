@@ -17,6 +17,7 @@
 #include "timeline/ImageClip.h"
 #include "media/MediaPool.h"
 #include "media/MediaSourceService.h"
+#include "dialogs/SequenceDialog.h"
 #include "command/CommandStack.h"
 #include "command/LambdaCommand.h"
 
@@ -24,6 +25,8 @@
 #include <QFileInfo>
 #include <QColorDialog>
 #include <QDragEnterEvent>
+#include <QDragLeaveEvent>
+#include <QDragMoveEvent>
 #include <QDropEvent>
 #include <QHeaderView>
 #include <QInputDialog>
@@ -725,6 +728,95 @@ bool ProjectBin::eventFilter(QObject* obj, QEvent* event)
         }
     }
 
+    // -- Create Sequence button: accept drag-and-drop of media files ------
+    if (obj == m_btnCreateSequence) {
+        if (event->type() == QEvent::DragEnter) {
+            auto* de = static_cast<QDragEnterEvent*>(event);
+            if (de->mimeData()->hasUrls()) {
+                de->acceptProposedAction();
+                // Visual feedback: highlight the button
+                m_btnCreateSequence->setStyleSheet(QStringLiteral(
+                    "QToolButton { background: %1; border: none; color: %2; "
+                    "font-size: 13px; border-radius: 3px; }")
+                    .arg(Theme::hex(Theme::colors().accentDim))
+                    .arg(Theme::hex(Theme::colors().accent)));
+                return true;
+            }
+            // Also accept internal media drags
+            if (de->mimeData()->hasFormat("application/x-roundtable-media")) {
+                de->acceptProposedAction();
+                m_btnCreateSequence->setStyleSheet(QStringLiteral(
+                    "QToolButton { background: %1; border: none; color: %2; "
+                    "font-size: 13px; border-radius: 3px; }")
+                    .arg(Theme::hex(Theme::colors().accentDim))
+                    .arg(Theme::hex(Theme::colors().accent)));
+                return true;
+            }
+        }
+        if (event->type() == QEvent::DragMove) {
+            auto* de = static_cast<QDragMoveEvent*>(event);
+            if (de->mimeData()->hasUrls() ||
+                de->mimeData()->hasFormat("application/x-roundtable-media")) {
+                de->acceptProposedAction();
+                return true;
+            }
+        }
+        if (event->type() == QEvent::DragLeave) {
+            // Reset button style
+            m_btnCreateSequence->setStyleSheet(QStringLiteral(
+                "QToolButton { background: transparent; border: none; color: %1; "
+                "font-size: 13px; border-radius: 3px; }"
+                "QToolButton:hover { background: %2; color: %3; }"
+                "QToolButton:pressed { background: %4; color: %5; }")
+                .arg(Theme::hex(Theme::colors().textTertiary))
+                .arg(Theme::hex(Theme::colors().controlBgHover))
+                .arg(Theme::hex(Theme::colors().textPrimary))
+                .arg(Theme::hex(Theme::colors().accentDim))
+                .arg(Theme::hex(Theme::colors().accent)));
+            return true;
+        }
+        if (event->type() == QEvent::Drop) {
+            auto* de = static_cast<QDropEvent*>(event);
+            // Reset button style
+            m_btnCreateSequence->setStyleSheet(QStringLiteral(
+                "QToolButton { background: transparent; border: none; color: %1; "
+                "font-size: 13px; border-radius: 3px; }"
+                "QToolButton:hover { background: %2; color: %3; }"
+                "QToolButton:pressed { background: %4; color: %5; }")
+                .arg(Theme::hex(Theme::colors().textTertiary))
+                .arg(Theme::hex(Theme::colors().controlBgHover))
+                .arg(Theme::hex(Theme::colors().textPrimary))
+                .arg(Theme::hex(Theme::colors().accentDim))
+                .arg(Theme::hex(Theme::colors().accent)));
+
+            // External file drop (from Windows Explorer)
+            if (de->mimeData()->hasUrls()) {
+                for (const QUrl& url : de->mimeData()->urls()) {
+                    if (url.isLocalFile()) {
+                        std::filesystem::path p(url.toLocalFile().toStdString());
+                        createSequenceFromMedia(p);
+                        break; // Only create one sequence from the first file
+                    }
+                }
+                de->acceptProposedAction();
+                return true;
+            }
+
+            // Internal media drop (from the bin itself)
+            if (de->mimeData()->hasFormat("application/x-roundtable-media")) {
+                QByteArray mediaData = de->mimeData()->data("application/x-roundtable-media");
+                // The data contains file paths separated by newlines
+                QStringList paths = QString::fromUtf8(mediaData).split('\n', Qt::SkipEmptyParts);
+                if (!paths.isEmpty()) {
+                    std::filesystem::path p(paths.first().trimmed().toStdString());
+                    createSequenceFromMedia(p);
+                }
+                de->acceptProposedAction();
+                return true;
+            }
+        }
+    }
+
     // -- List widget: Copy / Paste / Delete for sequences ----------------
     if (obj == m_listWidget && event->type() == QEvent::KeyPress && m_project) {
         auto* ke = static_cast<QKeyEvent*>(event);
@@ -1366,6 +1458,210 @@ void ProjectBin::revealByPath(const QString& filePath)
     }
 }
 
+
+// =============================================================================
+//  Sequence creation
+// =============================================================================
+
+void ProjectBin::createNewSequence()
+{
+    if (!m_project) return;
+
+    SequenceDialog dlg(this);
+    dlg.setWindowTitle(tr("New Sequence"));
+    // Pre-fill with project's current resolution/fps as defaults
+    dlg.setMediaProperties(
+        m_project->settings().resolution().width,
+        m_project->settings().resolution().height,
+        m_project->settings().frameRate());
+    // Pre-fill the name
+    dlg.setSequenceName(QString::fromStdString(m_project->nextSequenceName()));
+
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+
+    QString seqName = dlg.sequenceName();
+    uint32_t w = dlg.width();
+    uint32_t h = dlg.height();
+    double fps = dlg.frameRate();
+
+    // Update project settings to match the chosen sequence properties
+    m_project->settings().setResolution(w, h);
+    m_project->settings().setFrameRate(fps);
+
+    std::string name = seqName.toStdString();
+    if (m_commandStack) {
+        size_t newIdx = m_project->sequenceCount();
+        m_commandStack->execute(std::make_unique<LambdaCommand>(
+            "Add Sequence '" + name + "'",
+            [this, name, newIdx]() {
+                m_project->addSequence(name);
+                syncListView();
+                emit sequencesChanged();
+                // Auto-switch to the new sequence
+                emit sequenceOpened(newIdx);
+            },
+            [this, newIdx]() {
+                m_project->removeSequence(newIdx);
+                syncListView();
+                emit sequencesChanged();
+            }));
+    } else {
+        m_project->addSequence(name);
+        syncListView();
+        emit sequencesChanged();
+        emit sequenceOpened(m_project->sequenceCount() - 1);
+    }
+}
+
+void ProjectBin::createSequenceFromMedia(const std::filesystem::path& filePath)
+{
+    if (!m_project) return;
+
+    // Determine media properties from the MediaPool
+    uint32_t mediaW = 0, mediaH = 0;
+    double mediaFps = 30.0;
+    double mediaDurationSec = 0.0;
+    bool mediaHasAudio = false;
+
+    if (m_pool) {
+        uint64_t handle = m_pool->open(filePath.string());
+        if (handle != 0) {
+            const auto* info = m_pool->getInfo(handle);
+            if (info) {
+                mediaW = info->width;
+                mediaH = info->height;
+                if (info->fps > 0.0) mediaFps = info->fps;
+                mediaDurationSec = info->duration;
+                mediaHasAudio = info->hasAudio;
+            }
+        }
+    }
+
+    // Default to 1920x1080 30fps if no media info
+    if (mediaW == 0 || mediaH == 0) {
+        mediaW = 1920;
+        mediaH = 1080;
+    }
+
+    // Update project settings to match media
+    m_project->settings().setResolution(mediaW, mediaH);
+    m_project->settings().setFrameRate(mediaFps);
+
+    // Create a sequence named after the media file
+    QString stem = QFileInfo(QString::fromStdString(filePath.string())).completeBaseName();
+    if (stem.isEmpty()) stem = QStringLiteral("Sequence");
+    std::string seqName = stem.toStdString();
+
+    // Compute clip duration in ticks
+    int64_t clipDuration = secondsToTicks(mediaDurationSec);
+    if (clipDuration <= 0)
+        clipDuration = secondsToTicks(5.0); // default 5 seconds
+
+    // Determine media type from extension
+    std::string ext = filePath.extension().string();
+    for (auto& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    const bool isVideo = (ext == ".mp4" || ext == ".mov" || ext == ".mkv" ||
+                          ext == ".webm" || ext == ".avi" || ext == ".m4v");
+    const bool isAudio = (ext == ".wav" || ext == ".mp3" || ext == ".flac" ||
+                          ext == ".ogg" || ext == ".m4a" || ext == ".aac" || ext == ".opus");
+    const bool isImage = (ext == ".png" || ext == ".jpg" || ext == ".jpeg" ||
+                          ext == ".bmp" || ext == ".gif" || ext == ".tga" ||
+                          ext == ".tiff" || ext == ".webp");
+
+    // Pre-build the timeline so undo/redo swaps it cleanly via
+    // insertSequence/extractSequence (no dangling pointer window).
+    auto builtTimeline = std::make_unique<Timeline>();
+    builtTimeline->setName(seqName);
+    std::string fileStr = filePath.string();
+
+    if (isVideo) {
+        // Replace default V1+A1 with our populated tracks
+        while (builtTimeline->trackCount() > 0)
+            builtTimeline->removeTrack(0);
+
+        Track* vTrack = builtTimeline->addVideoTrack("Video 1");
+        auto vClip = std::make_unique<VideoClip>(fileStr);
+        vClip->setTimelineIn(0);
+        vClip->setDuration(clipDuration);
+        vClip->setSourceIn(0);
+        vClip->setSourceResolution(mediaW, mediaH);
+        vClip->setSourceFps(mediaFps);
+        vClip->setSourceDuration(clipDuration);
+        vClip->setLabel(QFileInfo(QString::fromStdString(fileStr))
+                            .fileName().toStdString());
+        vTrack->addClip(std::move(vClip));
+
+        if (mediaHasAudio) {
+            Track* aTrack = builtTimeline->addAudioTrack("Audio 1");
+            auto aClip = std::make_unique<AudioClip>(fileStr);
+            aClip->setTimelineIn(0);
+            aClip->setDuration(clipDuration);
+            aClip->setSourceIn(0);
+            aClip->setSourceDuration(clipDuration);
+            aClip->setLabel(QFileInfo(QString::fromStdString(fileStr))
+                                .fileName().toStdString());
+            aTrack->addClip(std::move(aClip));
+        }
+    } else if (isImage) {
+        while (builtTimeline->trackCount() > 0)
+            builtTimeline->removeTrack(0);
+
+        Track* vTrack = builtTimeline->addVideoTrack("Video 1");
+        auto iClip = std::make_unique<ImageClip>(fileStr);
+        iClip->setTimelineIn(0);
+        iClip->setDuration(clipDuration);
+        iClip->setSourceIn(0);
+        iClip->setSourceResolution(mediaW, mediaH);
+        iClip->setLabel(QFileInfo(QString::fromStdString(fileStr))
+                            .fileName().toStdString());
+        vTrack->addClip(std::move(iClip));
+    } else if (isAudio) {
+        while (builtTimeline->trackCount() > 0)
+            builtTimeline->removeTrack(0);
+
+        Track* aTrack = builtTimeline->addAudioTrack("Audio 1");
+        auto aClip = std::make_unique<AudioClip>(fileStr);
+        aClip->setTimelineIn(0);
+        aClip->setDuration(clipDuration);
+        aClip->setSourceIn(0);
+        aClip->setSourceDuration(clipDuration);
+        aClip->setLabel(QFileInfo(QString::fromStdString(fileStr))
+                            .fileName().toStdString());
+        aTrack->addClip(std::move(aClip));
+    }
+
+    // Wrap in shared_ptr so we can move the unique_ptr through std::function captures
+    auto sharedTimeline = std::make_shared<std::unique_ptr<Timeline>>(
+        std::move(builtTimeline));
+
+    size_t newIdx = m_project->sequenceCount();
+
+    auto addSeqCmd = std::make_unique<LambdaCommand>(
+        "Add Sequence '" + seqName + "'",
+        [this, newIdx, sharedTimeline]() {
+            m_project->insertSequence(newIdx, std::move(*sharedTimeline));
+            *sharedTimeline = nullptr;
+            syncListView();
+            emit sequencesChanged();
+            emit sequenceOpened(newIdx);
+        },
+        [this, newIdx, sharedTimeline]() {
+            *sharedTimeline = m_project->extractSequence(newIdx);
+            syncListView();
+            emit sequencesChanged();
+        });
+
+    if (m_commandStack) {
+        m_commandStack->execute(std::move(addSeqCmd));
+    } else {
+        m_project->insertSequence(newIdx, std::move(*sharedTimeline));
+        *sharedTimeline = nullptr;
+        syncListView();
+        emit sequencesChanged();
+        emit sequenceOpened(newIdx);
+    }
+}
 
 } // namespace rt
 

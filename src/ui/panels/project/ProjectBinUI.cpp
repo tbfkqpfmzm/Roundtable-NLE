@@ -10,7 +10,9 @@
 #include "widgets/MediaDragTreeWidget.h"
 #include "widgets/ThumbnailGrid.h"
 #include "project/Project.h"
+#include "project/Settings.h"
 #include "dialogs/InterpretFootageDialog.h"
+#include "dialogs/SequenceDialog.h"
 #include "command/CommandStack.h"
 #include "command/LambdaCommand.h"
 #include "timeline/Timeline.h"
@@ -330,34 +332,7 @@ void ProjectBin::setupUI()
         menu.addAction("New Bin", this, &ProjectBin::createNewBin);
         menu.addSeparator();
         menu.addAction("New Sequence", this, [this]() {
-            if (!m_project) return;
-            bool ok = false;
-            QString defaultName = QString::fromStdString(m_project->nextSequenceName());
-            QString name = QInputDialog::getText(this, "New Sequence", "Sequence name:",
-                                                 QLineEdit::Normal, defaultName, &ok);
-            if (ok && !name.isEmpty()) {
-                std::string seqName = name.toStdString();
-                if (m_commandStack) {
-                    // Capture the index the new sequence will occupy
-                    size_t newIdx = m_project->sequenceCount();
-                    m_commandStack->execute(std::make_unique<LambdaCommand>(
-                        "Add Sequence '" + seqName + "'",
-                        [this, seqName]() {
-                            m_project->addSequence(seqName);
-                            syncListView();
-                            emit sequencesChanged();
-                        },
-                        [this, newIdx]() {
-                            m_project->removeSequence(newIdx);
-                            syncListView();
-                            emit sequencesChanged();
-                        }));
-                } else {
-                    m_project->addSequence(seqName);
-                    syncListView();
-                    emit sequencesChanged();
-                }
-            }
+            createNewSequence();
         });
         auto* selected = m_listWidget->itemAt(pos);
         if (selected) {
@@ -766,6 +741,68 @@ void ProjectBin::setupUI()
         .arg(Theme::hex(Theme::colors().textPrimary)));
     connect(m_importBtn, &QToolButton::clicked, this, &ProjectBin::importFiles);
     bottomLayout->addWidget(m_importBtn);
+
+    // Create Sequence button (Premiere Pro style — accepts drag-and-drop)
+    m_btnCreateSequence = new QToolButton(bottomBar);
+    m_btnCreateSequence->setObjectName("CreateSequenceBtn");
+    m_btnCreateSequence->setToolTip("Create Sequence (drag media here)");
+    m_btnCreateSequence->setFixedSize(22, 22);
+    m_btnCreateSequence->setAcceptDrops(true);
+    m_btnCreateSequence->setIconSize(QSize(18, 18));
+    // Generate a film-reel frame icon matching the sequence icon in the bin
+    {
+        QColor seqCol = kLabelSequence; // 64, 186, 96 — green tint
+        int isz = 18;
+        qreal dpr = 2.0;
+        QPixmap px(isz * dpr, isz * dpr);
+        px.setDevicePixelRatio(dpr);
+        px.fill(Qt::transparent);
+        QPainter ip(&px);
+        ip.setRenderHint(QPainter::Antialiasing);
+        ip.setPen(Qt::NoPen);
+        // Film frame body
+        ip.setBrush(seqCol);
+        ip.drawRoundedRect(QRectF(2, 1, isz - 4, isz - 2), 1.5, 1.5);
+        // Inner frame
+        QColor inner = seqCol.darker(130);
+        inner.setAlpha(200);
+        ip.setBrush(inner);
+        ip.drawRoundedRect(QRectF(4, 3, isz - 8, isz - 6), 1, 1);
+        // Sprocket holes
+        ip.setBrush(seqCol.lighter(150));
+        double holeH = std::max(1.5, (isz - 6) / 5.0);
+        for (int i = 0; i < 4; ++i) {
+            double y = 2 + (i + 0.5) * ((isz - 4) / 4.0);
+            ip.drawRoundedRect(QRectF(0.5, y - holeH / 2, 2, holeH), 0.5, 0.5);
+            ip.drawRoundedRect(QRectF(isz - 2.5, y - holeH / 2, 2, holeH), 0.5, 0.5);
+        }
+        // Play triangle
+        ip.setBrush(seqCol.lighter(180));
+        QPainterPath tri;
+        double cx = isz / 2.0 + 1;
+        double cy = isz / 2.0;
+        tri.moveTo(cx - 2.5, cy - 2);
+        tri.lineTo(cx + 2, cy);
+        tri.lineTo(cx - 2.5, cy + 2);
+        tri.closeSubpath();
+        ip.drawPath(tri);
+        ip.end();
+        m_btnCreateSequence->setIcon(QIcon(px));
+    }
+    m_btnCreateSequence->setStyleSheet(QStringLiteral(
+        "QToolButton { background: transparent; border: none; color: %1; "
+        "font-size: 13px; border-radius: 3px; }"
+        "QToolButton:hover { background: %2; color: %3; }"
+        "QToolButton:pressed { background: %4; color: %5; }")
+        .arg(Theme::hex(Theme::colors().textTertiary))
+        .arg(Theme::hex(Theme::colors().controlBgHover))
+        .arg(Theme::hex(Theme::colors().textPrimary))
+        .arg(Theme::hex(Theme::colors().accentDim))
+        .arg(Theme::hex(Theme::colors().accent)));
+    connect(m_btnCreateSequence, &QToolButton::clicked, this, &ProjectBin::createNewSequence);
+    // Drag-drop on the button is handled by the button's own event filter
+    m_btnCreateSequence->installEventFilter(this);
+    bottomLayout->addWidget(m_btnCreateSequence);
 
     // Delete button
     auto* btnDelete = new QToolButton(bottomBar);

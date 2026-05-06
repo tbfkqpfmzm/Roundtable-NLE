@@ -173,6 +173,12 @@ public:
     /// Select and scroll to the item matching the given file path.
     void revealByPath(const QString& filePath);
 
+    /// Open the "New Sequence" dialog and create a sequence with chosen settings.
+    void createNewSequence();
+
+    /// Create a sequence from a dropped media file, matching its resolution/fps.
+    void createSequenceFromMedia(const std::filesystem::path& filePath);
+
     // ── Size hints ──────────────────────────────────────────────────────
 
     QSize sizeHint() const override;
@@ -239,6 +245,7 @@ private:
     QComboBox*     m_filterCombo{nullptr};
     QLineEdit*     m_searchField{nullptr};
     QToolButton*   m_importBtn{nullptr};
+    QToolButton*   m_btnCreateSequence{nullptr};
     QToolButton*   m_btnListView{nullptr};
     QToolButton*   m_btnIconView{nullptr};
     QSlider*       m_zoomSlider{nullptr};

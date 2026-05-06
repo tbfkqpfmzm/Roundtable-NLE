@@ -145,6 +145,12 @@ public:
     /// Restore a previously saved workspace layout.
     bool restoreWorkspace(const QString& name = "default");
 
+    /// Save the current workspace layout to a binary file (for bundling as default).
+    void saveWorkspaceToFile(const QString& filePath);
+
+    /// Restore a workspace layout from a binary file.
+    bool restoreWorkspaceFromFile(const QString& filePath);
+
     // ── Panel accessors (for testing / backward compat) ─────────────────
 
     // Top-level pages
