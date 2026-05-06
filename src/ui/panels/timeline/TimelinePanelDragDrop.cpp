@@ -19,6 +19,7 @@
 #include "effects/Effect.h"
 #include "media/MediaPool.h"
 
+#include <QDir>
 #include <QDragEnterEvent>
 #include <QDragLeaveEvent>
 #include <QDropEvent>
@@ -718,14 +719,115 @@ void TimelinePanel::dropEvent(QDropEvent* event)
         size_t trackIdx = hitTestTrack(pos.y());
 
         bool isAudioDrop = false;
+        bool isDirectoryDrop = false;
+        QString firstPath;
         if (!event->mimeData()->urls().isEmpty()) {
-            QString ext = QFileInfo(event->mimeData()->urls().first().toLocalFile())
-                              .suffix().toLower();
-            static const QStringList audioExts = {
-                "wav", "mp3", "ogg", "flac", "aac", "m4a", "wma", "aiff", "opus"
-            };
-            isAudioDrop = audioExts.contains(ext);
+            firstPath = event->mimeData()->urls().first().toLocalFile();
+            QFileInfo fi(firstPath);
+            isDirectoryDrop = fi.isDir();
+            if (!isDirectoryDrop) {
+                QString ext = fi.suffix().toLower();
+                static const QStringList audioExts = {
+                    "wav", "mp3", "ogg", "flac", "aac", "m4a", "wma", "aiff", "opus"
+                };
+                isAudioDrop = audioExts.contains(ext);
+            }
         }
+
+        // ── Character folder drop (from Explorer) ────────────────────
+        // If a folder is dropped, check if it looks like a character
+        // outfit folder (contains .skel files) and create a Spine clip
+        // defaulting to "default-idle".
+        static const QStringList kStanceSubdirs =
+            {"Default", "default", "aim", "cover"};
+
+        if (isDirectoryDrop && !firstPath.isEmpty()) {
+            QString skelFile;
+            QString outfitFolder = firstPath;
+
+            // Step 1: look for .skel directly in the dropped folder
+            {
+                QDir dir(firstPath);
+                for (const QString& f : dir.entryList({"*.skel"}, QDir::Files)) {
+                    skelFile = dir.absoluteFilePath(f);
+                    break;
+                }
+            }
+
+            // Step 2: look in known stance subdirectories
+            if (skelFile.isEmpty()) {
+                for (const QString& sd : kStanceSubdirs) {
+                    QDir subDir(firstPath + "/" + sd);
+                    for (const QString& f : subDir.entryList({"*.skel"}, QDir::Files)) {
+                        skelFile = subDir.absoluteFilePath(f);
+                        break;
+                    }
+                    if (!skelFile.isEmpty()) {
+                        outfitFolder = firstPath;
+                        break;
+                    }
+                }
+            }
+
+            // Step 3: check all child directories (user may have dragged
+            // the character root folder, e.g. assets/characters/2B/)
+            if (skelFile.isEmpty()) {
+                QDir parentDir(firstPath);
+                for (const QString& childDir : parentDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+                    QString childPath = firstPath + "/" + childDir;
+                    for (const QString& sd : kStanceSubdirs) {
+                        QDir subDir(childPath + "/" + sd);
+                        for (const QString& f : subDir.entryList({"*.skel"}, QDir::Files)) {
+                            skelFile = subDir.absoluteFilePath(f);
+                            break;
+                        }
+                        if (!skelFile.isEmpty()) {
+                            outfitFolder = childPath;
+                            break;
+                        }
+                    }
+                    if (!skelFile.isEmpty()) break;
+                    // Also check directly
+                    QDir child(childPath);
+                    for (const QString& f : child.entryList({"*.skel"}, QDir::Files)) {
+                        skelFile = child.absoluteFilePath(f);
+                        outfitFolder = childPath;
+                        break;
+                    }
+                    if (!skelFile.isEmpty()) break;
+                }
+            }
+
+            if (!skelFile.isEmpty()) {
+                // Extract character and outfit names from the folder path.
+                // Expected structure: .../assets/characters/<charName>/<outfit>/
+                // or .../assets/characters/<charName>/<outfit>/aim|cover
+                QFileInfo fi(outfitFolder);
+                QString folderName = fi.fileName();                 // outfit name (e.g. "default")
+                QString parentPath = fi.absolutePath();
+                QFileInfo parentFi(parentPath);
+                QString grandparentName = parentFi.fileName();      // should be "characters"
+                QString charFolderName = parentFi.absolutePath();
+                QFileInfo charFi(charFolderName);
+                QString charName = charFi.fileName();               // character name (e.g. "2B")
+
+                // Sanity check: folder should be under "characters"
+                if (grandparentName.toLower() == "characters" && !charFolderName.isEmpty()) {
+                    QString spineUri = QStringLiteral("spine:") + charFolderName
+                        + "|" + folderName + "|0|idle";
+                    spdlog::info("Character folder drop: {} -> {}",
+                                 firstPath.toStdString(), spineUri.toStdString());
+                    emit mediaDropped(spineUri, 0, tick, trackIdx);
+                    event->acceptProposedAction();
+                    return;
+                }
+            }
+
+            // If we couldn't parse it as a character folder, fall through
+            // to the normal external file handler which will just add it
+            // to the project bin (doing nothing for a directory).
+        }
+
         bool aboveTopVideo = false;
         bool belowBottomAudio = false;
         computeGhostDropZones(pos, aboveTopVideo, belowBottomAudio);

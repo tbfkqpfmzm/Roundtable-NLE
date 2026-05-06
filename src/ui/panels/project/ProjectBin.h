@@ -199,6 +199,9 @@ signals:
     /// Emitted when a sequence is added, removed, or duplicated.
     void sequencesChanged();
 
+    /// Emitted when sequence settings (resolution, frame rate, name) are changed.
+    void sequenceSettingsChanged();
+
     /// Emitted when clips have been removed from (or restored to) the
     /// timeline as a side-effect of deleting/undeleting bin media.
     /// Listeners should rebuild timeline track views and flush caches.

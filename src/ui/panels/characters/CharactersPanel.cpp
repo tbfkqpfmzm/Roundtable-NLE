@@ -215,11 +215,24 @@ void CharactersPanel::refresh()
         auto* charItem = new QTreeWidgetItem;
         charItem->setText(0, qName);
         charItem->setForeground(0, tc.text);
-        // Not draggable directly — user must pick a specific animation
-        charItem->setFlags(charItem->flags() & ~Qt::ItemIsDragEnabled);
 
         const auto* entry = m_modelManager->findByName(charName);
         if (!entry) { delete charItem; continue; }
+
+        // Enable drag on the character item — dropping defaults to
+        // the first outfit, Default stance, idle animation.
+        // The user can always change the stance/animation later in Properties.
+        if (!entry->outfits.empty()) {
+            QString spineUri = QStringLiteral("spine:")
+                + QString::fromStdString(charName)
+                + "|" + QString::fromStdString(entry->outfits[0].name)
+                + "|0|idle";
+            charItem->setData(0, Qt::UserRole, spineUri);
+            charItem->setData(0, Qt::UserRole + 1,
+                              QVariant::fromValue(static_cast<quint64>(0)));
+            charItem->setData(0, Qt::UserRole + 2, false);
+            charItem->setFlags(charItem->flags() | Qt::ItemIsDragEnabled);
+        }
 
         // Scan the skeleton directories for each outfit+stance combination.
         // We look for .skel files in:
@@ -264,7 +277,18 @@ void CharactersPanel::refresh()
                     : QString::fromStdString(outfit.displayName);
                 outfitItem->setText(0, oName);
                 outfitItem->setForeground(0, tc.textSecondary);
-                outfitItem->setFlags(outfitItem->flags() & ~Qt::ItemIsDragEnabled);
+
+                // Enable drag on outfit items — defaults to Default stance, idle
+                QString spineUri = QStringLiteral("spine:")
+                    + QString::fromStdString(charName)
+                    + "|" + QString::fromStdString(outfit.name)
+                    + "|0|idle";
+                outfitItem->setData(0, Qt::UserRole, spineUri);
+                outfitItem->setData(0, Qt::UserRole + 1,
+                                    QVariant::fromValue(static_cast<quint64>(0)));
+                outfitItem->setData(0, Qt::UserRole + 2, false);
+                outfitItem->setFlags(outfitItem->flags() | Qt::ItemIsDragEnabled);
+
                 parentForStances = outfitItem;
             }
 

@@ -346,6 +346,55 @@ void ProjectBin::setupUI()
             menu.addSeparator();
             if (isSequence) {
                 size_t seqIdx = selected->data(0, Qt::UserRole + 4).toULongLong();
+                menu.addAction("Sequence Settings...", this, [this, seqIdx]() {
+                    if (!m_project) return;
+                    SequenceDialog dlg(this);
+                    dlg.setWindowTitle(tr("Sequence Settings"));
+                    dlg.setMediaProperties(
+                        m_project->settings().resolution().width,
+                        m_project->settings().resolution().height,
+                        m_project->settings().frameRate());
+                    QString oldName;
+                    if (auto* seq = m_project->sequence(seqIdx))
+                        oldName = QString::fromStdString(seq->name());
+                    dlg.setSequenceName(oldName);
+                    if (dlg.exec() != QDialog::Accepted)
+                        return;
+                    auto oldRes = m_project->settings().resolution();
+                    double oldFps = m_project->settings().frameRate();
+                    auto newRes = Resolution{dlg.width(), dlg.height()};
+                    double newFps = dlg.frameRate();
+                    QString newName = dlg.sequenceName();
+                    if (newRes == oldRes && newFps == oldFps && newName == oldName)
+                        return; // nothing changed
+                    if (m_commandStack) {
+                        m_commandStack->execute(std::make_unique<LambdaCommand>(
+                            "Sequence Settings",
+                            [this, newRes, newFps, newName, seqIdx]() {
+                                m_project->settings().setResolution(newRes);
+                                m_project->settings().setFrameRate(newFps);
+                                if (auto* seq = m_project->sequence(seqIdx))
+                                    seq->setName(newName.toStdString());
+                                syncListView();
+                                emit sequenceSettingsChanged();
+                            },
+                            [this, oldRes, oldFps, oldName, seqIdx]() {
+                                m_project->settings().setResolution(oldRes);
+                                m_project->settings().setFrameRate(oldFps);
+                                if (auto* seq = m_project->sequence(seqIdx))
+                                    seq->setName(oldName.toStdString());
+                                syncListView();
+                                emit sequenceSettingsChanged();
+                            }));
+                    } else {
+                        m_project->settings().setResolution(newRes);
+                        m_project->settings().setFrameRate(newFps);
+                        if (auto* seq = m_project->sequence(seqIdx))
+                            seq->setName(newName.toStdString());
+                        syncListView();
+                        emit sequenceSettingsChanged();
+                    }
+                });
                 menu.addAction("Duplicate Sequence", this, [this, seqIdx]() {
                     if (!m_project) return;
                     if (m_commandStack) {
@@ -577,11 +626,81 @@ void ProjectBin::setupUI()
             .arg(Theme::hex(Theme::colors().border))
             .arg(Theme::hex(Theme::colors().accent)));
 
-        menu.addAction("Remove", this, [this, index]() {
-            const auto& item = m_grid->items()[index];
-            removeFile(item.filePath);
-            syncListView();
-        });
+        // Check if this is a sequence item (folder-named items that match a sequence)
+        bool isSequence = false;
+        size_t seqIdx = static_cast<size_t>(-1);
+        if (m_project) {
+            const auto& gi = m_grid->items()[index];
+            if (gi.isFolder && !gi.folderName.isEmpty()) {
+                for (size_t si = 0; si < m_project->sequenceCount(); ++si) {
+                    if (auto* seq = m_project->sequence(si)) {
+                        if (QString::fromStdString(seq->name()) == gi.folderName) {
+                            isSequence = true;
+                            seqIdx = si;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (isSequence) {
+            menu.addAction("Sequence Settings...", this, [this, seqIdx]() {
+                if (!m_project) return;
+                SequenceDialog dlg(this);
+                dlg.setWindowTitle(tr("Sequence Settings"));
+                dlg.setMediaProperties(
+                    m_project->settings().resolution().width,
+                    m_project->settings().resolution().height,
+                    m_project->settings().frameRate());
+                QString oldName;
+                if (auto* seq = m_project->sequence(seqIdx))
+                    oldName = QString::fromStdString(seq->name());
+                dlg.setSequenceName(oldName);
+                if (dlg.exec() != QDialog::Accepted)
+                    return;
+                auto oldRes = m_project->settings().resolution();
+                double oldFps = m_project->settings().frameRate();
+                auto newRes = Resolution{dlg.width(), dlg.height()};
+                double newFps = dlg.frameRate();
+                QString newName = dlg.sequenceName();
+                if (newRes == oldRes && newFps == oldFps && newName == oldName)
+                    return; // nothing changed
+                if (m_commandStack) {
+                    m_commandStack->execute(std::make_unique<LambdaCommand>(
+                        "Sequence Settings",
+                        [this, newRes, newFps, newName, seqIdx]() {
+                            m_project->settings().setResolution(newRes);
+                            m_project->settings().setFrameRate(newFps);
+                            if (auto* seq = m_project->sequence(seqIdx))
+                                seq->setName(newName.toStdString());
+                            syncListView();
+                            emit sequenceSettingsChanged();
+                        },
+                        [this, oldRes, oldFps, oldName, seqIdx]() {
+                            m_project->settings().setResolution(oldRes);
+                            m_project->settings().setFrameRate(oldFps);
+                            if (auto* seq = m_project->sequence(seqIdx))
+                                seq->setName(oldName.toStdString());
+                            syncListView();
+                            emit sequenceSettingsChanged();
+                        }));
+                } else {
+                    m_project->settings().setResolution(newRes);
+                    m_project->settings().setFrameRate(newFps);
+                    if (auto* seq = m_project->sequence(seqIdx))
+                        seq->setName(newName.toStdString());
+                    syncListView();
+                    emit sequenceSettingsChanged();
+                }
+            });
+        } else if (!m_grid->items()[index].isFolder) {
+            menu.addAction("Remove", this, [this, index]() {
+                const auto& item = m_grid->items()[index];
+                removeFile(item.filePath);
+                syncListView();
+            });
+        }
 
         QMenu* colorMenu = menu.addMenu("Label Color");
         struct LabelColor { const char* name; uint32_t rgba; };

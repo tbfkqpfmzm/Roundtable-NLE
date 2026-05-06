@@ -660,6 +660,21 @@ void MainWindow::buildPanels()
             if (m_timelineWorkspace)
                 m_timelineWorkspace->refreshSequenceTabs();
         });
+        connect(bin, &ProjectBin::sequenceSettingsChanged, this, [this]() {
+            if (!m_currentProject) return;
+            const auto& s = m_currentProject->settings();
+            if (auto* pm = programMonitor()) {
+                pm->setOutputResolution(s.resolution().width, s.resolution().height);
+                pm->requestRefresh();
+            }
+            if (m_playbackController)
+                m_playbackController->setFrameRate(s.frameRate());
+            if (m_timelineWorkspace && m_timelineWorkspace->timelinePanel())
+                m_timelineWorkspace->timelinePanel()->setFrameRate(s.frameRate());
+            if (auto* b = projectBin()) b->refreshSequences();
+            if (m_timelineWorkspace)
+                m_timelineWorkspace->refreshSequenceTabs();
+        });
         connect(bin, &ProjectBin::nestSequenceRequested,
                 this, [this](size_t seqIdx, const QString& seqName) {
             if (!m_currentProject || !m_timeline || !m_timelineWorkspace) return;
@@ -1249,7 +1264,11 @@ bool MainWindow::restoreWorkspaceFromFile(const QString& filePath)
     }
 
     restoreGeometry(geo);
-    setCurrentPage(Page::Projects);
+
+    // Read the saved active page (default to Projects for backward compat)
+    int savedPage = fileSettings.value("activePage",
+                                        static_cast<int>(Page::Projects)).toInt();
+    setCurrentPage(static_cast<Page>(savedPage));
 
     bool savedCollapsed = fileSettings.value("navCollapsed", false).toBool();
     if (savedCollapsed != m_navCollapsed)

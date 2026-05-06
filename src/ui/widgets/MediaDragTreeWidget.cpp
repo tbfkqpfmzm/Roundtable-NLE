@@ -92,20 +92,31 @@ void MediaDragTreeWidget::mousePressEvent(QMouseEvent* event)
             m_rubberBanding = false;
             m_pendingRubberBand = false;
             const bool hasModifiers = (event->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier));
-            const auto currentSelection = selectedItems();
 
-            // If clicking an already-selected item in a multi-selection
-            // with no modifiers, preserve group for potential drag but
-            // collapse to single-selection on release if no drag occurs.
-            if (hit->isSelected() && !hasModifiers && currentSelection.size() > 1) {
+            // Snapshot the selection BEFORE the base class processes the click
+            // so we can detect multi-selection → single transitions.
+            auto preSelection = selectedItems();
+            bool wasMultiSel = (!hasModifiers && preSelection.size() > 1);
+
+            // ── ALWAYS let the base class handle the click first ─────────
+            // This ensures expand/collapse via the branch indicator works
+            // correctly for every item, regardless of selection state.
+            QTreeWidget::mousePressEvent(event);
+
+            // ── Post-process: apply our custom selection/drag logic ──────
+            if (wasMultiSel && hit->isSelected()) {
+                // Was part of a multi-selection and still selected after base
+                // processing — preserve group for potential drag, but collapse
+                // to single-selection on release if no drag occurs.
                 m_deferSingleSelectOnRelease = true;
-                m_dragItemsSnapshot = currentSelection;
-            } else if (hit->isSelected() && !hasModifiers && currentSelection.size() == 1) {
-                m_dragItemsSnapshot = currentSelection;
-                // Premiere-style click-pause-click rename:
-                // second click on already-selected single item starts a rename
+                m_dragItemsSnapshot = preSelection;
+            } else if (!hasModifiers && hit == m_pressItem
+                       && preSelection.size() == 1
+                       && preSelection.first() == hit) {
+                // Same single item clicked again (no modifiers).
+                // Snapshot the selection for drag, and arm the rename timer.
+                m_dragItemsSnapshot = preSelection;
                 if (m_renameTimer->isActive() && m_renameCandidate == hit) {
-                    // Rapid second click (like double-click pace) — cancel rename
                     m_renameTimer->stop();
                     m_renameCandidate = nullptr;
                 } else {
@@ -116,14 +127,12 @@ void MediaDragTreeWidget::mousePressEvent(QMouseEvent* event)
                     m_renameCandidate = hit;
                     m_renameTimer->start();
                 }
-                // Do not call base — selection is already correct
             } else {
-                // Clicking an unselected item or with modifiers — cancel rename
+                // New item or modifier-click — cancel rename and snapshot
                 if (m_renameTimer->isActive()) {
                     m_renameTimer->stop();
                     m_renameCandidate = nullptr;
                 }
-                QTreeWidget::mousePressEvent(event);
                 m_dragItemsSnapshot = selectedItems();
             }
         }
@@ -178,6 +187,19 @@ void MediaDragTreeWidget::mouseMoveEvent(QMouseEvent* event)
     if ((event->buttons() & Qt::LeftButton) && m_leftPressActive && !m_rubberBanding && !m_pendingRubberBand) {
         if ((event->pos() - m_dragStartPos).manhattanLength()
                 >= QApplication::startDragDistance()) {
+
+            // Only start a drag if the pressed item actually has ItemIsDragEnabled.
+            // Non-draggable items (character/outfit/stance group headers) should
+            // fall through to the base class so their expand/collapse still works.
+            bool canDrag = false;
+            if (m_pressItem && (m_pressItem->flags() & Qt::ItemIsDragEnabled))
+                canDrag = true;
+            if (!canDrag) {
+                // Not draggable — let base class handle the move
+                QTreeWidget::mouseMoveEvent(event);
+                return;
+            }
+
             m_dragStarted = true;
             // Cancel rename timer when a drag starts
             if (m_renameTimer->isActive()) {
