@@ -133,7 +133,8 @@ private:
     void fetchRemoteL2dNames();
     void downloadCharacterModel(const QString& repoPath,
                                 const QString& charName = {},
-                                const QString& outfitName = "default");
+                                const QString& outfitName = "default",
+                                std::function<void(bool)> onOutfitComplete = nullptr);
     void downloadFile(const QString& remotePath, const QString& localPath,
                       std::function<void(bool)> callback);
     void resolveCharacterName(const QString& charId) const;

@@ -750,6 +750,11 @@ void CharacterBrowser::onDownloadClicked()
             outfitsToDownload.push_back({charId, "default"});
         }
 
+        // Track overall completion across all outfit downloads
+        auto totalOutfits = std::make_shared<int>(static_cast<int>(outfitsToDownload.size()));
+        auto completedOutfits = std::make_shared<int>(0);
+        auto anyOutfitFailed = std::make_shared<bool>(false);
+
         for (const auto& od : outfitsToDownload) {
             spdlog::info("CharacterBrowser: Download {} [{}] outfit={} repoPath={}",
                          name.toStdString(), charId.toStdString(),
@@ -758,7 +763,40 @@ void CharacterBrowser::onDownloadClicked()
             m_statusLabel->setText(QString("Downloading %1 (%2)...")
                 .arg(displayName).arg(od.outfitKey));
 
-            downloadCharacterModel(od.repoPath, name, od.outfitKey);
+            downloadCharacterModel(od.repoPath, name, od.outfitKey,
+                [this, displayName, totalOutfits, completedOutfits, anyOutfitFailed](bool success) {
+                    (*completedOutfits)++;
+                    if (!success) *anyOutfitFailed = true;
+
+                    if (*completedOutfits >= *totalOutfits) {
+                        // All outfits for this character are done — show one message
+                        m_downloadBtn->setEnabled(true);
+                        m_downloadProgress->setVisible(false);
+                        if (*anyOutfitFailed) {
+                            m_statusLabel->setText(QString("Downloaded %1 (some failed)").arg(displayName));
+                            spdlog::warn("CharacterBrowser: Some outfits failed for {}",
+                                         displayName.toStdString());
+                            QMessageBox::warning(this, "Download",
+                                QString("Downloaded %1 but some outfits had errors.").arg(displayName));
+                        } else {
+                            m_statusLabel->setText("Downloaded " + displayName);
+                            spdlog::info("CharacterBrowser: Successfully downloaded all outfits for {}",
+                                         displayName.toStdString());
+                            QMessageBox::information(this, "Download Complete",
+                                QString("Successfully downloaded %1.").arg(displayName));
+                        }
+
+                        // Rescan and refresh
+#ifdef ROUNDTABLE_HAS_SPINE
+                        if (m_modelManager) {
+                            m_modelManager->scan("assets");
+                        }
+#endif
+                        populateCharacterList();
+                        populateControls();
+                        emit downloadRequested(displayName);
+                    }
+                });
         }
 
         emit downloadRequested(name);

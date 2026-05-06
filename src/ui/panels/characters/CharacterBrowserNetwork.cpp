@@ -296,7 +296,8 @@ void CharacterBrowser::fetchRemoteL2dNames()
 
 void CharacterBrowser::downloadCharacterModel(const QString& repoPath,
                                                const QString& charName,
-                                               const QString& outfitName)
+                                               const QString& outfitName,
+                                               std::function<void(bool)> onOutfitComplete)
 {
     // Resolve display name if not provided
     QString displayName = charName;
@@ -333,7 +334,8 @@ void CharacterBrowser::downloadCharacterModel(const QString& repoPath,
     request.setRawHeader("User-Agent", "ROUNDTABLE-NLE/2.0");
 
     auto* reply = m_networkManager->get(request);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, repoPath, displayName, targetDir]() {
+    connect(reply, &QNetworkReply::finished, this,
+        [this, reply, repoPath, displayName, targetDir, onOutfitComplete = std::move(onOutfitComplete)]() {
         reply->deleteLater();
 
         if (reply->error() != QNetworkReply::NoError) {
@@ -345,6 +347,7 @@ void CharacterBrowser::downloadCharacterModel(const QString& repoPath,
                 QString("Failed to download %1:\n%2").arg(displayName, errStr));
             m_downloadBtn->setEnabled(true);
             m_downloadProgress->setVisible(false);
+            if (onOutfitComplete) onOutfitComplete(false);
             return;
         }
 
@@ -356,6 +359,7 @@ void CharacterBrowser::downloadCharacterModel(const QString& repoPath,
                 QString("Unexpected API response for %1.\nThe remote repository may have changed.").arg(displayName));
             m_downloadBtn->setEnabled(true);
             m_downloadProgress->setVisible(false);
+            if (onOutfitComplete) onOutfitComplete(false);
             return;
         }
 
@@ -398,69 +402,68 @@ void CharacterBrowser::downloadCharacterModel(const QString& repoPath,
                     .arg(displayName, repoPath));
             m_downloadBtn->setEnabled(true);
             m_downloadProgress->setVisible(false);
+            if (onOutfitComplete) onOutfitComplete(false);
             return;
         }
 
         // Create target directory only when we have files to download
         QDir().mkpath(targetDir);
 
-        // Track download progress
-        auto totalFiles = std::make_shared<int>(static_cast<int>(files.size()));
-        auto downloaded = std::make_shared<int>(0);
-        auto failCount  = std::make_shared<int>(0);
+        // Shared state for tracking all downloads (main files + subdir files)
+        struct DownloadState {
+            int totalFiles = 0;
+            int downloaded = 0;
+            int failCount = 0;
+            int subdirListingsPending = 0; // subdir API calls still in flight
+            bool completionFired = false;
+        };
+        auto state = std::make_shared<DownloadState>();
+        state->totalFiles = static_cast<int>(files.size());
+        state->subdirListingsPending = static_cast<int>(subDirs.size());
 
-        // Download each file
+        // Helper lambda to check if everything is done
+        auto checkComplete = [this, displayName, state, onOutfitComplete]() {
+            if (state->completionFired) return;
+            if (state->downloaded < state->totalFiles) return;
+            if (state->subdirListingsPending > 0) return; // still waiting for subdir listings
+
+            state->completionFired = true;
+            m_downloadProgress->setVisible(false);
+
+            if (state->failCount > 0) {
+                m_statusLabel->setText(QString("Downloaded %1 (%2 failed)")
+                    .arg(displayName).arg(state->failCount));
+                spdlog::warn("CharacterBrowser: {} files failed for {}",
+                             state->failCount, displayName.toStdString());
+            } else {
+                m_statusLabel->setText(QString("Downloaded %1 (%2 files)")
+                    .arg(displayName).arg(state->totalFiles));
+                spdlog::info("CharacterBrowser: Downloaded {} ({} files)",
+                             displayName.toStdString(), state->totalFiles);
+            }
+
+            // Generate persistent thumbnail for the downloaded character
+            renderAndCacheCharacterThumbnail(displayName.toStdString());
+
+            if (onOutfitComplete)
+                onOutfitComplete(state->failCount == 0);
+        };
+
+        // Download each main file
         for (const auto& f : files) {
             QString localPath = targetDir + "/" + f.name;
-            spdlog::info("CharacterBrowser: Downloading {} â†’ {}", f.downloadUrl.toStdString(), localPath.toStdString());
+            spdlog::info("CharacterBrowser: Downloading {} → {}", f.downloadUrl.toStdString(), localPath.toStdString());
             downloadFile(f.downloadUrl, localPath,
-                [this, downloaded, totalFiles, failCount, displayName](bool ok) {
-                    (*downloaded)++;
-                    if (!ok) (*failCount)++;
-                    int pct = (*totalFiles > 0) ? (*downloaded * 100 / *totalFiles) : 100;
+                [this, state, displayName, checkComplete](bool ok) {
+                    state->downloaded++;
+                    if (!ok) state->failCount++;
+                    int pct = (state->totalFiles > 0) ? (state->downloaded * 100 / state->totalFiles) : 100;
                     m_downloadProgress->setValue(pct);
-
-                    if (*downloaded >= *totalFiles) {
-                        m_downloadBtn->setEnabled(true);
-                        m_downloadProgress->setVisible(false);
-                        if (*failCount > 0) {
-                            m_statusLabel->setText(QString("Downloaded %1 (%2 failed)")
-                                .arg(displayName).arg(*failCount));
-                            spdlog::warn("CharacterBrowser: {} files failed for {}",
-                                         *failCount, displayName.toStdString());
-                            QMessageBox::warning(this, "Download",
-                                QString("Downloaded %1 but %2 file(s) failed.")
-                                    .arg(displayName).arg(*failCount));
-                        } else {
-                            m_statusLabel->setText("Downloaded " + displayName);
-                            spdlog::info("CharacterBrowser: Downloaded {} ({} files)",
-                                         displayName.toStdString(), *totalFiles);
-                            QMessageBox::information(this, "Download Complete",
-                                QString("Successfully downloaded %1 (%2 files).")
-                                    .arg(displayName).arg(*totalFiles));
-                        }
-
-                        // Rescan and refresh (all chars now in assets/characters/)
-#ifdef ROUNDTABLE_HAS_SPINE
-                        if (m_modelManager) {
-                            m_modelManager->scan("assets");
-                        }
-#endif
-
-                        // Generate persistent thumbnail for the downloaded character
-                        renderAndCacheCharacterThumbnail(displayName.toStdString());
-
-                        populateCharacterList();
-                        populateControls();
-
-                        // Re-emit so COMPOSE character library also refreshes
-                        // (the initial emit fires before download completes)
-                        emit downloadRequested(displayName);
-                    }
+                    checkComplete();
                 });
         }
 
-        // Download subdirectories (stances like aim, cover)
+        // Download subdirectories (stances like aim, cover) — track them in shared state
         for (const auto& subDir : subDirs) {
             QString subTargetDir = targetDir + "/" + subDir;
             QDir().mkpath(subTargetDir);
@@ -471,16 +474,23 @@ void CharacterBrowser::downloadCharacterModel(const QString& repoPath,
 
             auto* subReply = m_networkManager->get(subReq);
             connect(subReply, &QNetworkReply::finished, this,
-                [this, subReply, repoPath, subDir, subTargetDir]() {
+                [this, subReply, repoPath, subDir, subTargetDir, state, checkComplete]() {
                     subReply->deleteLater();
+                    // Decrement pending subdir listings
+                    state->subdirListingsPending--;
+
                     if (subReply->error() != QNetworkReply::NoError) {
                         spdlog::warn("CharacterBrowser: Failed to list subdir {}/{}",
                                      repoPath.toStdString(), subDir.toStdString());
+                        checkComplete();
                         return;
                     }
 
                     QJsonDocument d = QJsonDocument::fromJson(subReply->readAll());
-                    if (!d.isArray()) return;
+                    if (!d.isArray()) {
+                        checkComplete();
+                        return;
+                    }
 
                     static const QStringList exts2 = {".skel", ".atlas", ".png", ".json", ".txt"};
                     for (const auto& val : d.array()) {
@@ -492,13 +502,27 @@ void CharacterBrowser::downloadCharacterModel(const QString& repoPath,
                                 QString url = item.value("download_url").toString();
                                 if (url.isEmpty())
                                     url = NIKKE_DB_RAW + "/" + repoPath + "/" + subDir + "/" + name;
-                                spdlog::info("CharacterBrowser: Downloading subdir file {} â†’ {}",
+                                spdlog::info("CharacterBrowser: Downloading subdir file {} → {}",
                                              url.toStdString(), (subTargetDir + "/" + name).toStdString());
-                                downloadFile(url, subTargetDir + "/" + name, [](bool){});
+
+                                // Add to total BEFORE starting download
+                                state->totalFiles++;
+                                downloadFile(url, subTargetDir + "/" + name,
+                                    [this, state, checkComplete](bool ok) {
+                                        state->downloaded++;
+                                        if (!ok) state->failCount++;
+                                        int pct = (state->totalFiles > 0)
+                                            ? (state->downloaded * 100 / state->totalFiles) : 100;
+                                        m_downloadProgress->setValue(pct);
+                                        checkComplete();
+                                    });
                                 break;
                             }
                         }
                     }
+
+                    // Check complete in case subdir had no files
+                    checkComplete();
                 });
         }
     });

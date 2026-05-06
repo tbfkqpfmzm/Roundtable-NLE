@@ -6,6 +6,15 @@ ROUNDTABLE is a full-featured NLE written in C++20 with Vulkan 1.3 compute shade
 
 ---
 
+## Support
+
+If you'd like to support development, you can leave a tip at:
+👉 **https://streamelements.com/exporterrormusic/tip**
+
+All contributions are greatly appreciated!
+
+---
+
 ## Download
 
 The easiest way to get ROUNDTABLE is to download a pre-built installer from the [Releases page](https://github.com/ROUNDTABLE-TALK/roundtable/releases). The installer is a portable Windows build — no dependencies, no package managers, no build steps. Just run the installer and launch.
