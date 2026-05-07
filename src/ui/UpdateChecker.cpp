@@ -21,6 +21,25 @@
 
 namespace rt {
 
+// ---------------------------------------------------------------------------
+// Compare two dotted version strings (e.g. "0.5", "0.51", "1.2.3").
+// Returns  +1 if a > b,  0 if a == b,  -1 if a < b.
+// ---------------------------------------------------------------------------
+static int compareVersions(const QString &a, const QString &b)
+{
+    const auto partsA = a.split('.');
+    const auto partsB = b.split('.');
+    const int maxLen = qMax(partsA.size(), partsB.size());
+
+    for (int i = 0; i < maxLen; ++i) {
+        int numA = (i < partsA.size()) ? partsA[i].toInt() : 0;
+        int numB = (i < partsB.size()) ? partsB[i].toInt() : 0;
+        if (numA > numB) return +1;
+        if (numA < numB) return -1;
+    }
+    return 0;
+}
+
 UpdateChecker::UpdateChecker(QObject *parent)
     : QObject(parent)
 {
@@ -89,9 +108,10 @@ void UpdateChecker::onVersionFetched(QNetworkReply *reply)
         return;
     }
 
-    // Compare versions
+    // Compare versions using semantic versioning (e.g. 0.5 < 0.51).
     QString currentVersion = QApplication::applicationVersion();
-    if (m_latestVersion == currentVersion) {
+    int cmp = compareVersions(m_latestVersion, currentVersion);
+    if (cmp <= 0) {
         spdlog::info("UpdateChecker: already at latest version ({})",
                      currentVersion.toStdString());
         emit checkComplete(false, QString());
