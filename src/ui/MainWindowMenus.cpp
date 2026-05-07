@@ -528,7 +528,7 @@ void MainWindow::onCheckForUpdates()
                 this, &MainWindow::onAutoUpdateCheck);
     }
     m_updatePromptShown = true;
-    m_updateChecker->check("ROUNDTABLE-TALK", "roundtable");
+    m_updateChecker->check("exporterrormusic", "Roundtable-NLE");
 }
 
 void MainWindow::onCheckForUpdatesSilent()
@@ -540,7 +540,7 @@ void MainWindow::onCheckForUpdatesSilent()
                 this, &MainWindow::onAutoUpdateCheck);
     }
     m_updatePromptShown = false;
-    m_updateChecker->check("ROUNDTABLE-TALK", "roundtable");
+    m_updateChecker->check("exporterrormusic", "Roundtable-NLE");
 }
 
 void MainWindow::onAutoUpdateCheck(bool available, const QString &version)
