@@ -64,13 +64,17 @@ signals:
     /// Listeners should open it via MediaPool and route to the Source Monitor.
     void loadInSourceMonitor(const QString& filePath);
 
+    /// Emitted after one or more files are imported into an asset folder.
+    /// Listeners (e.g. ShotComposer) should refresh their own asset views.
+    void mediaImported(const QString& importDir);
+
 private:
     void buildUI();
     void refreshFolderTree(MediaDragTreeWidget* tree,
                            const QString& dirPath,
                            const QStringList& nameFilters,
                            const QString& searchTerm);
-    void setupContextMenu(MediaDragTreeWidget* tree, const QString& fileFilter);
+    void setupContextMenu(MediaDragTreeWidget* tree, const QString& fileFilter, const QString& importDir);
     void setupDoubleClick(MediaDragTreeWidget* tree);
     void applyViewModeToTree(MediaDragTreeWidget* tree);
 

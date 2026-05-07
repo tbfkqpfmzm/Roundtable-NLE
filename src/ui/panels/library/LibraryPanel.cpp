@@ -190,7 +190,7 @@ void LibraryPanel::buildUI()
         m_bgSearch = w.search;
         m_bgTree   = w.tree;
         m_tabs->addTab(w.container, tr("Backgrounds"));
-        setupContextMenu(m_bgTree, tr("Images (*.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff *.webp *.tga *.dds)"));
+        setupContextMenu(m_bgTree, tr("Images (*.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff *.webp *.tga *.dds)"), kBackgroundsDir);
         setupDoubleClick(m_bgTree);
         connect(w.btnDetail, &QToolButton::clicked, this, [this]() { setIconMode(false); });
         connect(w.btnIcons,  &QToolButton::clicked, this, [this]() { setIconMode(true);  });
@@ -214,7 +214,7 @@ void LibraryPanel::buildUI()
         m_videoSearch = w.search;
         m_videoTree   = w.tree;
         m_tabs->addTab(w.container, tr("Videos"));
-        setupContextMenu(m_videoTree, tr("Videos (*.mp4 *.mov *.mkv *.webm *.avi *.m4v)"));
+        setupContextMenu(m_videoTree, tr("Videos (*.mp4 *.mov *.mkv *.webm *.avi *.m4v)"), kVideosDir);
         setupDoubleClick(m_videoTree);
         connect(w.btnDetail, &QToolButton::clicked, this, [this]() { setIconMode(false); });
         connect(w.btnIcons,  &QToolButton::clicked, this, [this]() { setIconMode(true);  });
@@ -238,7 +238,7 @@ void LibraryPanel::buildUI()
         m_audioSearch = w.search;
         m_audioTree   = w.tree;
         m_tabs->addTab(w.container, tr("Audio"));
-        setupContextMenu(m_audioTree, tr("Audio (*.wav *.mp3 *.flac *.ogg *.m4a *.aac *.opus)"));
+        setupContextMenu(m_audioTree, tr("Audio (*.wav *.mp3 *.flac *.ogg *.m4a *.aac *.opus)"), kAudioDir);
         setupDoubleClick(m_audioTree);
         connect(w.btnDetail, &QToolButton::clicked, this, [this]() { setIconMode(false); });
         connect(w.btnIcons,  &QToolButton::clicked, this, [this]() { setIconMode(true);  });
@@ -461,32 +461,86 @@ void LibraryPanel::setupDoubleClick(MediaDragTreeWidget* tree)
     });
 }
 
-void LibraryPanel::setupContextMenu(MediaDragTreeWidget* tree, const QString& fileFilter)
+void LibraryPanel::setupContextMenu(MediaDragTreeWidget* tree, const QString& fileFilter, const QString& importDir)
 {
     if (!tree) return;
     tree->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(tree, &QWidget::customContextMenuRequested,
-            this, [this, tree, fileFilter](const QPoint& pos) {
+            this, [this, tree, fileFilter, importDir](const QPoint& pos) {
         QTreeWidgetItem* item = tree->itemAt(pos);
-        if (!item) return;
+
+        QMenu menu(tree);
+
+        // ── Right-click on empty space: Import a new asset ──────────────
+        if (!item) {
+            QAction* importAct = menu.addAction(tr("Import to %1…")
+                .arg(QDir(importDir).dirName()));
+            QAction* chosen = menu.exec(tree->viewport()->mapToGlobal(pos));
+            if (!chosen) return;
+
+            if (chosen == importAct) {
+                QStringList files = QFileDialog::getOpenFileNames(
+                    tree, tr("Import to %1").arg(importDir),
+                    QString(), fileFilter);
+                if (files.isEmpty()) return;
+                // Ensure the target directory exists
+                QDir().mkpath(importDir);
+                for (const QString& srcPath : files) {
+                    QFileInfo fi(srcPath);
+                    QString dstPath = importDir + QStringLiteral("/") + fi.fileName();
+                    if (QFile::exists(dstPath)) {
+                        auto reply = QMessageBox::question(
+                            tree, tr("File Exists"),
+                            tr("\"%1\" already exists in %2.\nOverwrite?")
+                                .arg(fi.fileName(), importDir),
+                            QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel,
+                            QMessageBox::No);
+                        if (reply == QMessageBox::Cancel)
+                            break;
+                        if (reply == QMessageBox::No)
+                            continue;
+                        QFile::remove(dstPath);
+                    }
+                    if (!QFile::copy(srcPath, dstPath)) {
+                        QMessageBox::warning(tree, tr("Import Failed"),
+                            tr("Failed to copy \"%1\" to %2.")
+                                .arg(fi.fileName(), importDir));
+                    }
+                }
+                // Refresh this tab to show the newly imported file
+                refresh();
+                emit mediaImported(importDir);
+            }
+            return;
+        }
+
+        // ── Right-click on an existing item ─────────────────────────────
         // Folder header items have UserRole+2 == false but no usable path; skip.
         const QString oldPath = item->data(0, Qt::UserRole).toString();
         if (oldPath.isEmpty()) return;
 
-        QMenu menu(tree);
         QAction* relinkAct = menu.addAction(tr("Re-link…"));
         QAction* showAct   = menu.addAction(tr("Show in Explorer"));
+        menu.addSeparator();
+        QAction* deleteAct = menu.addAction(tr("Delete"));
         QAction* chosen = menu.exec(tree->viewport()->mapToGlobal(pos));
         if (!chosen) return;
+
+        if (chosen == deleteAct) {
+            auto reply = QMessageBox::question(tree, tr("Delete"),
+                tr("Permanently delete \"%1\"?\nThis cannot be undone.")
+                    .arg(QFileInfo(oldPath).fileName()),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+            if (reply != QMessageBox::Yes) return;
+            QFile::remove(oldPath);
+            refresh();
+            return;
+        }
 
         if (chosen == relinkAct) {
             const QFileInfo oldFi(oldPath);
             const QString startDir = oldFi.exists() ? oldFi.absolutePath()
                                                     : QDir::homePath();
-            // Premiere-style "Display Only Exact Name Matches" — the default
-            // filter shows only files whose name matches the offline asset.
-            // The user can switch the dropdown to the broader type filter or
-            // "All Files" to widen the search.
             const QString exactFilter = tr("Exact name match (%1)").arg(oldFi.fileName())
                 + QStringLiteral(";;") + fileFilter
                 + QStringLiteral(";;") + tr("All Files (*.*)");
@@ -502,13 +556,7 @@ void LibraryPanel::setupContextMenu(MediaDragTreeWidget* tree, const QString& fi
             const QString newPath = sel.first();
             if (newPath.isEmpty() || newPath == oldPath) return;
 
-            // Notify the host (TimelineWorkspace) so it can update timeline
-            // clips, shot presets, and any other places referencing oldPath.
             emit mediaRelinkRequested(oldPath, newPath);
-
-            // Also refresh this tab to reflect the re-linked file's new location
-            // if it falls outside the scanned folder, the entry will simply
-            // disappear; the host has already updated downstream references.
             refresh();
         } else if (chosen == showAct) {
             QFileInfo fi(oldPath);

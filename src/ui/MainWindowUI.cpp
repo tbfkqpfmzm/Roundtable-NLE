@@ -1126,6 +1126,10 @@ void MainWindow::applyDefaultLayout()
             restoreWorkspaceFromFile(bundledLayout);
             return; // restoreWorkspaceFromFile already calls setCurrentPage
         }
+        // No saved or bundled layout — reset the timeline workspace to its
+        // programmatic default dock arrangement so panels aren't scattered.
+        if (m_timelineWorkspace)
+            m_timelineWorkspace->resetToDefaultDockLayout();
     }
 
     setCurrentPage(Page::Projects);

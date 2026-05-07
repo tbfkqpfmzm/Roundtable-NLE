@@ -17,6 +17,8 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QCheckBox>
+#include <QDesktopServices>
+#include <QDir>
 #include <QDoubleSpinBox>
 #include <QDrag>
 #include <QFileDialog>
@@ -31,6 +33,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QMimeData>
+#include <QProcess>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QShortcut>
@@ -39,6 +42,7 @@
 #include <QStyledItemDelegate>
 #include <QTabWidget>
 #include <QToolTip>
+#include <QUrl>
 #include <QVBoxLayout>
 
 #include <spdlog/spdlog.h>
@@ -760,6 +764,84 @@ QWidget* ShotComposer::createLeftPanel()
     setupIconList(m_characterLibrary);
     m_characterLibrary->setDragEnabled(true);
     m_characterLibrary->setDragDropMode(QAbstractItemView::DragOnly);
+    m_characterLibrary->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_characterLibrary, &QWidget::customContextMenuRequested,
+            this, [this](const QPoint& pos) {
+        auto* item = m_characterLibrary->itemAt(pos);
+        if (!item) return;
+        const QString itemType = item->data(Qt::UserRole).toString();
+
+        QMenu menu(m_characterLibrary);
+
+        if (itemType == QStringLiteral("video")) {
+            // ── Video character ────────────────────────────────────────
+            const QString mutePath  = item->data(Qt::UserRole + 1).toString();
+            const QString talkPath  = item->data(Qt::UserRole + 2).toString();
+
+            QAction* showAct = menu.addAction(tr("Show in Explorer"));
+            menu.addSeparator();
+            QAction* deleteAct = menu.addAction(tr("Delete"));
+            QAction* chosen = menu.exec(m_characterLibrary->viewport()->mapToGlobal(pos));
+            if (!chosen) return;
+
+            if (chosen == showAct) {
+                QString dir = !mutePath.isEmpty() ? QFileInfo(mutePath).absolutePath()
+                                                  : QFileInfo(talkPath).absolutePath();
+#ifdef _WIN32
+                QProcess::startDetached("explorer.exe",
+                    {QDir::toNativeSeparators(dir)});
+#else
+                QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
+#endif
+            } else if (chosen == deleteAct) {
+                auto reply = QMessageBox::question(m_characterLibrary, tr("Delete"),
+                    tr("Permanently delete this video character's files?\nThis cannot be undone."),
+                    QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+                if (reply != QMessageBox::Yes) return;
+                if (!mutePath.isEmpty()) QFile::remove(mutePath);
+                if (!talkPath.isEmpty()) QFile::remove(talkPath);
+                refreshCharacterLibrary();
+            }
+        } else {
+            // ── Spine character ────────────────────────────────────────
+            const QString charFolder = item->data(Qt::UserRole).toString();
+            const QString charDir = QStringLiteral("assets/characters/") + charFolder;
+
+            QAction* showAct = menu.addAction(tr("Show in Explorer"));
+            menu.addSeparator();
+            QAction* deleteAct = menu.addAction(tr("Delete"));
+            QAction* chosen = menu.exec(m_characterLibrary->viewport()->mapToGlobal(pos));
+            if (!chosen) return;
+
+            if (chosen == showAct) {
+                if (QDir(charDir).exists()) {
+#ifdef _WIN32
+                    QProcess::startDetached("explorer.exe",
+                        {QDir::toNativeSeparators(QDir(charDir).absolutePath())});
+#else
+                    QDesktopServices::openUrl(QUrl::fromLocalFile(
+                        QDir(charDir).absolutePath()));
+#endif
+                }
+            } else if (chosen == deleteAct) {
+                auto reply = QMessageBox::question(m_characterLibrary, tr("Delete"),
+                    tr("Permanently delete character \"%1\" and all its files?\nThis cannot be undone.")
+                        .arg(charFolder),
+                    QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+                if (reply != QMessageBox::Yes) return;
+                // Recursively remove the character directory
+                QDir dir(charDir);
+                if (dir.exists()) {
+                    dir.removeRecursively();
+                }
+                // Rescan the model manager so the character disappears
+                if (m_modelManager) {
+                    m_modelManager->scan("assets");
+                }
+                refreshCharacterLibrary();
+            }
+        }
+    });
     charLayout->addWidget(m_characterLibrary, 1);
 
     auto* btnAddChar = new QPushButton(QStringLiteral("Add to Shot \xE2\x86\x92"));
@@ -780,12 +862,78 @@ QWidget* ShotComposer::createLeftPanel()
     connect(m_backgroundLibrary, &QWidget::customContextMenuRequested,
             this, [this](const QPoint& pos) {
         auto* item = m_backgroundLibrary->itemAt(pos);
-        if (!item) return;
+
+        QMenu menu(m_backgroundLibrary);
+
+        // ── Right-click on empty space: Import background ───────────────
+        if (!item) {
+            QAction* importAct = menu.addAction(tr("Import Background…"));
+            QAction* chosen = menu.exec(m_backgroundLibrary->viewport()->mapToGlobal(pos));
+            if (!chosen || chosen != importAct) return;
+
+            QStringList files = QFileDialog::getOpenFileNames(
+                m_backgroundLibrary, tr("Import Background"),
+                QString(),
+                tr("Images (*.png *.jpg *.jpeg *.bmp *.webp)"));
+            if (files.isEmpty()) return;
+            QDir().mkpath(QStringLiteral("assets/backgrounds"));
+            for (const QString& srcPath : files) {
+                QFileInfo fi(srcPath);
+                QString dstPath = QStringLiteral("assets/backgrounds/") + fi.fileName();
+                if (QFile::exists(dstPath)) {
+                    auto reply = QMessageBox::question(
+                        m_backgroundLibrary, tr("File Exists"),
+                        tr("\"%1\" already exists in backgrounds.\nOverwrite?")
+                            .arg(fi.fileName()),
+                        QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel,
+                        QMessageBox::No);
+                    if (reply == QMessageBox::Cancel) break;
+                    if (reply == QMessageBox::No) continue;
+                    QFile::remove(dstPath);
+                }
+                if (!QFile::copy(srcPath, dstPath)) {
+                    QMessageBox::warning(m_backgroundLibrary, tr("Import Failed"),
+                        tr("Failed to copy \"%1\".").arg(fi.fileName()));
+                }
+            }
+            refreshBackgroundLibrary();
+            return;
+        }
+
+        // ── Right-click on an existing item ─────────────────────────────
         const QString oldPath = item->data(Qt::UserRole).toString();
         if (oldPath.isEmpty()) return;
-        QMenu menu(m_backgroundLibrary);
         QAction* relinkAct = menu.addAction(tr("Re-link…"));
+        QAction* showAct   = menu.addAction(tr("Show in Explorer"));
+        menu.addSeparator();
+        QAction* deleteAct = menu.addAction(tr("Delete"));
         QAction* chosen = menu.exec(m_backgroundLibrary->viewport()->mapToGlobal(pos));
+        if (!chosen) return;
+
+        if (chosen == deleteAct) {
+            auto reply = QMessageBox::question(m_backgroundLibrary, tr("Delete"),
+                tr("Permanently delete \"%1\"?\nThis cannot be undone.")
+                    .arg(QFileInfo(oldPath).fileName()),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+            if (reply != QMessageBox::Yes) return;
+            QFile::remove(oldPath);
+            refreshBackgroundLibrary();
+            return;
+        }
+
+        if (chosen == showAct) {
+            QFileInfo fi(oldPath);
+            if (fi.exists()) {
+#ifdef _WIN32
+                QProcess::startDetached("explorer.exe",
+                    {"/select,", QDir::toNativeSeparators(fi.absoluteFilePath())});
+#else
+                QDesktopServices::openUrl(QUrl::fromLocalFile(fi.absolutePath()));
+#endif
+            }
+            return;
+        }
+
         if (chosen != relinkAct) return;
         const QFileInfo oldFi(oldPath);
         const QString startDir = oldFi.exists() ? oldFi.absolutePath() : QDir::homePath();
@@ -837,6 +985,106 @@ QWidget* ShotComposer::createLeftPanel()
     m_videoLibrary->setDragEnabled(true);
     m_videoLibrary->setDragDropMode(QAbstractItemView::DragOnly);
     m_videoLibrary->setMouseTracking(true);  // for hover-scrub
+    m_videoLibrary->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_videoLibrary, &QWidget::customContextMenuRequested,
+            this, [this](const QPoint& pos) {
+        auto* item = m_videoLibrary->itemAt(pos);
+
+        QMenu menu(m_videoLibrary);
+
+        // ── Right-click on empty space: Import video ────────────────────
+        if (!item) {
+            QAction* importAct = menu.addAction(tr("Import Video…"));
+            QAction* chosen = menu.exec(m_videoLibrary->viewport()->mapToGlobal(pos));
+            if (!chosen || chosen != importAct) return;
+
+            QStringList files = QFileDialog::getOpenFileNames(
+                m_videoLibrary, tr("Import Video"),
+                QString(),
+                tr("Videos (*.mp4 *.avi *.mov *.mkv *.webm *.wmv)"));
+            if (files.isEmpty()) return;
+            QDir().mkpath(QStringLiteral("assets/videos"));
+            for (const QString& srcPath : files) {
+                QFileInfo fi(srcPath);
+                QString dstPath = QStringLiteral("assets/videos/") + fi.fileName();
+                if (QFile::exists(dstPath)) {
+                    auto reply = QMessageBox::question(
+                        m_videoLibrary, tr("File Exists"),
+                        tr("\"%1\" already exists in videos.\nOverwrite?")
+                            .arg(fi.fileName()),
+                        QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel,
+                        QMessageBox::No);
+                    if (reply == QMessageBox::Cancel) break;
+                    if (reply == QMessageBox::No) continue;
+                    QFile::remove(dstPath);
+                }
+                if (!QFile::copy(srcPath, dstPath)) {
+                    QMessageBox::warning(m_videoLibrary, tr("Import Failed"),
+                        tr("Failed to copy \"%1\".").arg(fi.fileName()));
+                }
+            }
+            refreshVideoLibrary();
+            return;
+        }
+
+        // ── Right-click on an existing video item ───────────────────────
+        const QString itemType = item->data(Qt::UserRole).toString();
+        // Only show Re-link for regular video files, not video characters
+        QString oldPath;
+        if (itemType == QStringLiteral("video_file"))
+            oldPath = item->data(Qt::UserRole + 1).toString();
+        if (oldPath.isEmpty()) return;
+        QAction* relinkAct = menu.addAction(tr("Re-link…"));
+        QAction* showAct   = menu.addAction(tr("Show in Explorer"));
+        menu.addSeparator();
+        QAction* deleteAct = menu.addAction(tr("Delete"));
+        QAction* chosen = menu.exec(m_videoLibrary->viewport()->mapToGlobal(pos));
+        if (!chosen) return;
+
+        if (chosen == deleteAct) {
+            auto reply = QMessageBox::question(m_videoLibrary, tr("Delete"),
+                tr("Permanently delete \"%1\"?\nThis cannot be undone.")
+                    .arg(QFileInfo(oldPath).fileName()),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+            if (reply != QMessageBox::Yes) return;
+            QFile::remove(oldPath);
+            refreshVideoLibrary();
+            return;
+        }
+
+        if (chosen == showAct) {
+            QFileInfo fi(oldPath);
+            if (fi.exists()) {
+#ifdef _WIN32
+                QProcess::startDetached("explorer.exe",
+                    {"/select,", QDir::toNativeSeparators(fi.absoluteFilePath())});
+#else
+                QDesktopServices::openUrl(QUrl::fromLocalFile(fi.absolutePath()));
+#endif
+            }
+            return;
+        }
+
+        if (chosen != relinkAct) return;
+        const QFileInfo oldFi(oldPath);
+        const QString startDir = oldFi.exists() ? oldFi.absolutePath() : QDir::homePath();
+        const QString exactLabel = tr("Exact name match (%1)").arg(oldFi.fileName());
+        const QString filters = exactLabel
+            + QStringLiteral(";;") + tr("Videos (*.mp4 *.avi *.mov *.mkv *.webm *.wmv)")
+            + QStringLiteral(";;") + tr("All Files (*.*)");
+        QFileDialog dlg(this, tr("Re-link: %1").arg(oldFi.fileName()), startDir);
+        dlg.setNameFilter(filters);
+        dlg.setFileMode(QFileDialog::ExistingFile);
+        dlg.selectNameFilter(exactLabel);
+        dlg.selectFile(oldFi.fileName());
+        if (dlg.exec() != QDialog::Accepted) return;
+        const QStringList sel = dlg.selectedFiles();
+        if (sel.isEmpty()) return;
+        const QString newPath = sel.first();
+        if (newPath.isEmpty() || newPath == oldPath) return;
+        emit mediaRelinkRequested(oldPath, newPath);
+        refreshVideoLibrary();
+    });
     videoLayout->addWidget(m_videoLibrary, 1);
 
     auto* btnAddVideo = new QPushButton("Add Video");
