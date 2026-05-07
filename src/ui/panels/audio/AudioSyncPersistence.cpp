@@ -64,8 +64,15 @@ void AudioSync::saveProjectState(const QString& projectName)
     QSettings settings("ROUNDTABLE", "NLE");
     QString prefix = "Project/" + projectName + "/AudioSync/";
 
-    // Save script source
+    // Save script source and display name
     settings.setValue(prefix + "scriptSource", m_lastScriptSource);
+    QString displayName;
+    auto it = m_scriptSessions.find(m_activeScriptKey);
+    if (it != m_scriptSessions.end())
+        displayName = QString::fromStdString(it->second.displayName);
+    settings.setValue(prefix + "scriptDisplayName", displayName);
+    // Save raw script content so we can restore without re-fetching from URL
+    settings.setValue(prefix + "scriptRawContent", QString::fromStdString(m_scriptRawContent));
 
     // Save audio paths
     QStringList audioPaths;
@@ -131,12 +138,24 @@ void AudioSync::restoreProjectState(const QString& projectName)
     QString scriptSource = settings.value(prefix + "scriptSource").toString();
     if (!scriptSource.isEmpty()) {
         m_lastScriptSource = scriptSource;
-        m_scriptUrlCombo->setEditText(scriptSource);
 
-        if (scriptSource.startsWith("http://") || scriptSource.startsWith("https://"))
+        // Restore display name so it persists across sessions
+        QString savedName = settings.value(prefix + "scriptDisplayName").toString();
+        if (!savedName.isEmpty())
+            m_pendingSessionName = savedName.toStdString();
+
+        // Restore raw script content to avoid auto-fetching from URL on project open.
+        QString rawContent = settings.value(prefix + "scriptRawContent").toString();
+        m_scriptRawContent = rawContent.toStdString();
+
+        if (!m_scriptRawContent.empty()) {
+            // Restore from saved content instead of re-fetching
+            loadScript(m_scriptRawContent, scriptSource.toStdString());
+        } else if (scriptSource.startsWith("http://") || scriptSource.startsWith("https://")) {
             fetchScriptFromUrl(scriptSource);
-        else
+        } else {
             loadScript(scriptSource.toStdString());
+        }
     }
 
     // Restore audio paths ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â batch import without per-file loadAudioSamples
@@ -245,7 +264,9 @@ void AudioSync::restoreProjectState(const QString& projectName)
         spdlog::info("AudioSync: Rebuilt transcription results for {} files",
                      m_audioPaths.size());
     }
-
+    // Persist restored data into the current session so that switching
+    // sessions or save/restore cycles don't lose the data.
+    saveCurrentSession();
     m_restoring = false;  // Re-enable normal UI rebuilds
 
     // Refresh UI to show restored state ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â single populateCards call
@@ -270,11 +291,42 @@ void AudioSync::restoreProjectState(const QString& projectName)
         showAudioSidePanel(3);
 }
 
+void AudioSync::restoreAudioPaths(const QString& projectName)
+{
+    if (projectName.isEmpty() || !m_audioPaths.empty()) return;
+
+    QSettings settings("ROUNDTABLE", "NLE");
+    QString prefix = "Project/" + projectName + "/AudioSync/";
+
+    QStringList audioPaths = settings.value(prefix + "audioPaths").toStringList();
+    if (audioPaths.isEmpty()) return;
+
+    m_audioPaths.clear();
+    if (m_audioFileList) m_audioFileList->clear();
+    for (const auto& path : audioPaths) {
+        if (!path.isEmpty() && QFile::exists(path))
+            m_audioPaths.push_back(path.toStdString());
+    }
+    if (!m_audioPaths.empty()) {
+        m_audioImported = true;
+        m_audioPath = m_audioPaths.back();
+        if (m_audioPathEdit) m_audioPathEdit->setText(QString::fromStdString(m_audioPath));
+        m_audioStatus->setText(QString("%1 file(s) imported").arg(m_audioPaths.size()));
+        loadAudioSamples();
+        if (m_audioFileList) {
+            for (const auto& p : m_audioPaths)
+                addAudioFileListItem(QString::fromStdString(p));
+        }
+        spdlog::info("AudioSync::restoreAudioPaths: supplemented {} paths from QSettings",
+                     m_audioPaths.size());
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  Binary blob serialization (for .rtp project file)
 // ═══════════════════════════════════════════════════════════════════════════
 
-static constexpr uint32_t AUDIO_SYNC_BLOB_VERSION = 1;
+static constexpr uint32_t AUDIO_SYNC_BLOB_VERSION = 3;
 
 std::vector<uint8_t> AudioSync::serializeToBlob() const
 {
@@ -284,6 +336,16 @@ std::vector<uint8_t> AudioSync::serializeToBlob() const
     // Script source
     w.writeString(m_lastScriptSource.isEmpty() ? std::string{}
                   : m_lastScriptSource.toStdString());
+
+    // Script display name (v2+) — written early so restore can use it before loadScript
+    QString displayName;
+    auto dnIt = m_scriptSessions.find(m_activeScriptKey);
+    if (dnIt != m_scriptSessions.end())
+        displayName = QString::fromStdString(dnIt->second.displayName);
+    w.writeString(displayName.toStdString());
+
+    // Script raw content (v3+) — stored so we can restore without re-fetching from URL
+    w.writeString(m_scriptRawContent);
 
     // Audio paths
     w.writeU32(static_cast<uint32_t>(m_audioPaths.size()));
@@ -319,14 +381,20 @@ std::vector<uint8_t> AudioSync::serializeToBlob() const
         }
     }
 
-    spdlog::info("AudioSync::serializeToBlob: {} clips, {} bytes",
-                 m_clips.size(), w.data().size());
+    spdlog::info("AudioSync::serializeToBlob: {} audioPaths, {} clips, {} bytes",
+                 m_audioPaths.size(), m_clips.size(), w.data().size());
+    for (size_t i = 0; i < m_audioPaths.size(); ++i)
+        spdlog::info("  serialize audio[{}]: {}", i, m_audioPaths[i]);
     return w.data();
 }
 
 void AudioSync::deserializeFromBlob(const std::vector<uint8_t>& blob)
 {
-    if (blob.empty()) return;
+    if (blob.empty()) {
+        spdlog::warn("AudioSync::deserializeFromBlob: blob is EMPTY");
+        return;
+    }
+    spdlog::info("AudioSync::deserializeFromBlob: blob size={}", blob.size());
 
     BinaryReader r(blob.data(), blob.size());
 
@@ -341,19 +409,37 @@ void AudioSync::deserializeFromBlob(const std::vector<uint8_t>& blob)
 
     // Script source
     std::string scriptSource = r.readString();
+
+    // Script display name (v2+) — set as pending name so loadScript uses it
+    if (version >= 2 && r.remaining() > 0) {
+        std::string savedName = r.readString();
+        if (!savedName.empty())
+            m_pendingSessionName = savedName;
+    }
+
+    // Script raw content (v3+) — allows offline restore without re-fetching from URL
+    if (version >= 3 && r.remaining() > 0) {
+        m_scriptRawContent = r.readString();
+    }
+
     if (!scriptSource.empty()) {
         m_lastScriptSource = QString::fromStdString(scriptSource);
-        if (m_scriptUrlCombo)
-            m_scriptUrlCombo->setEditText(m_lastScriptSource);
 
-        if (m_lastScriptSource.startsWith("http://") || m_lastScriptSource.startsWith("https://"))
+        // If we have the raw content (v3+ blob), restore from that instead of
+        // re-fetching from URL.  This avoids auto-syncing on project open.
+        // Users can manually sync via the right-click "Sync with GDrive" menu.
+        if (!m_scriptRawContent.empty()) {
+            loadScript(m_scriptRawContent, scriptSource);
+        } else if (m_lastScriptSource.startsWith("http://") || m_lastScriptSource.startsWith("https://")) {
             fetchScriptFromUrl(m_lastScriptSource);
-        else
+        } else {
             loadScript(scriptSource);
+        }
     }
 
     // Audio paths
     uint32_t pathCount = r.readU32();
+    spdlog::info("AudioSync::deserializeFromBlob: reading {} audio paths", pathCount);
     m_audioPaths.clear();
     if (m_audioFileList) m_audioFileList->clear();
     m_fileWaveforms.clear();
@@ -361,9 +447,12 @@ void AudioSync::deserializeFromBlob(const std::vector<uint8_t>& blob)
     m_fileTimeLabels.clear();
     for (uint32_t i = 0; i < pathCount; ++i) {
         std::string p = r.readString();
-        if (!p.empty() && QFile::exists(QString::fromStdString(p)))
+        bool exists = QFile::exists(QString::fromStdString(p));
+        spdlog::info("  audio[{}]: exists={} path={}", i, exists, p);
+        if (!p.empty() && exists)
             m_audioPaths.push_back(std::move(p));
     }
+    spdlog::info("AudioSync::deserializeFromBlob: kept {} audio paths", m_audioPaths.size());
     if (!m_audioPaths.empty()) {
         m_audioImported = true;
         m_audioPath = m_audioPaths.back();
@@ -434,8 +523,11 @@ void AudioSync::deserializeFromBlob(const std::vector<uint8_t>& blob)
 
     m_restoring = false;
 
-    spdlog::info("AudioSync::deserializeFromBlob: restored {} clips", m_clips.size());
+    spdlog::info("AudioSync::deserializeFromBlob: restored {} clips, {} audio paths",
+                 m_clips.size(), m_audioPaths.size());
 
+    // Refresh session list so restored display names appear
+    populateScriptSessionList();
     updateWorkflowState();
     populateLeftList();
     if (m_script) populateCards();

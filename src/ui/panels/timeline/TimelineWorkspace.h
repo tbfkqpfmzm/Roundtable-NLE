@@ -267,6 +267,12 @@ private:
     bool m_panelMaximized{false};
     QWidget* m_maximizedWidget{nullptr};       // the panel widget being shown fullscreen
     QDockWidget* m_maximizedDock{nullptr};      // its owning dock (nullptr = central widget)
+
+    /// Snapshot of the inner QMainWindow dock state taken just before the
+    /// panel was maximized.  Used by saveDockLayout() so that saving while
+    /// maximized writes the pre-maximize arrangement instead of the broken
+    /// state where the maximized dock is reparented out and all others hidden.
+    QByteArray m_dockStateBeforeMaximize;
 public:
     void togglePanelMaximize();
 private:

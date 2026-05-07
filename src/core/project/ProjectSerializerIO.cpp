@@ -27,12 +27,13 @@ bool ProjectSerializer::save(const Project& project, const std::filesystem::path
     auto data = serialize(project);
 
     // Atomic write pattern: write to .tmp, then rename over final path
-    auto tmpPath = std::filesystem::path(path.string() + ".tmp");
+    // Use native() to avoid Unicode mangling on Windows (narrow string conversion)
+    auto tmpPath = std::filesystem::path(path.native() + L".tmp");
 
     std::ofstream file(tmpPath, std::ios::binary);
     if (!file.is_open())
     {
-        spdlog::error("ProjectSerializer: cannot open '{}' for writing", tmpPath.string());
+        spdlog::error("ProjectSerializer: cannot open '{}' for writing", path.string());
         return false;
     }
 
@@ -42,7 +43,7 @@ bool ProjectSerializer::save(const Project& project, const std::filesystem::path
 
     if (!file.good())
     {
-        spdlog::error("ProjectSerializer: write error to '{}'", tmpPath.string());
+        spdlog::error("ProjectSerializer: write error to '{}'", path.string());
         std::error_code ec;
         std::filesystem::remove(tmpPath, ec);
         return false;
@@ -52,7 +53,7 @@ bool ProjectSerializer::save(const Project& project, const std::filesystem::path
     std::error_code ec;
     if (std::filesystem::exists(path, ec))
     {
-        auto bakPath = std::filesystem::path(path.string() + ".bak");
+        auto bakPath = std::filesystem::path(path.native() + L".bak");
         std::filesystem::copy_file(path, bakPath,
             std::filesystem::copy_options::overwrite_existing, ec);
         if (ec)

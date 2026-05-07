@@ -319,17 +319,18 @@ void ProjectPanel::setupUI()
         m_locationInput->setStyleSheet(inputStyle());
         folderRow->addWidget(m_locationInput, 1);
 
-        m_locationBrowseBtn = new QPushButton(QStringLiteral("\u2026"));
-        m_locationBrowseBtn->setFixedSize(30, 30);
+        m_locationBrowseBtn = new QPushButton(QString::fromUtf8("\xF0\x9F\x93\x81  Browse..."));
+        m_locationBrowseBtn->setMinimumHeight(30);
         m_locationBrowseBtn->setCursor(Qt::PointingHandCursor);
-        m_locationBrowseBtn->setToolTip("Browse for save location");
+        m_locationBrowseBtn->setToolTip("Browse for save location folder");
         m_locationBrowseBtn->setStyleSheet(QStringLiteral(
             "QPushButton { background: %1; border: 1px solid %2;"
-            "  color: %3; font-size: 14px; }"
+            "  color: %3; font-size: 11px; font-weight: 600;"
+            "  padding: 4px 10px; }"
             "QPushButton:hover { background: %4; border-color: %5; color: %6; }")
             .arg(Theme::rgb(c.surface1))
             .arg(Theme::rgb(c.border))
-            .arg(Theme::rgb(c.textTertiary))
+            .arg(Theme::rgb(c.textSecondary))
             .arg(Theme::rgb(c.surface2))
             .arg(Theme::rgb(c.borderLight))
             .arg(Theme::rgb(c.textPrimary)));
@@ -355,8 +356,8 @@ void ProjectPanel::setupUI()
             "font-size: 9px; font-weight: 600; color: %1; letter-spacing: 0.4px;")
             .arg(Theme::rgb(c.textPrimary)));
         rpLay->addWidget(recentLbl);
-        // We'll populate recent paths dynamically; for now add a placeholder
-        auto* rpSample = new QPushButton(QStringLiteral("\U0001F4C1 Projects"));
+        // Quick-select button for the default projects folder
+        auto* rpSample = new QPushButton(QString::fromUtf8("\xF0\x9F\x93\x81  Projects"));
         rpSample->setObjectName("NewRecentSample");
         rpSample->setCursor(Qt::PointingHandCursor);
         rpSample->setStyleSheet(QStringLiteral(
@@ -368,10 +369,9 @@ void ProjectPanel::setupUI()
             .arg(Theme::rgb(c.textTertiary))
             .arg(Theme::rgb(c.surface2))
             .arg(Theme::rgb(c.textPrimary)));
-        connect(rpSample, &QPushButton::clicked, this, [this, rpSample]() {
-            QString text = rpSample->text();
-            text.remove(0, 1); // remove folder icon
-            m_locationInput->setText(text.trimmed());
+        connect(rpSample, &QPushButton::clicked, this, [this]() {
+            // Set the path directly from m_projectsDir — never strip display text
+            m_locationInput->setText(m_projectsDir);
         });
         rpLay->addWidget(rpSample);
         rpLay->addStretch();

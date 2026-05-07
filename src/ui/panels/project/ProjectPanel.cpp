@@ -939,16 +939,52 @@ void ProjectPanel::hideSidePanel()
 void ProjectPanel::onCreateClicked()
 {
     QString name = m_nameInput->text().trimmed();
-    if (!name.isEmpty()) {
-        uint32_t resW = customResWidth();
-        uint32_t resH = customResHeight();
-        double fps = customFps();
-        QString saveDir = m_locationInput ? m_locationInput->text().trimmed()
-                                          : QString();
-        emit createProject(name, resW, resH, fps, saveDir);
-        m_nameInput->clear();
-        hideSidePanel();
+    if (name.isEmpty()) {
+        QMessageBox::warning(this, "Cannot Create Project",
+            "Please enter a project name.");
+        m_nameInput->setFocus();
+        return;
     }
+
+    // Validate project name — reject characters invalid in Windows filenames
+    static const QString invalidChars = R"(/\:*?"<>|)";
+    for (const QChar& ch : name) {
+        if (invalidChars.contains(ch)) {
+            QMessageBox::warning(this, "Invalid Project Name",
+                QString("Project name cannot contain: %1\n\n"
+                        "Please remove the invalid character '%2'.")
+                    .arg(invalidChars, ch));
+            return;
+        }
+    }
+
+    // Validate save location if provided
+    QString saveDir = m_locationInput ? m_locationInput->text().trimmed() : QString();
+    if (!saveDir.isEmpty()) {
+        QDir dir(saveDir);
+        if (!dir.exists()) {
+            auto reply = QMessageBox::question(this, "Create Directory",
+                QString("The save location does not exist:\n%1\n\n"
+                        "Create this folder?").arg(saveDir),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+            if (reply == QMessageBox::No)
+                return;
+            if (!dir.mkpath(".")) {
+                QMessageBox::warning(this, "Cannot Create Directory",
+                    "Failed to create the save location folder.\n"
+                    "Please choose a different location.");
+                return;
+            }
+        }
+    }
+
+    uint32_t resW = customResWidth();
+    uint32_t resH = customResHeight();
+    double fps = customFps();
+
+    emit createProject(name, resW, resH, fps, saveDir);
+    m_nameInput->clear();
+    hideSidePanel();
 }
 
 void ProjectPanel::onSearchTextChanged(const QString& text)

@@ -256,7 +256,7 @@ void MainWindow::checkCrashRecovery()
     QString lastPath = settings.value("LastProjectPath").toString();
     if (lastPath.isEmpty()) return;
 
-    auto projPath = std::filesystem::path(lastPath.toStdString());
+    auto projPath = std::filesystem::path(lastPath.toStdWString());
 
     // Check for auto-saves in the "Roundtable Auto-Save" folder
     bool recovered = false;

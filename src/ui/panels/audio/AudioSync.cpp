@@ -26,14 +26,18 @@
 #include <QBoxLayout>
 #include <QCoreApplication>
 #include <QDir>
+#include <QAction>
 #include <QKeyEvent>
+#include <QListView>
 #include <QMouseEvent>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFrame>
 #include <QGraphicsDropShadowEffect>
+#include <QMenu>
 #include <QMessageBox>
+#include <QProcess>
 #include <QHeaderView>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -340,7 +344,180 @@ bool AudioSync::eventFilter(QObject* watched, QEvent* event)
     if (m_manualMatchOpen)
         return QWidget::eventFilter(watched, event);
 
-    // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Mouse click on card ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ select it ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
+    // ── Right-click context menu on script session list ─────────────────
+    if (watched == m_scriptSessionList && event->type() == QEvent::ContextMenu) {
+        auto* ctxEvent = static_cast<QContextMenuEvent*>(event);
+        QPoint pos = ctxEvent->pos();
+        QListWidgetItem* item = m_scriptSessionList->itemAt(pos);
+        if (!item) return QWidget::eventFilter(watched, event);
+
+        int row = m_scriptSessionList->row(item);
+        QString key = item->data(Qt::UserRole).toString();
+
+        QMenu menu(m_scriptSessionList);
+        menu.setStyleSheet(QStringLiteral(
+            "QMenu { background: %1; color: %2; border: 1px solid %3;"
+            "  border-radius: 6px; padding: 4px; }"
+            "QMenu::item { padding: 8px 24px; border-radius: 4px; }"
+            "QMenu::item:selected { background: %4; color: %5; }"
+            "QMenu::separator { height: 1px; background: %6; margin: 4px 8px; }")
+            .arg(Theme::hex(Theme::colors().surface2))
+            .arg(Theme::hex(Theme::colors().textPrimary))
+            .arg(Theme::hex(Theme::colors().border))
+            .arg(Theme::hex(Theme::colors().accentDim))
+            .arg(Theme::hex(Theme::colors().textPrimary))
+            .arg(Theme::hex(Theme::colors().borderLight)));
+
+        QAction* switchAction = menu.addAction(QStringLiteral("\U0001F517  Switch to this script"));
+        menu.addSeparator();
+
+        // Show "Sync with GDrive" only for URL-based scripts
+        bool isUrl = key.startsWith("http://") || key.startsWith("https://");
+        QAction* syncAction = nullptr;
+        if (isUrl) {
+            syncAction = menu.addAction(QStringLiteral("\U0001F504  Sync with GDrive"));
+            menu.addSeparator();
+        }
+
+        QAction* renameAction = menu.addAction(QStringLiteral("\u270F  Rename"));
+        QAction* deleteAction = menu.addAction(QStringLiteral("\u2716  Delete"));
+
+        QAction* chosen = menu.exec(ctxEvent->globalPos());
+        if (chosen == switchAction) {
+            if (!key.isEmpty())
+                switchToScript(key.toStdString());
+        } else if (chosen == syncAction) {
+            if (!key.isEmpty()) {
+                // Switch to this session first, then fetch the latest from URL
+                switchToScript(key.toStdString());
+                m_scriptStatus->setText("Syncing with GDrive...");
+                fetchScriptFromUrl(key);
+            }
+        } else if (chosen == renameAction) {
+            // Find the history entry by URL and rename
+            QString historyPath = rt::userDataDir() + QStringLiteral("/script_history.txt");
+            QStringList lines;
+            QFile rf(historyPath);
+            if (rf.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                QTextStream in(&rf);
+                while (!in.atEnd()) {
+                    QString line = in.readLine().trimmed();
+                    if (!line.isEmpty()) lines.append(line);
+                }
+                rf.close();
+            }
+            int foundIdx = -1;
+            for (int i = 0; i < lines.size(); ++i) {
+                int sep = lines[i].lastIndexOf('|');
+                QString url = (sep >= 0) ? lines[i].mid(sep + 1).trimmed() : lines[i].trimmed();
+                if (url == key) { foundIdx = i; break; }
+            }
+            if (foundIdx >= 0)
+                renameScriptHistoryEntry(foundIdx);
+        } else if (chosen == deleteAction) {
+            // Remove session and delete history entry
+            m_scriptSessions.erase(key.toStdString());
+            QString historyPath = rt::userDataDir() + QStringLiteral("/script_history.txt");
+            QStringList lines;
+            QFile rf(historyPath);
+            if (rf.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                QTextStream in(&rf);
+                while (!in.atEnd()) {
+                    QString line = in.readLine().trimmed();
+                    if (!line.isEmpty()) lines.append(line);
+                }
+                rf.close();
+            }
+            int foundIdx = -1;
+            for (int i = 0; i < lines.size(); ++i) {
+                int sep = lines[i].lastIndexOf('|');
+                QString url = (sep >= 0) ? lines[i].mid(sep + 1).trimmed() : lines[i].trimmed();
+                if (url == key) { foundIdx = i; break; }
+            }
+            if (foundIdx >= 0)
+                deleteScriptHistoryEntry(foundIdx);
+            if (m_activeScriptKey == key.toStdString())
+                clearCurrentSession();
+            populateScriptSessionList();
+        }
+        return true;
+    }
+
+    // ---- Right-click context menu on import / transcribe file lists -----
+    {
+        QWidget* audioVp = m_audioFileList ? m_audioFileList->viewport() : nullptr;
+        QWidget* transVp = m_transcribeFileList ? m_transcribeFileList->viewport() : nullptr;
+        bool isAudio = (watched == audioVp && event->type() == QEvent::ContextMenu);
+        bool isTrans = (watched == transVp && event->type() == QEvent::ContextMenu);
+        if (isAudio || isTrans) {
+            QListWidget* list = isAudio ? m_audioFileList : m_transcribeFileList;
+            auto* ctxEv = static_cast<QContextMenuEvent*>(event);
+            QPoint pt = list->viewport()->mapFromGlobal(ctxEv->globalPos());
+            QListWidgetItem* item = list->itemAt(pt);
+            if (!item) return QWidget::eventFilter(watched, event);
+            int row = list->row(item);
+            if (row < 0 || row >= static_cast<int>(m_audioPaths.size()))
+                return QWidget::eventFilter(watched, event);
+            bool hasTx = (row < static_cast<int>(m_allTranscriptionResults.size()) &&
+                          !m_allTranscriptionResults[row].segments.empty());
+            QMenu menu(list);
+            menu.setStyleSheet(QStringLiteral(
+                "QMenu { background: %1; color: %2; border: 1px solid %3;"
+                "  border-radius: 6px; padding: 4px; }"
+                "QMenu::item { padding: 8px 24px; border-radius: 4px; }"
+                "QMenu::item:selected { background: %4; color: %5; }"
+                "QMenu::separator { height: 1px; background: %6; margin: 4px 8px; }")
+                .arg(Theme::hex(Theme::colors().surface2))
+                .arg(Theme::hex(Theme::colors().textPrimary))
+                .arg(Theme::hex(Theme::colors().border))
+                .arg(Theme::hex(Theme::colors().accentDim))
+                .arg(Theme::hex(Theme::colors().textPrimary))
+                .arg(Theme::hex(Theme::colors().borderLight)));
+            if (isAudio) {
+                QAction* trAct = menu.addAction(QStringLiteral("\u25B6  Transcribe"));
+                menu.addSeparator();
+                QAction* relinkAct = menu.addAction(QStringLiteral("\U0001F517  Re-link..."));
+                QAction* rmAct = menu.addAction(QStringLiteral("\u2716  Remove File"));
+                menu.addSeparator();
+                QAction* expAct = menu.addAction(QStringLiteral("\U0001F4C2  Show in Explorer"));
+                QAction* ch = menu.exec(ctxEv->globalPos());
+                if (ch == trAct) {
+                    showAudioSidePanel(2);
+                    startTranscriptionForFile(static_cast<size_t>(row));
+                } else if (ch == relinkAct) {
+                    relinkAudioFile(row);
+                } else if (ch == rmAct) {
+                    removeFileFromSync(row);
+                } else if (ch == expAct) {
+                    QString fp = QString::fromStdString(m_audioPaths[static_cast<size_t>(row)]);
+                    if (QFileInfo::exists(fp))
+                        QProcess::startDetached("explorer", {"/select,", QDir::toNativeSeparators(fp)});
+                }
+            } else {
+                QAction* trAct = menu.addAction(hasTx
+                    ? QStringLiteral("\U0001F504  Re-transcribe")
+                    : QStringLiteral("\u25B6  Transcribe"));
+                QAction* clAct = hasTx ? menu.addAction(QStringLiteral("\U0001F5D1  Clear Transcription")) : nullptr;
+                menu.addSeparator();
+                QAction* rmAct = menu.addAction(QStringLiteral("\u2716  Remove File"));
+                QAction* expAct = menu.addAction(QStringLiteral("\U0001F4C2  Show in Explorer"));
+                QAction* ch = menu.exec(ctxEv->globalPos());
+                if (ch == trAct) {
+                    startTranscriptionForFile(static_cast<size_t>(row));
+                } else if (ch == clAct) {
+                    clearTranscriptionForFile(static_cast<size_t>(row));
+                } else if (ch == rmAct) {
+                    removeFileFromSync(row);
+                } else if (ch == expAct) {
+                    QString fp = QString::fromStdString(m_audioPaths[static_cast<size_t>(row)]);
+                    if (QFileInfo::exists(fp))
+                        QProcess::startDetached("explorer", {"/select,", QDir::toNativeSeparators(fp)});
+                }
+            }
+            return true;
+        }
+    }
+
     if (event->type() == QEvent::MouseButtonPress) {
         auto* me = static_cast<QMouseEvent*>(event);
         if (me->button() == Qt::LeftButton) {
@@ -517,24 +694,112 @@ void AudioSync::showEvent(QShowEvent* event)
     }
 }
 
-bool AudioSync::loadScript(const std::string& pathOrContent)
+bool AudioSync::loadScript(const std::string& pathOrContent,
+                           const std::string& sourceIdentifier)
 {
     try {
+        // Save the current session before loading a new script
+        saveCurrentSession();
+
+        // Preserve the raw text content so we can restore the script
+        // offline without re-fetching from URL on project open.
+        m_scriptRawContent = pathOrContent;
+
         auto parsed = Script::load(pathOrContent);
         if (parsed.isEmpty()) {
             spdlog::warn("AudioSync: Script is empty");
             m_scriptStatus->setText("No lines found");
+            m_pendingSessionName.clear();
             return false;
         }
+
+        // Determine session key: use sourceIdentifier if provided, else pathOrContent
+        std::string sessionKey = sourceIdentifier.empty() ? pathOrContent : sourceIdentifier;
+        if (sessionKey.empty()) sessionKey = "script_" + std::to_string(parsed.lineCount());
+
+        // If this exact source was loaded before, update the session with
+        // the new script content instead of ignoring the download.
+        if (m_scriptSessions.count(sessionKey)) {
+            spdlog::info("AudioSync: Re-loading URL '{}' — updating existing session",
+                         sessionKey);
+            m_pendingSessionName.clear();
+            updateExistingSessionScript(sessionKey,
+                std::make_unique<Script>(std::move(parsed)));
+
+            // Update UI — switchToScript returns early if same session,
+            // so refresh manually if this is the active session.
+            if (sessionKey == m_activeScriptKey) {
+                populateScriptFilter();
+                populateScriptList();
+                if (!m_clips.empty())
+                    populateClipList();
+                updateWorkflowState();
+                m_scriptStatus->setText(QString("%1 lines, %2 characters")
+                    .arg(m_script ? m_script->lineCount() : 0)
+                    .arg(m_script ? m_script->characters.size() : 0));
+                populateScriptSessionList();
+            } else {
+                switchToScript(sessionKey);
+            }
+            return true;
+        }
+
+        // Preserve script source and audio/clip state before clearing
+        // (clearCurrentSession wipes m_audioPaths, m_clips etc., which may
+        // have been restored from the project blob before the async script
+        // download finished).
+        QString savedSource = m_lastScriptSource;
+        auto savedAudioPaths = std::move(m_audioPaths);
+        auto savedAudioPath = std::move(m_audioPath);
+        auto savedClips = std::move(m_clips);
+        auto savedAudioSamples = std::move(m_audioSamples);
+        auto savedLineAudioFile = std::move(m_lineAudioFile);
+
+        clearCurrentSession();
+        m_lastScriptSource = savedSource;
+        m_activeScriptKey = sessionKey;
 
         m_script = std::make_unique<Script>(std::move(parsed));
         m_scriptLoaded = true;
 
+        // Restore audio/clip state that was saved before clearing
+        if (!savedAudioPaths.empty()) {
+            m_audioPaths = std::move(savedAudioPaths);
+            m_audioPath = std::move(savedAudioPath);
+            m_clips = std::move(savedClips);
+            m_audioSamples = std::move(savedAudioSamples);
+            m_lineAudioFile = std::move(savedLineAudioFile);
+            m_audioImported = true;
+            if (m_audioStatus)
+                m_audioStatus->setText(QString("%1 file(s)").arg(m_audioPaths.size()));
+            // Rebuild audio file list widget (cleared by clearCurrentSession)
+            if (m_audioFileList) {
+                m_audioFileList->blockSignals(true);
+                m_audioFileList->clear();
+                for (const auto& ap : m_audioPaths)
+                    addAudioFileListItem(QString::fromStdString(ap));
+                m_audioFileList->blockSignals(false);
+            }
+            // Rebuild card widgets since clearCurrentSession cleared them
+            populateScriptList();
+            populateClipList();
+        }
+
+        // Determine display name
+        auto& session = m_scriptSessions[sessionKey];
+        if (!m_pendingSessionName.empty()) {
+            // Interactive load — use user-chosen name
+            session.displayName = m_pendingSessionName;
+            m_pendingSessionName.clear();
+        } else {
+            // Restore or auto — derive from source
+            session.displayName = displayNameForScriptUrl(QString::fromStdString(sessionKey)).toStdString();
+        }
+        session.sourceUrl = sessionKey;
+
         populateScriptFilter();
         if (!m_restoring) {
             populateScriptList();
-            if (!m_clips.empty())
-                populateClipList();   // rebuild clip dropdowns with script lines
             updateWorkflowState();
         }
 
@@ -542,12 +807,16 @@ bool AudioSync::loadScript(const std::string& pathOrContent)
             .arg(m_script->lineCount())
             .arg(m_script->characters.size()));
 
-        spdlog::info("AudioSync: Loaded script with {} lines", m_script->lineCount());
+        populateScriptSessionList();
+
+        spdlog::info("AudioSync: Loaded script session '{}' with {} lines",
+                     session.displayName, m_script->lineCount());
         emit scriptLoaded(static_cast<int>(m_script->lineCount()));
         return true;
     } catch (const std::exception& e) {
         spdlog::error("AudioSync: Failed to load script: {}", e.what());
         m_scriptStatus->setText(QString("Error: %1").arg(e.what()));
+        m_pendingSessionName.clear();
         return false;
     }
 }
@@ -562,13 +831,13 @@ bool AudioSync::importAudio(const std::string& audioPath)
     if (m_audioPathEdit) m_audioPathEdit->setText(QString::fromStdString(audioPath));
     m_audioStatus->setText(QString("%1 file(s)").arg(m_audioPaths.size()));
 
+    // Load audio samples FIRST so the list item can display a waveform
+    loadAudioSamples();
+
     // Add to the audio file list widget
     if (m_audioFileList) {
         addAudioFileListItem(QString::fromStdString(audioPath));
     }
-
-    // Load audio samples for waveform display
-    loadAudioSamples();
 
     updateWorkflowState();
 

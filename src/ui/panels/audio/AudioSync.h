@@ -112,6 +112,37 @@ struct SyncClip
     std::vector<std::pair<double,double>> deletedRegions;
 };
 
+/// Loaded audio sample data (mono float, keyed by file path)
+struct AudioSampleData {
+    std::vector<float> samples;  // mono float -1..1
+    uint32_t sampleRate{44100};
+};
+
+// ─── Script session data ─────────────────────────────────────────────────────
+
+/// A stored session corresponds to one loaded script and all data attached to it.
+struct ScriptSession
+{
+    std::unique_ptr<Script>                 script;
+    std::vector<SyncClip>                   clips;
+    std::string                             audioPath;
+    std::vector<std::string>                audioPaths;
+    std::unordered_map<std::string, AudioSampleData> audioSamples;
+    bool                                    scriptLoaded{false};
+    bool                                    audioImported{false};
+    bool                                    transcriptionDone{false};
+    bool                                    syncDone{false};
+    std::string                             displayName;
+    std::string                             sourceUrl;
+    std::unordered_map<int, std::string>    lineAudioFile;
+    mutable std::unordered_map<std::string, QColor> characterColors;
+    std::vector<TranscriptionResult>        allTranscriptionResults;
+    size_t                                  currentTranscriptionIndex{0};
+    size_t                                  transcriptionRunTotal{0};
+    size_t                                  transcriptionRunCompleted{0};
+    std::vector<size_t>                     pendingTranscriptionIndices;
+};
+
 // ─── AudioSync panel ────────────────────────────────────────────────────────
 
 class AudioSync : public QWidget
@@ -136,7 +167,9 @@ public:
     // ── Workflow steps ──────────────────────────────────────────────────
 
     /// Load a script from text, file path, or URL.
-    bool loadScript(const std::string& pathOrContent);
+    /// If sourceIdentifier is provided, use it as the session key instead of pathOrContent.
+    bool loadScript(const std::string& pathOrContent,
+                    const std::string& sourceIdentifier = {});
 
     /// Import an audio file for transcription.
     bool importAudio(const std::string& audioPath);
@@ -154,6 +187,9 @@ public:
     void saveProjectState(const QString& projectName);
     void restoreProjectState(const QString& projectName);
 
+    /// Restore audio paths from QSettings (supplemental).
+    void restoreAudioPaths(const QString& projectName);
+
     /// Serialize AudioSync state to a binary blob for .rtp file storage.
     [[nodiscard]] std::vector<uint8_t> serializeToBlob() const;
 
@@ -164,6 +200,7 @@ public:
 
     [[nodiscard]] int clipCount() const { return static_cast<int>(m_clips.size()); }
     [[nodiscard]] const SyncClip& clip(int index) const { return m_clips.at(static_cast<size_t>(index)); }
+    [[nodiscard]] const std::vector<std::string>& audioPaths() const { return m_audioPaths; }
     [[nodiscard]] int scriptLineCount() const;
     [[nodiscard]] bool isScriptLoaded() const noexcept { return m_scriptLoaded; }
     [[nodiscard]] bool isAudioImported() const noexcept { return m_audioImported; }
@@ -176,6 +213,12 @@ public:
     /// Export confirmed clips to a Timeline as AudioClips (back-to-back).
     /// Ported from Python _export_timeline(). Returns number of clips exported.
     int exportToTimeline(Timeline* timeline);
+
+    /// Derive a friendly display name from a URL / file path.
+    static QString displayNameForScriptUrl(const QString& url);
+
+    /// Reset all state for a new/opened project.
+    void resetForNewProject();
 
     [[nodiscard]] QListWidget* clipListWidget() const { return m_clipList; }
     [[nodiscard]] QListWidget* scriptListWidget() const { return m_leftScriptList; }
@@ -222,10 +265,22 @@ private:
     void fetchScriptFromUrl(const QString& url);
     void loadScriptHistory();
     void addToScriptHistory(const QString& url);
+    void deleteScriptHistoryEntry(int index);
+    void renameScriptHistoryEntry(int index);
     void populateScriptFilter();       // updates character tabs
     void populateCharacterTabs();      // rebuild tabs from script
     void clearTranscriptionForFile(size_t fileIndex);
     void clearAllTranscriptions();
+    void setupScriptPage();
+    void saveCurrentSession();
+    void restoreSession(const std::string& sessionKey);
+    void switchToScript(const std::string& sessionKey);
+    void clearCurrentSession();
+    void populateScriptSessionList();
+    /// Update an existing session's script with new content while preserving
+    /// existing clips/matches by remapping scriptLineNumber via dialogue similarity.
+    void updateExistingSessionScript(const std::string& sessionKey,
+                                     std::unique_ptr<Script> newScript);
     void closeInterClipGaps();
     void downloadWhisperModel(const std::string& modelName, std::function<void(bool)> onComplete);
     void toggleSetupPanel();           // disclosure expand/collapse (legacy)
@@ -263,6 +318,9 @@ private:
     /// Re-link an audio file to a new path, preserving all sync data.
     void relinkAudioFile(int fileIdx);
 
+    /// Remove an audio file and all associated clips / transcriptions.
+    void removeFileFromSync(int fileIdx);
+
     /// Sort the audio file list by the given criterion.
     void sortAudioFileList(int criterion);  // 0=name, 1=date, 2=size
 
@@ -293,11 +351,6 @@ private:
     std::string           m_audioPath;       // Currently-transcribing audio path
     std::vector<std::string> m_audioPaths;   // All imported audio paths
 
-    // Loaded audio sample data (mono float, keyed by file path)
-    struct AudioSampleData {
-        std::vector<float> samples;  // mono float -1..1
-        uint32_t sampleRate{44100};
-    };
     std::unordered_map<std::string, AudioSampleData> m_audioSamples;
 
     // Playback state
@@ -336,6 +389,7 @@ private:
     bool m_forwardingKey{false};      // re-entrancy guard for JKL sendEvent
     QProgressDialog* m_syncProgress{nullptr}; // shown during auto-sync
     QString m_lastScriptSource;   // For project persistence
+    std::string m_scriptRawContent; // Raw text content loaded for this script (for offline restore)
     QString m_lastImportDir;      // Remembers last file dialog directory
 
     // Per-line audio file assignment: lineNumber → audio file path.
@@ -398,10 +452,17 @@ private:
     // Setup Panel (collapsible, below smart bar)
     QWidget*      m_setupPanel{nullptr};
 
+    // Script session management
+    std::unordered_map<std::string, ScriptSession> m_scriptSessions;
+    std::string m_activeScriptKey;   // key into m_scriptSessions, empty = none
+    std::string m_pendingSessionName; // name to apply on next interactive load, empty = auto-generate
+
     // Setup Panel — Script column
-    QComboBox*    m_scriptUrlCombo{nullptr};
+    QListWidget*  m_scriptSessionList{nullptr};
     QPushButton*  m_loadScriptBtn{nullptr};
     QLabel*       m_scriptStatus{nullptr};
+    QPushButton*  m_scriptFormatToggle{nullptr};
+    QFrame*       m_scriptFormatBody{nullptr};
 
     // Setup Panel — Audio column
     QPushButton*  m_importAudioBtn{nullptr};

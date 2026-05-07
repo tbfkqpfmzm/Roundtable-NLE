@@ -531,6 +531,7 @@ void TimelineWorkspace::togglePanelMaximize() {
             return;
 
         s_savedDockState = m_innerMainWindow->saveState(4);
+        m_dockStateBeforeMaximize = s_savedDockState;
         if (m_edgeSplitter)
             s_savedSplitterSizes = m_edgeSplitter->sizes();
 
@@ -949,7 +950,18 @@ QDockWidget* TimelineWorkspace::dockForPanel(const QString& panelName) const
 
 void TimelineWorkspace::saveDockLayout(QSettings& settings)
 {
-    if (m_dockLayoutManager) m_dockLayoutManager->save(settings);
+    if (!m_dockLayoutManager) return;
+
+    // If a panel is maximized, the inner QMainWindow's dock layout is broken:
+    // the maximized dock has been reparented out and all other docks hidden.
+    // Save using the pre-maximize snapshot so the restored layout is correct.
+    if (m_panelMaximized && !m_dockStateBeforeMaximize.isEmpty()) {
+        spdlog::info("saveDockLayout: panel is maximized, using pre-maximize dock state ({} bytes)",
+                     m_dockStateBeforeMaximize.size());
+        m_dockLayoutManager->save(settings, m_dockStateBeforeMaximize);
+    } else {
+        m_dockLayoutManager->save(settings);
+    }
 }
 
 bool TimelineWorkspace::restoreDockLayout(QSettings& settings)
@@ -979,6 +991,16 @@ void TimelineWorkspace::resetToDefaultDockLayout()
 void TimelineWorkspace::doResetToDefaultDockLayout()
 {
     if (!m_innerMainWindow || m_defaultDockState.isEmpty()) return;
+
+    // If a panel was maximized, reset the maximized state first so that
+    // the restore puts everything back where it belongs instead of trying
+    // to re-reparent a maximized dock out of its temporary parent.
+    if (m_panelMaximized) {
+        m_panelMaximized = false;
+        m_maximizedWidget = nullptr;
+        m_maximizedDock = nullptr;
+        m_dockStateBeforeMaximize.clear();
+    }
 
     // Destroy any edge columns in the splitter
     if (m_edgeSplitter) {
@@ -1030,8 +1052,11 @@ void TimelineWorkspace::showEvent(QShowEvent* event)
     QWidget::showEvent(event);
 
     // Apply any deferred dock layout state (from saved-layout restore).
-    if (m_dockLayoutManager)
+    // This schedules the actual restoration on the next event loop tick
+    // via QTimer::singleShot(0, ...) so the widget has settled geometry.
+    if (m_dockLayoutManager) {
         m_dockLayoutManager->applyPendingState();
+    }
 
     // If a default layout reset was deferred (because the widget was hidden
     // when resetToDefaultDockLayout() was called), apply it now that the
@@ -1041,6 +1066,53 @@ void TimelineWorkspace::showEvent(QShowEvent* event)
         spdlog::info("showEvent: applying deferred default dock layout reset");
         doResetToDefaultDockLayout();
     }
+
+    // ── Defense-in-depth: verify dock layout after any show ─────────────
+    // The timeline panel must NEVER appear maximized on startup or project
+    // open.  Several code paths can leave it maximized:
+    //
+    //   1. A saved dock state (from "project/xxx" or "last_session") was
+    //      captured while a panel was maximized — even though saveDockLayout
+    //      uses the pre-maximize state, older corrupt saves may exist.
+    //
+    //   2. restoreState() was called while the widget had no valid geometry
+    //      (deferred-restore path) and the restore produced a broken layout
+    //      where all dock widgets are invisible.
+    //
+    //   3. A prior session crashed with a maximized panel and the closeEvent
+    //      save never ran, so the stale serialised state is still on disk.
+    //
+    // We schedule deferred checks on EVERY show (not just when
+    // hadPendingState is true) and verify:
+    //   • All dock widgets are not stuck invisible.
+    //   • m_panelMaximized has been properly cleared.
+    QTimer::singleShot(0, this, [this]() {
+        // Check 1: If the maximize flag is still set, something went wrong
+        // during restore — clear it and reset to default.
+        if (m_panelMaximized) {
+            spdlog::warn("showEvent: m_panelMaximized is true after show — "
+                         "resetting to default layout");
+            doResetToDefaultDockLayout();
+            return;
+        }
+
+        // Check 2: All dock widgets should be visible (or at least some).
+        // If every single dock is invisible the timeline (central widget)
+        // fills the entire workspace — i.e. appears maximized.
+        bool anyDockVisible = false;
+        for (auto it = m_dockWidgets.constBegin();
+             it != m_dockWidgets.constEnd(); ++it) {
+            if (it.value()->isVisible()) {
+                anyDockVisible = true;
+                break;
+            }
+        }
+        if (!anyDockVisible && !m_dockWidgets.isEmpty()) {
+            spdlog::warn("showEvent: no dock widgets visible after show — "
+                         "timeline appears maximized; resetting to default layout");
+            doResetToDefaultDockLayout();
+        }
+    });
 }
 
 } // namespace rt

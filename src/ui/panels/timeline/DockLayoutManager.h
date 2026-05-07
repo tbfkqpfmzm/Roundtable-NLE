@@ -39,7 +39,11 @@ public:
     explicit DockLayoutManager(Config cfg);
 
     /// Save the dock layout into the given QSettings group.
-    void save(QSettings& settings);
+    /// If \a dockStateOverride is non-empty, use it instead of querying
+    /// innerMainWindow->saveState() — needed when a panel is maximized and
+    /// the real dock state is temporarily stored elsewhere.
+    void save(QSettings& settings,
+              const QByteArray& dockStateOverride = {});
 
     /// Restore a previously saved dock layout.  If the host widget is not
     /// yet visible, the state is stored for deferred application.

@@ -19,16 +19,20 @@
 #include <QFrame>
 #include <QGraphicsDropShadowEffect>
 #include <QHBoxLayout>
+#include <QInputDialog>
 #include <QLabel>
+#include <QLineEdit>
 #include <QParallelAnimationGroup>
 #include <QPointer>
 #include <QPropertyAnimation>
 #include <QPushButton>
 #include <QMenu>
+#include <QRegularExpression>
 #include <QScrollBar>
 #include <QTabBar>
 #include <QTextStream>
 #include <QTimer>
+#include <QUrl>
 
 #include <unordered_set>
 #include <algorithm>
@@ -37,80 +41,220 @@
 
 namespace rt {
 
+// ── Helper: derive a friendly display name from a URL / file path ────────
+QString AudioSync::displayNameForScriptUrl(const QString& url)
+{
+    // Google Docs URL: extract doc ID and use short form
+    if (url.contains("docs.google.com/document/d/")) {
+        QRegularExpression re(R"(/d/([^/\?]+))");
+        auto match = re.match(url);
+        if (match.hasMatch()) {
+            QString docId = match.captured(1);
+            if (docId.length() > 12)
+                return QString("Google Doc (%1...)").arg(docId.left(10));
+            return QString("Google Doc (%1)").arg(docId);
+        }
+    }
+
+    // Plain URL: show domain + short path
+    if (url.startsWith("http://") || url.startsWith("https://")) {
+        QUrl parsed(url);
+        QString host = parsed.host();
+        QString path = parsed.path();
+        // Remove leading slash, truncate if long
+        if (path.startsWith('/')) path = path.mid(1);
+        if (path.length() > 40) path = path.left(37) + "...";
+        if (!path.isEmpty())
+            return QString("%1/%2").arg(host, path);
+        return host;
+    }
+
+    // Local file: just the filename
+    QFileInfo fi(url);
+    if (!fi.fileName().isEmpty())
+        return fi.fileName();
+
+    // Fallback: truncate URL itself
+    if (url.length() > 50)
+        return url.left(47) + "...";
+    return url;
+}
+
+// ── Helper: extract display name and URL from a history line ──────────────
+// Format: "display_name|url"  or legacy "url" (backward compat)
+static void parseHistoryLine(const QString& line, QString& outName, QString& outUrl)
+{
+    int sep = line.indexOf('|');
+    if (sep > 0 && sep < line.size() - 1) {
+        outName = line.left(sep).trimmed();
+        outUrl  = line.mid(sep + 1).trimmed();
+    } else {
+        // Legacy — line is just the URL
+        outUrl  = line.trimmed();
+        outName = AudioSync::displayNameForScriptUrl(outUrl);
+    }
+}
+
 void AudioSync::loadScriptHistory()
 {
-    if (!m_scriptUrlCombo) return;
-
-    // Read from user data dir
-    QString historyPath = rt::userDataDir() + QStringLiteral("/script_history.txt");
-    QFile file(historyPath);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
-        return;
-
-    QStringList urls;
-    QTextStream in(&file);
-    while (!in.atEnd()) {
-        QString line = in.readLine().trimmed();
-        if (!line.isEmpty())
-            urls.append(line);
-    }
-    file.close();
-
-    m_scriptUrlCombo->blockSignals(true);
-    m_scriptUrlCombo->clear();
-    for (const auto& url : urls)
-        m_scriptUrlCombo->addItem(url);
-    m_scriptUrlCombo->setCurrentText(QString());
-    m_scriptUrlCombo->blockSignals(false);
-
-    spdlog::info("AudioSync: Loaded {} script history entries", urls.size());
+    // History is now maintained by addToScriptHistory / deleteScriptHistoryEntry
+    // for persistence of recent URLs. The old combo-box UI has been removed.
+    // Entries are stored at: <userDataDir>/script_history.txt
 }
 
 void AudioSync::addToScriptHistory(const QString& url)
 {
     if (url.isEmpty()) return;
 
-    // Read existing history
     QString historyPath = rt::userDataDir() + QStringLiteral("/script_history.txt");
-    QStringList urls;
+    QString displayName = displayNameForScriptUrl(url);
+
+    // Read existing history — store as {displayName, url} pairs
+    struct ScriptEntry {
+        QString displayName;
+        QString url;
+    };
+    std::vector<ScriptEntry> entries;
 
     QFile readFile(historyPath);
     if (readFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
         QTextStream in(&readFile);
         while (!in.atEnd()) {
             QString line = in.readLine().trimmed();
-            if (!line.isEmpty())
-                urls.append(line);
+            if (line.isEmpty()) continue;
+            ScriptEntry e;
+            parseHistoryLine(line, e.displayName, e.url);
+            entries.push_back(std::move(e));
         }
         readFile.close();
     }
 
-    // Remove duplicate, then insert at top
-    urls.removeAll(url);
-    urls.prepend(url);
+    // Remove duplicate URL, then insert at top with current display name
+    entries.erase(std::remove_if(entries.begin(), entries.end(),
+        [&](const ScriptEntry& e) { return e.url == url; }), entries.end());
+    entries.insert(entries.begin(), {displayName, url});
 
     // Limit to 20 entries
-    while (urls.size() > 20)
-        urls.removeLast();
+    while (static_cast<int>(entries.size()) > 20)
+        entries.pop_back();
 
     // Write back
     QFile writeFile(historyPath);
     if (writeFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
         QTextStream out(&writeFile);
-        for (const auto& u : urls)
-            out << u << "\n";
+        for (const auto& e : entries)
+            out << e.displayName << "|" << e.url << "\n";
         writeFile.close();
     }
 
-    // Refresh combo box
-    m_scriptUrlCombo->blockSignals(true);
-    m_scriptUrlCombo->clear();
-    for (const auto& u : urls)
-        m_scriptUrlCombo->addItem(u);
-    m_scriptUrlCombo->setCurrentText(url);
-    m_scriptUrlCombo->blockSignals(false);
+    spdlog::info("AudioSync: Added script to history (total: {})", entries.size());
+}
 
-    spdlog::info("AudioSync: Added URL to script history (total: {})", urls.size());
+void AudioSync::deleteScriptHistoryEntry(int index)
+{
+    if (index < 0) return;
+
+    QString historyPath = rt::userDataDir() + QStringLiteral("/script_history.txt");
+
+    // Read existing entries
+    struct ScriptEntry { QString displayName; QString url; };
+    std::vector<ScriptEntry> entries;
+    QFile readFile(historyPath);
+    if (readFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        QTextStream in(&readFile);
+        while (!in.atEnd()) {
+            QString line = in.readLine().trimmed();
+            if (line.isEmpty()) continue;
+            ScriptEntry e;
+            parseHistoryLine(line, e.displayName, e.url);
+            entries.push_back(std::move(e));
+        }
+        readFile.close();
+    }
+
+    if (index >= static_cast<int>(entries.size())) return;
+
+    entries.erase(entries.begin() + index);
+
+    // Write back
+    QFile writeFile(historyPath);
+    if (writeFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QTextStream out(&writeFile);
+        for (const auto& e : entries)
+            out << e.displayName << "|" << e.url << "\n";
+        writeFile.close();
+    }
+
+    spdlog::info("AudioSync: Deleted script history entry at index {}", index);
+}
+
+void AudioSync::renameScriptHistoryEntry(int index)
+{
+    if (index < 0) return;
+
+    QString historyPath = rt::userDataDir() + QStringLiteral("/script_history.txt");
+
+    // Read existing entries
+    struct ScriptEntry { QString displayName; QString url; };
+    std::vector<ScriptEntry> entries;
+    QFile readFile(historyPath);
+    if (readFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        QTextStream in(&readFile);
+        while (!in.atEnd()) {
+            QString line = in.readLine().trimmed();
+            if (line.isEmpty()) continue;
+            ScriptEntry e;
+            parseHistoryLine(line, e.displayName, e.url);
+            entries.push_back(std::move(e));
+        }
+        readFile.close();
+    }
+
+    if (index >= static_cast<int>(entries.size())) return;
+
+    QString oldName = entries[index].displayName;
+    QString url = entries[index].url;
+    if (url.isEmpty()) return;
+
+    // Ask user for new name
+    bool ok = false;
+    QString newName = QInputDialog::getText(
+        this, "Rename Script",
+        "Enter a new name for this script:",
+        QLineEdit::Normal, oldName, &ok);
+    if (!ok || newName.trimmed().isEmpty()) return;
+
+    // Rename matching entry
+    for (auto& e : entries) {
+        if (e.url == url) {
+            e.displayName = newName.trimmed();
+            break;
+        }
+    }
+
+    // Write back
+    QFile writeFile(historyPath);
+    if (writeFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QTextStream out(&writeFile);
+        for (const auto& e : entries)
+            out << e.displayName << "|" << e.url << "\n";
+        writeFile.close();
+    }
+
+    // Also update the in-memory session display name if this session is loaded
+    for (auto& [sKey, session] : m_scriptSessions) {
+        if (QString::fromStdString(sKey) == url ||
+            QString::fromStdString(session.sourceUrl) == url) {
+            session.displayName = newName.trimmed().toStdString();
+            break;
+        }
+    }
+
+    spdlog::info("AudioSync: Renamed script '{}' -> '{}'",
+                 oldName.toStdString(), newName.trimmed().toStdString());
+
+    // Refresh session list
+    populateScriptSessionList();
 }
 
 // ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢Ãƒâ€šÃ‚Â
@@ -258,6 +402,7 @@ void AudioSync::addAudioFileListItem(const QString& fullPath)
     // Build custom widget: info row + full waveform
     auto* widget = new QWidget;
     widget->setStyleSheet("background: transparent; border: none;");
+    widget->setContextMenuPolicy(Qt::PreventContextMenu);
     auto* vlay = new QVBoxLayout(widget);
     vlay->setContentsMargins(4, 4, 4, 4);
     vlay->setSpacing(4);
@@ -291,6 +436,7 @@ void AudioSync::addAudioFileListItem(const QString& fullPath)
             frameLay->setSpacing(0);
 
             auto* waveform = new MiniWaveformWidget;
+            waveform->setContextMenuPolicy(Qt::PreventContextMenu);
             waveform->setFixedHeight(40);
             waveform->setAudioShared(&sampIt2->second.samples,
                                      sampIt2->second.sampleRate, 0.0, dur);
@@ -342,6 +488,7 @@ void AudioSync::addAudioFileListItem(const QString& fullPath)
             ctrlRow->setSpacing(6);
 
             auto* playBtn = new QPushButton(QStringLiteral("\u25B6"));
+            playBtn->setContextMenuPolicy(Qt::PreventContextMenu);
             playBtn->setFixedSize(22, 22);
             playBtn->setStyleSheet(
                 QString("QPushButton { background: %1; color: %2; border: 1px solid %3; "
@@ -465,6 +612,7 @@ void AudioSync::refreshTranscribeFileList()
 
         auto* widget = new QWidget;
         widget->setStyleSheet("background: transparent; border: none;");
+        widget->setContextMenuPolicy(Qt::PreventContextMenu);
         auto* vlay = new QVBoxLayout(widget);
         vlay->setContentsMargins(4, 4, 4, 4);
         vlay->setSpacing(4);
@@ -496,6 +644,7 @@ void AudioSync::refreshTranscribeFileList()
             frameLay->setSpacing(0);
 
             auto* waveform = new MiniWaveformWidget;
+            waveform->setContextMenuPolicy(Qt::PreventContextMenu);
             waveform->setFixedHeight(40);
             waveform->setAudioShared(&sampIt->second.samples,
                                      sampIt->second.sampleRate, 0.0, dur);
@@ -542,6 +691,7 @@ void AudioSync::refreshTranscribeFileList()
             ctrlRow->setSpacing(6);
 
             auto* playBtn = new QPushButton(QStringLiteral("\u25B6"));
+            playBtn->setContextMenuPolicy(Qt::PreventContextMenu);
             playBtn->setFixedSize(22, 22);
             playBtn->setStyleSheet(
                 QString("QPushButton { background: %1; color: %2; border: 1px solid %3; "
@@ -670,6 +820,58 @@ void AudioSync::relinkAudioFile(int fileIdx)
         if (m_transcribeFileList && m_transcribeFileList->verticalScrollBar())
             m_transcribeFileList->verticalScrollBar()->setValue(transcribeScrollPos);
     });
+}
+
+void AudioSync::removeFileFromSync(int fileIdx)
+{
+    if (fileIdx < 0 || static_cast<size_t>(fileIdx) >= m_audioPaths.size()) return;
+
+    std::string removed = m_audioPaths[static_cast<size_t>(fileIdx)];
+
+    // Remove from audio paths
+    m_audioPaths.erase(m_audioPaths.begin() + fileIdx);
+    m_audioSamples.erase(removed);
+
+    // Remove transcription results for this file
+    if (fileIdx < static_cast<int>(m_allTranscriptionResults.size()))
+        m_allTranscriptionResults.erase(m_allTranscriptionResults.begin() + fileIdx);
+
+    // Remove clips from this file
+    auto it = std::remove_if(m_clips.begin(), m_clips.end(),
+        [&removed](const SyncClip& clip) { return clip.sourceFile == removed; });
+    m_clips.erase(it, m_clips.end());
+
+    // Update UI
+    refreshTranscribeFileList();
+    populateClipList();
+    populateLeftList();
+    updateWorkflowState();
+
+    // Also remove from import list
+    if (m_audioFileList) {
+        m_audioFileList->blockSignals(true);
+        for (int i = 0; i < m_audioFileList->count(); ++i) {
+            QListWidgetItem* li = m_audioFileList->item(i);
+            if (li) {
+                QString text = li->text();
+                if (text.contains(QString::fromStdString(removed)) ||
+                    li->data(Qt::UserRole).toString().contains(QString::fromStdString(removed))) {
+                    delete m_audioFileList->takeItem(i);
+                    break;
+                }
+            }
+        }
+        m_audioFileList->blockSignals(false);
+    }
+
+    m_audioStatus->setText(m_audioPaths.empty() ? "No files imported"
+        : QString("%1 file(s) imported").arg(m_audioPaths.size()));
+    if (m_audioPaths.empty()) {
+        m_audioImported = false;
+        m_audioPath.clear();
+    }
+
+    spdlog::info("AudioSync: Removed audio file '{}' from sync", removed);
 }
 
 } // namespace rt

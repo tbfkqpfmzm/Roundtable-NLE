@@ -267,6 +267,19 @@ void MainWindow::setCurrentProject(std::unique_ptr<Project> project)
                                                : std::vector<uint8_t>{};
 
     if (m_currentProject) {
+        // Reset per-project panels so old state doesn't leak into the new project.
+        // Scripts, audio, clips, and sessions from the previous project are cleared.
+        if (m_audioSync)
+            m_audioSync->resetForNewProject();
+
+        // Release all media from the old project and clear the frame cache
+        if (m_mediaPool)
+            m_mediaPool->closeAll();
+
+        // Clear undo/redo history so old commands don't apply to the new project
+        if (m_commandStack)
+            m_commandStack->clear();
+
         QString name = QString::fromStdString(m_currentProject->name());
         if (m_projectPanel)
             m_projectPanel->setCurrentProjectName(name);
@@ -314,9 +327,14 @@ void MainWindow::setCurrentProject(std::unique_ptr<Project> project)
             spdlog::info("setCurrentProject: all subsystems wired to project timeline (tracks={})",
                          projTimeline->trackCount());
 
-            // Wire project to ProjectBin for sequence management
+            // Wire project to ProjectBin for sequence management.
+            // IMPORTANT: clearAll() must come BEFORE setProject() so that
+            // syncListView() (called inside setProject) rebuilds from an
+            // empty grid, not from the previous project's stale items.
+            // Also force a tree/sync refresh in both view modes since
+            // setProject() only calls syncListView() when in list view.
             if (auto* bin = projectBin()) {
-                bin->setProject(m_currentProject.get());
+                bin->clearAll();
                 bin->setCommandStack(m_commandStack);
 
                 // Restore bin media files from saved state only.
@@ -324,7 +342,12 @@ void MainWindow::setCurrentProject(std::unique_ptr<Project> project)
                 spdlog::info("setCurrentProject: project binFiles={} binFolders={}",
                              savedFiles.size(), m_currentProject->binFolders().size());
 
-                bin->clearAll();
+                bin->setProject(m_currentProject.get());
+
+                // Force-sync both views so the tree and grid are rebuilt
+                // from the new project regardless of current view mode.
+                bin->refreshAllViews();
+
                 if (!savedFiles.empty())
                     bin->addFiles(savedFiles);
 
@@ -440,9 +463,19 @@ void MainWindow::onCreateProjectFromPanel(const QString& name, uint32_t resW, ui
     // Save it to disk — each project gets its own subfolder
     QString projDir = saveDir.isEmpty() ? projectsDirectory() : saveDir;
     QString projectFolder = projDir + "/" + name;
-    QDir().mkpath(projectFolder);
+    QDir projectDir(projectFolder);
+    if (!projectDir.exists() && !projectDir.mkpath(".")) {
+        spdlog::error("Failed to create project folder: {}",
+                      projectFolder.toStdString());
+        QMessageBox::warning(this, "Error",
+            QString("Failed to create project folder.\n"
+                    "The save location may be read-only or the path invalid:\n%1")
+                .arg(projDir));
+        return;
+    }
+    // Use wide-string conversion to preserve Unicode characters on Windows
     std::filesystem::path path =
-        (projectFolder + "/" + name + ".rtp").toStdString();
+        (projectFolder + "/" + name + ".rtp").toStdWString();
     project->setFilePath(path);
 
     ProjectSerializer serializer;
@@ -455,7 +488,10 @@ void MainWindow::onCreateProjectFromPanel(const QString& name, uint32_t resW, ui
     } else {
         spdlog::error("Failed to save new project: {}", path.string());
         QMessageBox::warning(this, "Error",
-            QString("Failed to create project '%1'").arg(name));
+            QString("Failed to save project '%1'.\n\n"
+                    "Check that the destination folder is writable and has\n"
+                    "enough free space:\n%2")
+                .arg(name, projDir));
     }
 }
 
@@ -488,7 +524,7 @@ void MainWindow::onOpenProjectFromPanel(const QString& name)
     QString projDir = projectsDirectory();
 
     std::filesystem::path path =
-        (projDir + "/" + name + "/" + name + ".rtp").toStdString();
+        (projDir + "/" + name + "/" + name + ".rtp").toStdWString();
 
     spdlog::info("OPEN: calling serializer.load for {}", path.string());
     ProjectSerializer serializer;
@@ -532,10 +568,18 @@ void MainWindow::onOpenProjectFromPanel(const QString& name)
         // over QSettings (which has no backup).
         if (m_audioSync) {
             const auto& blob = m_currentProject->audioSyncBlob();
-            if (!blob.empty())
+            spdlog::info("OPEN: AudioSync blob size={}", blob.size());
+            if (!blob.empty()) {
+                spdlog::info("OPEN: calling deserializeFromBlob");
                 m_audioSync->deserializeFromBlob(blob);
-            else
+                spdlog::info("OPEN: after deserialize — audioPaths.size={}",
+                             m_audioSync->audioPaths().size());
+            } else {
+                spdlog::info("OPEN: blob empty, calling restoreProjectState");
                 m_audioSync->restoreProjectState(name);
+            }
+        } else {
+            spdlog::warn("OPEN: m_audioSync is null — cannot restore audio state");
         }
 
         auto t3 = std::chrono::steady_clock::now();
@@ -607,7 +651,7 @@ void MainWindow::onRenameProjectFromPanel(const QString& oldName, const QString&
         if (m_currentProject &&
             QString::fromStdString(m_currentProject->name()) == oldName) {
             m_currentProject->setName(newName.toStdString());
-            m_currentProject->setFilePath(newFilePath.toStdString());
+            m_currentProject->setFilePath(newFilePath.toStdWString());
             if (m_projectPanel) m_projectPanel->setCurrentProjectName(newName);
             if (auto* bin = projectBin()) bin->setProjectName(newName);
             setWindowTitle(QString("ROUNDTABLE NLE %1 — %2").arg(ROUNDTABLE_VERSION).arg(newName));
@@ -713,8 +757,9 @@ void MainWindow::onNewProjectForMedia(const QString& filePath, int64_t /*atTick*
     // Save the project
     QString projectFolder = projDir + "/" + projName;
     QDir().mkpath(projectFolder);
+    // Use wide-string conversion to preserve Unicode characters on Windows
     std::filesystem::path path =
-        (projectFolder + "/" + projName + ".rtp").toStdString();
+        (projectFolder + "/" + projName + ".rtp").toStdWString();
     project->setFilePath(path);
 
     ProjectSerializer serializer;
@@ -741,7 +786,7 @@ void MainWindow::onOpenRecentProjectFromPanel(const QString& filePath)
     spdlog::info("Opening recent project: {}", filePath.toStdString());
 
     ProjectSerializer serializer;
-    auto project = serializer.load(filePath.toStdString());
+    auto project = serializer.load(filePath.toStdWString());
     if (project) {
         const QString loadedName = QFileInfo(filePath).baseName();
         if (project->name() != loadedName.toStdString())
@@ -750,12 +795,24 @@ void MainWindow::onOpenRecentProjectFromPanel(const QString& filePath)
         setCurrentProject(std::move(project));
         addToRecentFiles(filePath);
 
-        // Restore last active page
+        // Restore the last active page for this project (default: Audio)
         QSettings settings("ROUNDTABLE", "NLE");
         QString name = QFileInfo(filePath).baseName();
         int savedPage = settings.value("Project/" + name + "/activePage",
                                        static_cast<int>(Page::Audio)).toInt();
+        if (savedPage <= static_cast<int>(Page::Projects) ||
+            savedPage > static_cast<int>(Page::Export))
+            savedPage = static_cast<int>(Page::Audio);
         setCurrentPage(static_cast<Page>(savedPage));
+
+        // Restore audio sync state — prefer blob embedded in .rtp over QSettings
+        if (m_audioSync) {
+            const auto& blob = m_currentProject->audioSyncBlob();
+            if (!blob.empty())
+                m_audioSync->deserializeFromBlob(blob);
+            else
+                m_audioSync->restoreProjectState(name);
+        }
 
         statusBar()->showMessage("Opened: " + QFileInfo(filePath).fileName(), 3000);
     } else {
@@ -787,11 +844,11 @@ void MainWindow::onImportProject(const QString& srcPath)
     if (QFile::copy(srcPath, dstPath)) {
         // Normalize internal project metadata to the new imported name.
         ProjectSerializer serializer;
-        if (auto imported = serializer.load(dstPath.toStdString())) {
+        if (auto imported = serializer.load(dstPath.toStdWString())) {
             imported->setName(name.toStdString());
-            imported->setFilePath(dstPath.toStdString());
+            imported->setFilePath(dstPath.toStdWString());
             imported->setModified(false);
-            if (!serializer.save(*imported, dstPath.toStdString())) {
+            if (!serializer.save(*imported, dstPath.toStdWString())) {
                 spdlog::warn("Import: copied project but failed to rewrite internal name for '{}'",
                              name.toStdString());
             }
@@ -835,7 +892,7 @@ void MainWindow::onImportSrt()
         "SRT Files (*.srt);;All Files (*)");
     if (path.isEmpty()) return;
 
-    auto entries = parseSrt(std::filesystem::path(path.toStdString()));
+    auto entries = parseSrt(std::filesystem::path(path.toStdWString()));
     if (entries.empty()) {
         QMessageBox::information(this, "Import SRT", "No subtitle entries found.");
         return;
@@ -855,7 +912,7 @@ void MainWindow::onExportSrt()
         "SRT Files (*.srt)");
     if (path.isEmpty()) return;
 
-    int count = exportSrt(*m_timeline, std::filesystem::path(path.toStdString()));
+    int count = exportSrt(*m_timeline, std::filesystem::path(path.toStdWString()));
     if (count > 0)
         statusBar()->showMessage(
             QString("Exported %1 subtitle(s)").arg(count), 3000);
@@ -896,17 +953,27 @@ void MainWindow::onOpenProject()
 
     showBusyIndicator(tr("Opening project..."));
     ProjectSerializer serializer;
-    auto project = serializer.load(path.toStdString());
+    auto project = serializer.load(path.toStdWString());
     if (project) {
         const QString loadedName = QFileInfo(path).baseName();
         if (project->name() != loadedName.toStdString())
             project->setName(loadedName.toStdString());
-        project->setFilePath(path.toStdString());
+        project->setFilePath(path.toStdWString());
         setCurrentProject(std::move(project));
         if (!restoreWorkspace("project/" + loadedName))
             restoreWorkspace("last_session");
         addToRecentFiles(path);
         setCurrentPage(Page::Timeline);
+
+        // Restore audio sync state
+        if (m_audioSync) {
+            const auto& blob = m_currentProject->audioSyncBlob();
+            if (!blob.empty())
+                m_audioSync->deserializeFromBlob(blob);
+            else
+                m_audioSync->restoreProjectState(loadedName);
+        }
+
         hideBusyIndicator();
         statusBar()->showMessage("Project opened", 3000);
     } else {
@@ -960,8 +1027,13 @@ void MainWindow::onSaveProject()
     }
 
     // Capture AudioSync state into the project blob BEFORE serializing
-    if (m_audioSync)
-        m_currentProject->setAudioSyncBlob(m_audioSync->serializeToBlob());
+    if (m_audioSync) {
+        auto blob = m_audioSync->serializeToBlob();
+        spdlog::info("onSaveProject: AudioSync blob {} bytes", blob.size());
+        m_currentProject->setAudioSyncBlob(std::move(blob));
+    } else {
+        spdlog::warn("onSaveProject: m_audioSync is null");
+    }
 
     ProjectSerializer serializer;
     if (serializer.save(*m_currentProject, path)) {

@@ -69,6 +69,10 @@ add_library(roundtable_ui STATIC
     panels/audio/AudioSyncState.cpp
     panels/audio/AudioSyncFileList.cpp
     panels/audio/AudioSyncPlayback.cpp
+    panels/audio/AudioSyncPopulateCards.cpp
+    panels/audio/AudioSyncSession.cpp
+    panels/audio/AudioSyncResegmentAndManual.cpp
+    panels/audio/AudioSyncUIScriptPage.cpp
     panels/export/ExportPanel.cpp
     panels/export/ExportPanelUI.cpp
     panels/export/ExportMiniTimeline.cpp

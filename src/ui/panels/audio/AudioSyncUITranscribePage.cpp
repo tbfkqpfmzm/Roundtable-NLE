@@ -13,8 +13,11 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QDir>
+#include <QFileInfo>
 #include <QMenu>
 #include <QPainter>
+#include <QProcess>
 #include <QPointer>
 #include <QProgressBar>
 #include <QPushButton>
@@ -195,7 +198,79 @@ void AudioSync::setupTranscribePage()
         "QListWidget::item { padding: 6px 10px; border-bottom: 1px solid %4; }"
         "QListWidget::item:last { border-bottom: none; }")
         .arg(inp, inpB, radM, Theme::rgb(c.borderLight)));
-    transcribePageLayout->addWidget(m_transcribeFileList, 1);
+    m_transcribeFileList->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_transcribeFileList, &QListWidget::customContextMenuRequested,
+            this, [this](const QPoint& pos) {
+        auto* item = m_transcribeFileList->itemAt(pos);
+        if (!item) return;
+        int row = m_transcribeFileList->row(item);
+        if (row < 0 || row >= static_cast<int>(m_audioPaths.size())) return;
+
+        bool hasTranscription = (row < static_cast<int>(m_allTranscriptionResults.size()) &&
+                                 !m_allTranscriptionResults[row].segments.empty());
+
+        QMenu menu(m_transcribeFileList);
+        menu.setStyleSheet(QStringLiteral(
+            "QMenu { background: %1; color: %2; border: 1px solid %3;"
+            "  border-radius: 6px; padding: 4px; }"
+            "QMenu::item { padding: 8px 24px; border-radius: 4px; }"
+            "QMenu::item:selected { background: %4; color: %5; }"
+            "QMenu::separator { height: 1px; background: %6; margin: 4px 8px; }")
+            .arg(Theme::hex(Theme::colors().surface2))
+            .arg(Theme::hex(Theme::colors().textPrimary))
+            .arg(Theme::hex(Theme::colors().border))
+            .arg(Theme::hex(Theme::colors().accentDim))
+            .arg(Theme::hex(Theme::colors().textPrimary))
+            .arg(Theme::hex(Theme::colors().borderLight)));
+
+        QAction* transcribeAct = menu.addAction(
+            hasTranscription
+                ? QStringLiteral("\U0001F504  Re-transcribe")
+                : QStringLiteral("\u25B6  Transcribe"));
+
+        QAction* clearAct = nullptr;
+        if (hasTranscription) {
+            clearAct = menu.addAction(QStringLiteral("\U0001F5D1  Clear Transcription"));
+        }
+
+        menu.addSeparator();
+
+        QAction* removeAct = menu.addAction(QStringLiteral("\u2716  Remove File"));
+
+        QAction* showInExplorerAct = menu.addAction(QStringLiteral("\U0001F4C2  Show in Explorer"));
+
+        QAction* chosen = menu.exec(m_transcribeFileList->viewport()->mapToGlobal(pos));
+        if (chosen == transcribeAct) {
+            startTranscriptionForFile(static_cast<size_t>(row));
+        } else if (chosen == clearAct) {
+            clearTranscriptionForFile(static_cast<size_t>(row));
+        } else if (chosen == removeAct) {
+            // Remove this audio file from the transcribe list
+            std::string removed = m_audioPaths[static_cast<size_t>(row)];
+            m_audioPaths.erase(m_audioPaths.begin() + row);
+            m_audioSamples.erase(removed);
+            if (row < static_cast<int>(m_allTranscriptionResults.size()))
+                m_allTranscriptionResults.erase(m_allTranscriptionResults.begin() + row);
+            // Remove clips from this file
+            auto it = std::remove_if(m_clips.begin(), m_clips.end(),
+                [&removed](const SyncClip& clip) { return clip.sourceFile == removed; });
+            m_clips.erase(it, m_clips.end());
+            refreshTranscribeFileList();
+            populateClipList();
+            populateLeftList();
+            updateWorkflowState();
+            m_transcribeStatus->setText(QString("Removed file: %1")
+                .arg(QString::fromStdString(removed)));
+            spdlog::info("AudioSync: Removed audio file '{}' from transcribe list", removed);
+        } else if (chosen == showInExplorerAct) {
+            QString filePath = QString::fromStdString(m_audioPaths[static_cast<size_t>(row)]);
+            QFileInfo fi(filePath);
+            if (fi.exists()) {
+                QString dir = QDir::toNativeSeparators(fi.absolutePath());
+                QProcess::startDetached("explorer", {"/select,", QDir::toNativeSeparators(filePath)});
+            }
+        }
+    });
 
     // Clear transcription buttons
     auto* clearBtnLayout = new QHBoxLayout;

@@ -14,10 +14,17 @@
 #include <cmath>
 #include <vector>
 #include <QCoreApplication>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QLineEdit>
+#include <QVBoxLayout>
 #include <QDir>
 #include <functional>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QInputDialog>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -29,23 +36,156 @@ namespace rt {
 
 void AudioSync::onLoadScriptClicked()
 {
-    QString text = m_scriptUrlCombo->currentText().trimmed();
-    if (text.isEmpty()) {
-        // Open file dialog
-        text = QFileDialog::getOpenFileName(this, "Load Script",
+    // ── Build the combined popup dialog ──────────────────────────────────
+    QDialog dlg(this);
+    dlg.setWindowTitle("Load Script");
+    dlg.setFixedSize(520, 260);
+    dlg.setStyleSheet(QStringLiteral(
+        "QDialog { background: %1; }")
+        .arg(Theme::hex(Theme::colors().surface0)));
+
+    auto* layout = new QVBoxLayout(&dlg);
+    layout->setContentsMargins(24, 24, 24, 24);
+    layout->setSpacing(16);
+
+    // URL / file path field
+    auto* urlLabel = new QLabel("Script URL or file path:");
+    urlLabel->setStyleSheet(QStringLiteral(
+        "font-size: 13px; font-weight: 600; color: %1;")
+        .arg(Theme::hex(Theme::colors().textPrimary)));
+    layout->addWidget(urlLabel);
+
+    auto* urlRow = new QHBoxLayout;
+    urlRow->setSpacing(8);
+
+    auto* urlEdit = new QLineEdit;
+    urlEdit->setPlaceholderText("Google Docs URL or local file path...");
+    urlEdit->setMinimumHeight(40);
+    urlEdit->setStyleSheet(QStringLiteral(
+        "QLineEdit { background: %1; color: %2; border: 1px solid %3;"
+        "  border-radius: %4px; padding: 8px 12px; font-size: 13px; }"
+        "QLineEdit:focus { border-color: %5; }")
+        .arg(Theme::hex(Theme::colors().inputBg))
+        .arg(Theme::hex(Theme::colors().textPrimary))
+        .arg(Theme::hex(Theme::colors().inputBorder))
+        .arg(Theme::metrics().radiusSm)
+        .arg(Theme::hex(Theme::colors().accent)));
+    urlRow->addWidget(urlEdit, 1);
+
+    auto* browseBtn = new QPushButton("Browse...");
+    browseBtn->setFixedHeight(40);
+    browseBtn->setCursor(Qt::PointingHandCursor);
+    browseBtn->setStyleSheet(QStringLiteral(
+        "QPushButton { background: %1; color: %2; border: 1px solid %3;"
+        "  border-radius: %4px; padding: 8px 16px; font-size: 13px; }"
+        "QPushButton:hover { background: %5; }")
+        .arg(Theme::hex(Theme::colors().surface2))
+        .arg(Theme::hex(Theme::colors().textPrimary))
+        .arg(Theme::hex(Theme::colors().controlBorder))
+        .arg(Theme::metrics().radiusSm)
+        .arg(Theme::hex(Theme::colors().surface3)));
+    connect(browseBtn, &QPushButton::clicked, &dlg, [urlEdit]() {
+        QString path = QFileDialog::getOpenFileName(
+            nullptr, "Select Script File",
             QString(), "Script Files (*.txt *.json *.html);;All Files (*)");
-        if (text.isEmpty()) return;
-        m_scriptUrlCombo->setEditText(text);
+        if (!path.isEmpty())
+            urlEdit->setText(path);
+    });
+    urlRow->addWidget(browseBtn);
+    layout->addLayout(urlRow);
+
+    // Script name field
+    auto* nameLabel = new QLabel("Script name:");
+    nameLabel->setStyleSheet(QStringLiteral(
+        "font-size: 13px; font-weight: 600; color: %1;")
+        .arg(Theme::hex(Theme::colors().textPrimary)));
+    layout->addWidget(nameLabel);
+
+    auto* nameEdit = new QLineEdit;
+    nameEdit->setPlaceholderText("e.g. Episode 5 Scene 3");
+    nameEdit->setMinimumHeight(40);
+    nameEdit->setStyleSheet(QStringLiteral(
+        "QLineEdit { background: %1; color: %2; border: 1px solid %3;"
+        "  border-radius: %4px; padding: 8px 12px; font-size: 13px; }"
+        "QLineEdit:focus { border-color: %5; }")
+        .arg(Theme::hex(Theme::colors().inputBg))
+        .arg(Theme::hex(Theme::colors().textPrimary))
+        .arg(Theme::hex(Theme::colors().inputBorder))
+        .arg(Theme::metrics().radiusSm)
+        .arg(Theme::hex(Theme::colors().accent)));
+    layout->addWidget(nameEdit);
+
+    // Auto-fill name when URL changes
+    QObject::connect(urlEdit, &QLineEdit::textChanged, &dlg,
+        [urlEdit, nameEdit](const QString& text) {
+        if (nameEdit->text().isEmpty() || nameEdit->isModified()) {
+            // Only auto-fill if name hasn't been manually edited
+        }
+        if (!nameEdit->isModified()) {
+            QString defaultName = AudioSync::displayNameForScriptUrl(text);
+            if (!text.startsWith("http://") && !text.startsWith("https://")) {
+                QFileInfo fi(text);
+                QString stem = fi.completeBaseName();
+                if (!stem.isEmpty() && stem.length() <= 50)
+                    defaultName = stem;
+            }
+            nameEdit->setText(defaultName);
+        }
+    });
+
+    layout->addStretch();
+
+    // OK / Cancel buttons
+    auto* btnBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    btnBox->button(QDialogButtonBox::Ok)->setText("Load");
+    btnBox->button(QDialogButtonBox::Ok)->setMinimumHeight(40);
+    btnBox->button(QDialogButtonBox::Cancel)->setMinimumHeight(40);
+    btnBox->button(QDialogButtonBox::Ok)->setCursor(Qt::PointingHandCursor);
+    btnBox->button(QDialogButtonBox::Cancel)->setCursor(Qt::PointingHandCursor);
+    btnBox->setStyleSheet(QStringLiteral(
+        "QPushButton { background: %1; color: white; border: none;"
+        "  border-radius: %2px; padding: 8px 24px; font-size: 14px; font-weight: 700; }"
+        "QPushButton:hover { background: %3; }"
+        "QPushButton[text=\"Cancel\"] { background: %4; color: %5; }"
+        "QPushButton[text=\"Cancel\"]:hover { background: %6; }")
+        .arg(Theme::hex(Theme::colors().primaryBtnBg))
+        .arg(Theme::metrics().radiusSm)
+        .arg(Theme::hex(Theme::colors().primaryBtnHover))
+        .arg(Theme::hex(Theme::colors().surface2))
+        .arg(Theme::hex(Theme::colors().textPrimary))
+        .arg(Theme::hex(Theme::colors().surface3)));
+    connect(btnBox, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(btnBox, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    layout->addWidget(btnBox);
+
+    // ── Show dialog ──────────────────────────────────────────────────────
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+
+    QString urlToUse = urlEdit->text().trimmed();
+    QString chosenName = nameEdit->text().trimmed();
+
+    if (urlToUse.isEmpty()) return;
+    if (chosenName.isEmpty()) {
+        // Fall back to auto-generated name
+        chosenName = displayNameForScriptUrl(urlToUse);
+        if (!urlToUse.startsWith("http://") && !urlToUse.startsWith("https://")) {
+            QFileInfo fi(urlToUse);
+            QString stem = fi.completeBaseName();
+            if (!stem.isEmpty() && stem.length() <= 50)
+                chosenName = stem;
+        }
+        if (chosenName.isEmpty()) return;
     }
 
-    m_lastScriptSource = text;
+    m_lastScriptSource = urlToUse;
+    m_pendingSessionName = chosenName.toStdString();
 
-    // Check if it's a URL
-    if (text.startsWith("http://") || text.startsWith("https://")) {
-        addToScriptHistory(text);
-        fetchScriptFromUrl(text);
+    if (urlToUse.startsWith("http://") || urlToUse.startsWith("https://")) {
+        addToScriptHistory(urlToUse);
+        fetchScriptFromUrl(urlToUse);
     } else {
-        loadScript(text.toStdString());
+        loadScript(urlToUse.toStdString(), urlToUse.toStdString());
     }
 }
 
@@ -80,16 +220,21 @@ void AudioSync::fetchScriptFromUrl(const QString& url)
     };
     auto* state = new FetchState;
 
-    // Use std::function so the lambda can call itself recursively
-    std::function<void()> tryNextUrl;
-    tryNextUrl = [this, state, &urlsToTry, &tryNextUrl, docId, isGoogleDocs]() {
-        if (state->attemptIndex >= urlsToTry.size()) {
+    // Capture the original URL for session key purposes
+    QString originalUrl = url;
+
+    // Use a shared_ptr<std::function> so recursive async calls stay valid
+    // even after fetchScriptFromUrl returns (avoids dangling references to
+    // local variables urlsToTry and tryNextUrl).
+    auto sharedTryNextUrl = std::make_shared<std::function<void()>>();
+    *sharedTryNextUrl = [this, state, urlsToTry, sharedTryNextUrl, docId, isGoogleDocs, originalUrl]() {
+        if (state->attemptIndex >= static_cast<int>(urlsToTry.size())) {
             delete state;
             m_loadScriptBtn->setEnabled(true);
             return;
         }
 
-        QString currentUrl = urlsToTry[state->attemptIndex];
+        QString currentUrl = urlsToTry[static_cast<size_t>(state->attemptIndex)];
         spdlog::info("Fetching script (attempt {}/{}): {}", state->attemptIndex + 1,
                      urlsToTry.size(), currentUrl.toStdString());
 
@@ -102,7 +247,7 @@ void AudioSync::fetchScriptFromUrl(const QString& url)
         auto* reply = state->manager->get(request);
         reply->setProperty("attemptIndex", state->attemptIndex);
         connect(reply, &QNetworkReply::finished, this,
-                [this, reply, state, &urlsToTry, &tryNextUrl, isGoogleDocs]() {
+                [this, reply, state, urlsToTry, sharedTryNextUrl, isGoogleDocs, originalUrl]() {
             int attempt = reply->property("attemptIndex").toInt();
             reply->deleteLater();
             state->manager->deleteLater();
@@ -113,18 +258,19 @@ void AudioSync::fetchScriptFromUrl(const QString& url)
                 std::string content = data.toStdString();
                 spdlog::info("Downloaded script: {} bytes", content.size());
                 m_loadScriptBtn->setEnabled(true);
-                loadScript(content);
+                // Pass the original URL as the session key, not the raw content
+                loadScript(content, originalUrl.toStdString());
                 delete state;
                 return;
             }
 
             // Authentication error for Google Docs — try next format
             if (reply->error() == QNetworkReply::AuthenticationRequiredError &&
-                isGoogleDocs && attempt < urlsToTry.size() - 1)
+                isGoogleDocs && attempt < static_cast<int>(urlsToTry.size()) - 1)
             {
                 spdlog::warn("Google Docs export requires auth, trying next format");
                 state->attemptIndex = attempt + 1;
-                tryNextUrl();
+                (*sharedTryNextUrl)();
                 return;
             }
 
@@ -137,7 +283,7 @@ void AudioSync::fetchScriptFromUrl(const QString& url)
         });
     };
 
-    tryNextUrl();
+    (*sharedTryNextUrl)();
 }
 
 void AudioSync::onImportAudioClicked()

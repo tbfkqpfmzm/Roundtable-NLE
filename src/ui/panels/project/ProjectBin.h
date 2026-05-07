@@ -121,6 +121,10 @@ public:
     /// Clear all items from the bin.
     void clearAll();
 
+    /// Force a full refresh of both list and icon views from current state.
+    /// Call after project switch to ensure stale tree items are purged.
+    void refreshAllViews();
+
     /// Create default bin folders (1_SEQUENCES, 2_AUDIO, 3_VIDEO, 4_GFX)
     /// and auto-sort existing items into them.
     void ensureDefaultBins();

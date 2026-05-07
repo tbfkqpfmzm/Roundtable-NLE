@@ -13,6 +13,7 @@
 #include <functional>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QInputDialog>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -25,20 +26,55 @@ namespace rt {
 void AudioSync::onLoadScriptClicked()
 {
     QString text = m_scriptUrlCombo->currentText().trimmed();
-    if (text.isEmpty()) {
-        text = QFileDialog::getOpenFileName(this, "Load Script",
-            QString(), "Script Files (*.txt *.json *.html);;All Files (*)");
-        if (text.isEmpty()) return;
-        m_scriptUrlCombo->setEditText(text);
+
+    // If user selected an existing history item, use the stored URL
+    int currentIdx = m_scriptUrlCombo->currentIndex();
+    QString storedUrl;
+    if (currentIdx >= 0)
+        storedUrl = m_scriptUrlCombo->itemData(currentIdx).toString();
+
+    QString urlToUse;
+    if (!storedUrl.isEmpty() && text == m_scriptUrlCombo->itemText(currentIdx)) {
+        // User selected an existing history entry — use stored URL
+        urlToUse = storedUrl;
+    } else if (!text.isEmpty()) {
+        // User typed something new — use the text directly
+        urlToUse = text;
     }
 
-    m_lastScriptSource = text;
+    if (urlToUse.isEmpty()) {
+        urlToUse = QFileDialog::getOpenFileName(this, "Load Script",
+            QString(), "Script Files (*.txt *.json *.html);;All Files (*)");
+        if (urlToUse.isEmpty()) return;
+        m_scriptUrlCombo->setEditText(urlToUse);
+    }
 
-    if (text.startsWith("http://") || text.startsWith("https://")) {
-        addToScriptHistory(text);
-        fetchScriptFromUrl(text);
+    m_lastScriptSource = urlToUse;
+
+    // Prompt for a session name (must provide one)
+    QString defaultName = displayNameForScriptUrl(urlToUse);
+    // For local files, use the file stem (without extension) if short enough
+    if (!urlToUse.startsWith("http://") && !urlToUse.startsWith("https://")) {
+        QFileInfo fi(urlToUse);
+        QString stem = fi.completeBaseName();
+        if (!stem.isEmpty() && stem.length() <= 50)
+            defaultName = stem;
+    }
+
+    bool ok = false;
+    QString chosenName = QInputDialog::getText(
+        this, "Script Name",
+        "Enter a name for this script session:",
+        QLineEdit::Normal, defaultName, &ok);
+    if (!ok || chosenName.trimmed().isEmpty()) return;  // User cancelled or empty
+
+    m_pendingSessionName = chosenName.trimmed().toStdString();
+
+    if (urlToUse.startsWith("http://") || urlToUse.startsWith("https://")) {
+        addToScriptHistory(urlToUse);
+        fetchScriptFromUrl(urlToUse);
     } else {
-        loadScript(text.toStdString());
+        loadScript(urlToUse.toStdString(), urlToUse.toStdString());
     }
 }
 
@@ -72,8 +108,11 @@ void AudioSync::fetchScriptFromUrl(const QString& url)
     };
     auto* state = new FetchState;
 
+    // Capture the original URL for session key purposes
+    QString originalUrl = url;
+
     std::function<void()> tryNextUrl;
-    tryNextUrl = [this, state, &urlsToTry, &tryNextUrl, isGoogleDocs]() {
+    tryNextUrl = [this, state, &urlsToTry, &tryNextUrl, isGoogleDocs, originalUrl]() {
         if (state->attemptIndex >= urlsToTry.size()) {
             delete state;
             m_loadScriptBtn->setEnabled(true);
@@ -104,7 +143,8 @@ void AudioSync::fetchScriptFromUrl(const QString& url)
                 std::string content = data.toStdString();
                 spdlog::info("Downloaded script: {} bytes", content.size());
                 m_loadScriptBtn->setEnabled(true);
-                loadScript(content);
+                // Pass the original URL as the session key, not the raw content
+                loadScript(content, originalUrl.toStdString());
                 delete state;
                 return;
             }

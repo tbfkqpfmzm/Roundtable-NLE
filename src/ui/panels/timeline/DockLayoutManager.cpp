@@ -29,7 +29,8 @@ DockLayoutManager::DockLayoutManager(Config cfg)
 // ─────────────────────────────────────────────────────────────────────
 // save
 // ─────────────────────────────────────────────────────────────────────
-void DockLayoutManager::save(QSettings& settings)
+void DockLayoutManager::save(QSettings& settings,
+                              const QByteArray& dockStateOverride)
 {
     if (!m_cfg.innerMainWindow) return;
 
@@ -70,7 +71,11 @@ void DockLayoutManager::save(QSettings& settings)
         settings.setValue("edgeSplitterSizes", sizeList);
     }
 
-    QByteArray state = m_cfg.innerMainWindow->saveState(kDockStateVersion);
+    // Use the override if provided (e.g. pre-maximize dock state),
+    // otherwise capture the current state from the inner QMainWindow.
+    QByteArray state = dockStateOverride.isEmpty()
+        ? m_cfg.innerMainWindow->saveState(kDockStateVersion)
+        : dockStateOverride;
     settings.setValue("dockState", state);
     settings.setValue("edgeColumns", edgeMeta);
 
@@ -88,15 +93,22 @@ void DockLayoutManager::save(QSettings& settings)
     settings.endGroup();
 
     // ── Save list of intentionally-closed docks ──────────────────────
+    // When saving with a dockStateOverride (e.g. panel was maximized),
+    // all docks appear hidden but most were open before maximize.
+    // Skip closedDocks in that case so restoreState's own visibility
+    // settings from the override state are honoured.
     QStringList closedDocks;
-    for (auto it = m_cfg.dockWidgets->cbegin(); it != m_cfg.dockWidgets->cend(); ++it) {
-        if (it.value() && !it.value()->isVisible())
-            closedDocks << it.key();
+    if (dockStateOverride.isEmpty()) {
+        for (auto it = m_cfg.dockWidgets->cbegin(); it != m_cfg.dockWidgets->cend(); ++it) {
+            if (it.value() && !it.value()->isVisible())
+                closedDocks << it.key();
+        }
     }
     settings.setValue("closedDocks", closedDocks);
 
-    spdlog::info("TimelineWorkspace dock layout saved (v{}, {} bytes, {} edge cols, {} closed)",
-                 kDockStateVersion, state.size(), edgeMeta.size(), closedDocks.size());
+    spdlog::info("TimelineWorkspace dock layout saved (v{}, {} bytes, {} edge cols, {} closed, override={})",
+                 kDockStateVersion, state.size(), edgeMeta.size(), closedDocks.size(),
+                 dockStateOverride.isEmpty() ? "no" : "yes");
 }
 
 // ─────────────────────────────────────────────────────────────────────

@@ -83,8 +83,6 @@ void AudioSync::deserializeFromBlob(const std::vector<uint8_t>& blob)
     std::string scriptSource = r.readString();
     if (!scriptSource.empty()) {
         m_lastScriptSource = QString::fromStdString(scriptSource);
-        if (m_scriptUrlCombo)
-            m_scriptUrlCombo->setEditText(m_lastScriptSource);
 
         if (m_lastScriptSource.startsWith("http://") || m_lastScriptSource.startsWith("https://"))
             fetchScriptFromUrl(m_lastScriptSource);
@@ -171,6 +169,12 @@ void AudioSync::deserializeFromBlob(const std::vector<uint8_t>& blob)
             }
         }
     }
+
+    // Persist restored data into the current session so that the
+    // session object has the clips, audio paths, flags etc.  Without
+    // this, switching sessions or any save/restore cycle would lose
+    // the data because the session only holds what was saved into it.
+    saveCurrentSession();
 
     m_restoring = false;
 

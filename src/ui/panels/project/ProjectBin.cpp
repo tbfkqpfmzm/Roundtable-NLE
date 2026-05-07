@@ -396,6 +396,21 @@ bool ProjectBin::removeFile(const std::filesystem::path& filePath)
 void ProjectBin::clearAll()
 {
     m_grid->clearItems();
+    // Also clear the tree/list widget so stale items from a previous
+    // project don't linger even if refreshAllViews() isn't called.
+    if (m_listWidget) {
+        m_listWidget->blockSignals(true);
+        m_listWidget->clear();
+        m_listWidget->blockSignals(false);
+    }
+}
+
+void ProjectBin::refreshAllViews()
+{
+    // Force-sync both views so that stale tree items from a previous
+    // project are purged regardless of which view mode is active.
+    syncListView();
+    syncIconView();
 }
 
 void ProjectBin::selectAllItems()

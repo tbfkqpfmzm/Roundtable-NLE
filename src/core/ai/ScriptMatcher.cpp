@@ -167,6 +167,19 @@ void finalizeScript(Script& script)
 
 } // namespace
 
+/// Strip UTF-8 BOM if present.
+std::string stripBom(std::string s)
+{
+    if (s.size() >= 3 &&
+        static_cast<unsigned char>(s[0]) == 0xEF &&
+        static_cast<unsigned char>(s[1]) == 0xBB &&
+        static_cast<unsigned char>(s[2]) == 0xBF) {
+        s.erase(0, 3);
+        spdlog::debug("ScriptMatcher: Stripped UTF-8 BOM from script content");
+    }
+    return s;
+}
+
 Script Script::fromText(const std::string& text)
 {
     Script script;
@@ -177,7 +190,7 @@ Script Script::fromText(const std::string& text)
     // Segment marker pattern: **SEGMENT NAME**
     static const std::regex segmentRe(R"(^\*\*([^*]+)\*\*\s*$)");
 
-    std::istringstream stream(text);
+    std::istringstream stream(stripBom(text));
     std::string line;
 
     while (std::getline(stream, line)) {
