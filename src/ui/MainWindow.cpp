@@ -155,11 +155,13 @@ void MainWindow::onToggleFullScreen()
 
 void MainWindow::onAbout()
 {
+    QString ver = QApplication::applicationVersion();
     QMessageBox::about(this, "About ROUNDTABLE NLE",
-        "<h2>ROUNDTABLE NLE v2.0</h2>"
+        "<h2>ROUNDTABLE NLE v" + ver + "</h2>"
         "<p>GPU-accelerated Non-Linear Video Editor for Spine Animation</p>"
-        "<p>Built with C++20, Vulkan, Qt 6, and FFmpeg.</p>"
-        "<p>&copy; 2026 Roundtable</p>");
+        "<p>Created by <a href='http://youtube.com/@ExportErrorMusic/'>Export/Error Music</a></p>"
+        "<p>GitHub: <a href='https://github.com/exporterrormusic/Roundtable-NLE'>https://github.com/exporterrormusic/Roundtable-NLE</a></p>"
+        "<p>Support with donations via <a href='https://streamelements.com/exporterrormusic/tip'>StreamElements</a></p>");
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
