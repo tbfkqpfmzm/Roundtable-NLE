@@ -445,15 +445,26 @@ bool AudioSync::eventFilter(QObject* watched, QEvent* event)
 
     // ---- Right-click context menu on import / transcribe file lists -----
     {
-        QWidget* audioVp = m_audioFileList ? m_audioFileList->viewport() : nullptr;
-        QWidget* transVp = m_transcribeFileList ? m_transcribeFileList->viewport() : nullptr;
-        bool isAudio = (watched == audioVp && event->type() == QEvent::ContextMenu);
-        bool isTrans = (watched == transVp && event->type() == QEvent::ContextMenu);
-        if (isAudio || isTrans) {
-            QListWidget* list = isAudio ? m_audioFileList : m_transcribeFileList;
-            auto* ctxEv = static_cast<QContextMenuEvent*>(event);
-            QPoint pt = list->viewport()->mapFromGlobal(ctxEv->globalPos());
-            QListWidgetItem* item = list->itemAt(pt);
+        auto* ctxEv = (event->type() == QEvent::ContextMenu)
+            ? static_cast<QContextMenuEvent*>(event) : nullptr;
+        QListWidget* list = nullptr;
+        if (ctxEv && m_audioFileList) {
+            auto* w = qobject_cast<QWidget*>(watched);
+            if (w && (w == m_audioFileList || m_audioFileList->isAncestorOf(w)))
+                list = m_audioFileList;
+        }
+        if (!list && ctxEv && m_transcribeFileList) {
+            auto* w = qobject_cast<QWidget*>(watched);
+            if (w && (w == m_transcribeFileList || m_transcribeFileList->isAncestorOf(w)))
+                list = m_transcribeFileList;
+        }
+        if (list) {
+            // Map context menu position from the watched widget's coords to the list's
+            auto* w = qobject_cast<QWidget*>(watched);
+            QPoint mappedPos = (w && w != list)
+                ? list->mapFromGlobal(ctxEv->globalPos())
+                : ctxEv->pos();
+            QListWidgetItem* item = list->itemAt(mappedPos);
             if (!item) return QWidget::eventFilter(watched, event);
             int row = list->row(item);
             if (row < 0 || row >= static_cast<int>(m_audioPaths.size()))
@@ -473,7 +484,7 @@ bool AudioSync::eventFilter(QObject* watched, QEvent* event)
                 .arg(Theme::hex(Theme::colors().accentDim))
                 .arg(Theme::hex(Theme::colors().textPrimary))
                 .arg(Theme::hex(Theme::colors().borderLight)));
-            if (isAudio) {
+            if (list == m_audioFileList) {
                 QAction* trAct = menu.addAction(QStringLiteral("\u25B6  Transcribe"));
                 menu.addSeparator();
                 QAction* relinkAct = menu.addAction(QStringLiteral("\U0001F517  Re-link..."));

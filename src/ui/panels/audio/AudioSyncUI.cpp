@@ -330,17 +330,8 @@ void AudioSync::setupUi()
         "QListWidget::item:last { border-bottom: none; }"
         "QListWidget::item:selected { background: %5; }")
         .arg(inp, inpB, radM, Theme::rgb(c.borderLight), accS));
-    m_audioFileList->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(m_audioFileList, &QListWidget::customContextMenuRequested,
-            this, [this](const QPoint& pos) {
-        auto* item = m_audioFileList->itemAt(pos);
-        if (!item) return;
-        int row = m_audioFileList->row(item);
-        QMenu menu(m_audioFileList);
-        QAction* relinkAct = menu.addAction(tr("Re-link..."));
-        if (menu.exec(m_audioFileList->viewport()->mapToGlobal(pos)) == relinkAct)
-            relinkAudioFile(row);
-    });
+    m_audioFileList->installEventFilter(this);
+    m_audioFileList->setContextMenuPolicy(Qt::DefaultContextMenu);
     importPageLayout->addWidget(m_audioFileList, 1);
 
     // Remove button
@@ -536,6 +527,8 @@ void AudioSync::setupUi()
         "QListWidget::item { padding: 6px 10px; border-bottom: 1px solid %4; }"
         "QListWidget::item:last { border-bottom: none; }")
         .arg(inp, inpB, radM, Theme::rgb(c.borderLight)));
+    m_transcribeFileList->installEventFilter(this);
+    m_transcribeFileList->setContextMenuPolicy(Qt::DefaultContextMenu);
     transcribePageLayout->addWidget(m_transcribeFileList, 1);
 
     // Clear transcription buttons

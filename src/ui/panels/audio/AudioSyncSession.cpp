@@ -36,6 +36,7 @@ void AudioSync::saveCurrentSession()
     session.transcriptionRunTotal = m_transcriptionRunTotal;
     session.transcriptionRunCompleted = m_transcriptionRunCompleted;
     session.pendingTranscriptionIndices = std::move(m_pendingTranscriptionIndices);
+    session.rawContent = m_scriptRawContent;
 
     spdlog::info("AudioSync: Saved session '{}' ({} clips, {} audio files)",
                  session.displayName, session.clips.size(), session.audioPaths.size());
@@ -63,6 +64,7 @@ void AudioSync::restoreSession(const std::string& sessionKey)
     m_transcriptionRunTotal = session.transcriptionRunTotal;
     m_transcriptionRunCompleted = session.transcriptionRunCompleted;
     m_pendingTranscriptionIndices = std::move(session.pendingTranscriptionIndices);
+    m_scriptRawContent = session.rawContent;
     m_activeScriptKey = sessionKey;
 
     spdlog::info("AudioSync: Restored session '{}'", session.displayName);
@@ -319,6 +321,9 @@ void AudioSync::updateExistingSessionScript(const std::string& sessionKey,
     session.scriptLoaded = true;
     session.displayName = oldDisplayName;
     session.sourceUrl = oldSourceUrl;
+    // Refresh rawContent so the session stores the latest text for persistence.
+    // m_scriptRawContent was already set by loadScript() before calling us.
+    session.rawContent = m_scriptRawContent;
 
     // Reset sync state since line numbers may have shifted;
     // transcription results are still valid but need re-syncing

@@ -134,6 +134,7 @@ struct ScriptSession
     bool                                    syncDone{false};
     std::string                             displayName;
     std::string                             sourceUrl;
+    std::string                             rawContent;    ///< Raw script text for offline restore
     std::unordered_map<int, std::string>    lineAudioFile;
     mutable std::unordered_map<std::string, QColor> characterColors;
     std::vector<TranscriptionResult>        allTranscriptionResults;

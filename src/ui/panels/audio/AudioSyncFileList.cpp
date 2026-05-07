@@ -402,7 +402,6 @@ void AudioSync::addAudioFileListItem(const QString& fullPath)
     // Build custom widget: info row + full waveform
     auto* widget = new QWidget;
     widget->setStyleSheet("background: transparent; border: none;");
-    widget->setContextMenuPolicy(Qt::PreventContextMenu);
     auto* vlay = new QVBoxLayout(widget);
     vlay->setContentsMargins(4, 4, 4, 4);
     vlay->setSpacing(4);
@@ -612,7 +611,6 @@ void AudioSync::refreshTranscribeFileList()
 
         auto* widget = new QWidget;
         widget->setStyleSheet("background: transparent; border: none;");
-        widget->setContextMenuPolicy(Qt::PreventContextMenu);
         auto* vlay = new QVBoxLayout(widget);
         vlay->setContentsMargins(4, 4, 4, 4);
         vlay->setSpacing(4);
