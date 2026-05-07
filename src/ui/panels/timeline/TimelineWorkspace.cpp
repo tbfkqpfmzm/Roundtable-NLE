@@ -961,6 +961,25 @@ void TimelineWorkspace::resetToDefaultDockLayout()
 {
     if (!m_innerMainWindow || m_defaultDockState.isEmpty()) return;
 
+    // If the widget is not yet visible (e.g. called from applyDefaultLayout()
+    // during startup before the Timeline page is shown), defer the actual
+    // reset until showEvent so that Qt's dock widget restoreState() has a
+    // valid window to work with.  Without this deferral, docks can end up
+    // improperly positioned or hidden — manifesting as a timeline-maximized
+    // layout with all other panels invisible.
+    if (!isVisible() || width() < 100 || height() < 100) {
+        spdlog::info("resetToDefaultDockLayout: widget not visible, deferring");
+        m_pendingDefaultLayoutReset = true;
+        return;
+    }
+
+    doResetToDefaultDockLayout();
+}
+
+void TimelineWorkspace::doResetToDefaultDockLayout()
+{
+    if (!m_innerMainWindow || m_defaultDockState.isEmpty()) return;
+
     // Destroy any edge columns in the splitter
     if (m_edgeSplitter) {
         QList<QMainWindow*> edgeCols;
@@ -1009,7 +1028,19 @@ DockLayoutManager* TimelineWorkspace::dockLayoutManager() const noexcept
 void TimelineWorkspace::showEvent(QShowEvent* event)
 {
     QWidget::showEvent(event);
-    if (m_dockLayoutManager) m_dockLayoutManager->applyPendingState();
+
+    // Apply any deferred dock layout state (from saved-layout restore).
+    if (m_dockLayoutManager)
+        m_dockLayoutManager->applyPendingState();
+
+    // If a default layout reset was deferred (because the widget was hidden
+    // when resetToDefaultDockLayout() was called), apply it now that the
+    // widget has real geometry so restoreState() works correctly.
+    if (m_pendingDefaultLayoutReset) {
+        m_pendingDefaultLayoutReset = false;
+        spdlog::info("showEvent: applying deferred default dock layout reset");
+        doResetToDefaultDockLayout();
+    }
 }
 
 } // namespace rt

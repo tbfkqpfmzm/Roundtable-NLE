@@ -365,6 +365,11 @@ public:
     /// Reset the dock layout to the built-in default (Premiere Pro style).
     void resetToDefaultDockLayout();
 
+    /// Internal: perform the actual default dock layout reset.
+    /// Extracted so resetToDefaultDockLayout() can defer the work when
+    /// the widget is not yet visible.
+    void doResetToDefaultDockLayout();
+
     /// Access the dock layout manager.
     [[nodiscard]] DockLayoutManager* dockLayoutManager() const noexcept;
 
@@ -378,6 +383,10 @@ private:
     /// The initial programmatic dock state (saved after buildPanels) so
     /// "Reset to Default Layout" can fully recreate the stock arrangement.
     QByteArray m_defaultDockState;
+
+    /// True when resetToDefaultDockLayout() was called while the widget was
+    /// hidden — the actual reset is deferred until the next showEvent.
+    bool m_pendingDefaultLayoutReset{false};
 
     /// Install an EdgeColumnGuard on an edge column QMainWindow so that
     /// docks dragged out are reparented to the host and empty columns are
