@@ -79,9 +79,16 @@ std::string trim(const std::string& s)
 /// Strip HTML tags from a string, inserting newlines for block elements.
 std::string stripHtmlTags(const std::string& html)
 {
+    // Strip <style> blocks entirely (including their content) so CSS
+    // definitions don't leak into the plain text output.
+    static const std::regex styleRe("<style[^>]*>.*?</style>", std::regex::icase | std::regex::nosubs);
+    std::string result = std::regex_replace(html, styleRe, "\n");
+    // Strip <script> blocks entirely for the same reason.
+    static const std::regex scriptRe("<script[^>]*>.*?</script>", std::regex::icase | std::regex::nosubs);
+    result = std::regex_replace(result, scriptRe, "\n");
     // Insert newlines before block-level closing tags
     static const std::regex blockRe("</(?:p|div|li|tr|h[1-6]|br)[^>]*>", std::regex::icase);
-    std::string result = std::regex_replace(html, blockRe, "\n");
+    result = std::regex_replace(result, blockRe, "\n");
     // Also replace <br> and <br/> with newlines
     static const std::regex brRe("<br\\s*/?>" , std::regex::icase);
     result = std::regex_replace(result, brRe, "\n");

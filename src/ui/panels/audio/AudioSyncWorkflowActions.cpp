@@ -142,6 +142,18 @@ void AudioSync::fetchScriptFromUrl(const QString& url)
                 QByteArray data = reply->readAll();
                 std::string content = data.toStdString();
                 spdlog::info("Downloaded script: {} bytes", content.size());
+
+                // For Google Docs HTML export, extract the actual document title
+                // from the <title> tag and use it as the session display name.
+                if (isGoogleDocs) {
+                    std::string docTitle = extractHtmlTitle(content);
+                    if (!docTitle.empty()) {
+                        std::string cur = m_pendingSessionName;
+                        if (cur.find("Google Doc") != std::string::npos)
+                            m_pendingSessionName = std::move(docTitle);
+                    }
+                }
+
                 m_loadScriptBtn->setEnabled(true);
                 // Pass the original URL as the session key, not the raw content
                 loadScript(content, originalUrl.toStdString());

@@ -116,11 +116,10 @@ void AudioSync::onLoadScriptClicked()
     layout->addWidget(nameEdit);
 
     // Auto-fill name when URL changes
+    // For Google Docs URLs, also asynchronously fetch the real document title.
     QObject::connect(urlEdit, &QLineEdit::textChanged, &dlg,
-        [urlEdit, nameEdit](const QString& text) {
-        if (nameEdit->text().isEmpty() || nameEdit->isModified()) {
-            // Only auto-fill if name hasn't been manually edited
-        }
+        [urlEdit, nameEdit, &dlg](const QString& text) {
+        // Sync fallback — set placeholder name from URL
         if (!nameEdit->isModified()) {
             QString defaultName = AudioSync::displayNameForScriptUrl(text);
             if (!text.startsWith("http://") && !text.startsWith("https://")) {
@@ -131,6 +130,40 @@ void AudioSync::onLoadScriptClicked()
             }
             nameEdit->setText(defaultName);
         }
+
+        // Async — fetch the real document title for Google Docs URLs
+        QRegularExpression gdRe(R"(docs\.google\.com/document/d/([^/\?]+))");
+        auto gdMatch = gdRe.match(text);
+        if (!gdMatch.hasMatch()) return;
+        QString docId = gdMatch.captured(1);
+
+        auto* manager = new QNetworkAccessManager(&dlg);
+        QNetworkRequest request{QUrl(
+            QString("https://docs.google.com/document/d/%1/").arg(docId))};
+        request.setRawHeader("User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36");
+
+        auto* reply = manager->get(request);
+        connect(reply, &QNetworkReply::finished, &dlg,
+                [reply, manager, nameEdit]() {
+            reply->deleteLater();
+            manager->deleteLater();
+            if (reply->error() != QNetworkReply::NoError) return;
+            if (nameEdit->isModified()) return; // user already typed a name
+
+            std::string html = reply->readAll().toStdString();
+            std::string title = AudioSync::extractHtmlTitle(html);
+            if (title.empty()) return;
+
+            // Strip trailing " - Google Docs" suffix
+            static const std::string suffix = " - Google Docs";
+            auto pos = title.rfind(suffix);
+            if (pos != std::string::npos) title.resize(pos);
+            if (title.empty()) return;
+
+            nameEdit->setText(QString::fromStdString(title));
+        });
     });
 
     layout->addStretch();
@@ -200,11 +233,13 @@ void AudioSync::fetchScriptFromUrl(const QString& url)
             docId = match.captured(1);
     }
 
-    // Build a list of URLs to try in order
+    // Build a list of URLs to try in order.
+    // For Google Docs, attempt 0 is the document page itself (to extract the
+    // real document title from its <title> tag), followed by export formats.
     QStringList urlsToTry;
     if (isGoogleDocs && !docId.isEmpty()) {
-        // Try HTML export first (best for parsing), then plain text
-        urlsToTry << QString("https://docs.google.com/document/d/%1/export?format=html").arg(docId)
+        urlsToTry << QString("https://docs.google.com/document/d/%1/").arg(docId)          // title page
+                  << QString("https://docs.google.com/document/d/%1/export?format=html").arg(docId)
                   << QString("https://docs.google.com/document/d/%1/export?format=txt").arg(docId);
     } else {
         urlsToTry << url;
@@ -234,6 +269,8 @@ void AudioSync::fetchScriptFromUrl(const QString& url)
             return;
         }
 
+        bool isTitlePage = (isGoogleDocs && state->attemptIndex == 0);
+
         QString currentUrl = urlsToTry[static_cast<size_t>(state->attemptIndex)];
         spdlog::info("Fetching script (attempt {}/{}): {}", state->attemptIndex + 1,
                      urlsToTry.size(), currentUrl.toStdString());
@@ -247,7 +284,7 @@ void AudioSync::fetchScriptFromUrl(const QString& url)
         auto* reply = state->manager->get(request);
         reply->setProperty("attemptIndex", state->attemptIndex);
         connect(reply, &QNetworkReply::finished, this,
-                [this, reply, state, urlsToTry, sharedTryNextUrl, isGoogleDocs, originalUrl]() {
+                [this, reply, state, urlsToTry, sharedTryNextUrl, isGoogleDocs, originalUrl, isTitlePage]() {
             int attempt = reply->property("attemptIndex").toInt();
             reply->deleteLater();
             state->manager->deleteLater();
@@ -256,6 +293,30 @@ void AudioSync::fetchScriptFromUrl(const QString& url)
             if (reply->error() == QNetworkReply::NoError) {
                 QByteArray data = reply->readAll();
                 std::string content = data.toStdString();
+
+                // ── Title page (attempt 0 for Google Docs) ──────────────
+                // Extract the document title from the <title> tag, then
+                // advance to the next attempt to fetch the actual content.
+                if (isTitlePage) {
+                    std::string docTitle = extractHtmlTitle(content);
+                    if (!docTitle.empty()) {
+                        // Strip trailing " - Google Docs" or " - Google Docs (something)" suffix
+                        static const std::string suffix = " - Google Docs";
+                        auto pos = docTitle.rfind(suffix);
+                        if (pos != std::string::npos)
+                            docTitle.resize(pos);
+                        if (!docTitle.empty()) {
+                            std::string cur = m_pendingSessionName;
+                            if (cur.find("Google Doc") != std::string::npos)
+                                m_pendingSessionName = std::move(docTitle);
+                        }
+                    }
+                    spdlog::info("Google Docs title page fetched, advancing to content export");
+                    state->attemptIndex = attempt + 1;
+                    (*sharedTryNextUrl)();
+                    return;
+                }
+
                 spdlog::info("Downloaded script: {} bytes", content.size());
                 m_loadScriptBtn->setEnabled(true);
                 // Pass the original URL as the session key, not the raw content
@@ -268,7 +329,8 @@ void AudioSync::fetchScriptFromUrl(const QString& url)
             if (reply->error() == QNetworkReply::AuthenticationRequiredError &&
                 isGoogleDocs && attempt < static_cast<int>(urlsToTry.size()) - 1)
             {
-                spdlog::warn("Google Docs export requires auth, trying next format");
+                spdlog::warn("Google Docs {} requires auth, trying next format",
+                             isTitlePage ? "title page" : "export");
                 state->attemptIndex = attempt + 1;
                 (*sharedTryNextUrl)();
                 return;

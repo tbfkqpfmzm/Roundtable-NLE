@@ -28,6 +28,7 @@
 #include <QPushButton>
 #include <QMenu>
 #include <QRegularExpression>
+#include <regex>
 #include <QScrollBar>
 #include <QTabBar>
 #include <QTextStream>
@@ -78,6 +79,75 @@ QString AudioSync::displayNameForScriptUrl(const QString& url)
     if (url.length() > 50)
         return url.left(47) + "...";
     return url;
+}
+
+// ── Helper: extract <title> from Google Docs HTML export ──────────────────
+std::string AudioSync::extractHtmlTitle(const std::string& html)
+{
+    // Google Docs HTML export puts the document title in a <title> tag.
+    // Look for <title>...</title> and extract the content.
+    const std::string openTag = "<title>";
+    const std::string closeTag = "</title>";
+
+    auto startPos = html.find(openTag);
+    if (startPos == std::string::npos) {
+        // Try case-insensitive
+        std::string lower = html;
+        for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        startPos = lower.find(openTag);
+        if (startPos == std::string::npos) return {};
+    }
+
+    startPos += openTag.size();
+    auto endPos = html.find(closeTag, startPos);
+    if (endPos == std::string::npos) return {};
+
+    std::string title = html.substr(startPos, endPos - startPos);
+
+    // Trim whitespace
+    auto first = title.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return {};
+    auto last = title.find_last_not_of(" \t\r\n");
+    title = title.substr(first, last - first + 1);
+
+    // Decode common HTML entities
+    auto replaceAll = [](std::string& s, const std::string& what, const std::string& with) {
+        size_t pos = 0;
+        while ((pos = s.find(what, pos)) != std::string::npos) {
+            s.replace(pos, what.size(), with);
+            pos += with.size();
+        }
+    };
+    replaceAll(title, "&amp;",  "&");
+    replaceAll(title, "&nbsp;", " ");
+    replaceAll(title, "&quot;", "\"");
+    replaceAll(title, "&lt;",   "<");
+    replaceAll(title, "&gt;",   ">");
+    replaceAll(title, "&apos;", "'");
+
+    // Decode numeric references &#NNNN;
+    {
+        std::regex numericRef(R"(&#(\d+);)");
+        std::smatch m;
+        while (std::regex_search(title, m, numericRef)) {
+            int code = std::stoi(m[1].str());
+            std::string encoded;
+            if (code < 128) {
+                encoded = {static_cast<char>(code)};
+            } else if (code < 0x800) {
+                encoded = {static_cast<char>(0xC0 | (code >> 6)),
+                           static_cast<char>(0x80 | (code & 0x3F))};
+            } else {
+                encoded = {static_cast<char>(0xE0 | (code >> 12)),
+                           static_cast<char>(0x80 | ((code >> 6) & 0x3F)),
+                           static_cast<char>(0x80 | (code & 0x3F))};
+            }
+            title.replace(static_cast<size_t>(m.position()), static_cast<size_t>(m.length()), encoded);
+        }
+    }
+
+    if (title.empty()) return {};
+    return title;
 }
 
 // ── Helper: extract display name and URL from a history line ──────────────

@@ -218,6 +218,9 @@ public:
     /// Derive a friendly display name from a URL / file path.
     static QString displayNameForScriptUrl(const QString& url);
 
+    /// Extract the <title> from an HTML string (Google Docs export).
+    static std::string extractHtmlTitle(const std::string& html);
+
     /// Reset all state for a new/opened project.
     void resetForNewProject();
 
