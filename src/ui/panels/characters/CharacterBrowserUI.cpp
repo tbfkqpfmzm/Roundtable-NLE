@@ -121,6 +121,16 @@ QWidget* CharacterBrowser::createLeftPanel()
             this, &CharacterBrowser::onDownloadedOnlyToggled);
     layout->addWidget(m_downloadedOnly);
 
+    // â”€â”€ Show Hidden checkbox â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    m_showHidden = new QCheckBox(QStringLiteral("\xF0\x9F\x91\x81  Show Hidden"));
+    m_showHidden->setObjectName("FilterCheck");
+    m_showHidden->setChecked(false);
+    m_showHidden->setStyleSheet(QStringLiteral("font-size: 14px;"));
+    m_showHidden->setToolTip("Show permanently hidden characters");
+    connect(m_showHidden, &QCheckBox::toggled,
+            this, &CharacterBrowser::onShowHiddenToggled);
+    layout->addWidget(m_showHidden);
+
     // â”€â”€ Character list â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     m_characterList = new QListWidget;
     m_characterList->setObjectName("CharacterList");

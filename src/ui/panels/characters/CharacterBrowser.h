@@ -35,6 +35,7 @@
 #include <QSplitter>
 #include <QWidget>
 #include <QJsonObject>
+#include <QMap>
 
 #include <functional>
 #include <memory>
@@ -107,6 +108,7 @@ private slots:
     void onSearchChanged(const QString& text);
     void onCategoryChanged(int index);
     void onDownloadedOnlyToggled(bool checked);
+    void onShowHiddenToggled(bool checked);
     void onCharacterSelectionChanged();
     void onRefreshClicked();
     void onDownloadClicked();
@@ -138,6 +140,8 @@ private:
     void downloadFile(const QString& remotePath, const QString& localPath,
                       std::function<void(bool)> callback);
     void resolveCharacterName(const QString& charId) const;
+    void saveHiddenChars();
+    void saveRenamedDisplayNames();
 
     // State
     ModelManager* m_modelManager{nullptr};
@@ -148,6 +152,8 @@ private:
     std::set<QString> m_remoteCharIds;      // Available from Nikke DB
     std::set<QString> m_localCharNames;     // Downloaded locally
     std::set<QString> m_videoCharNames;     // Video-only characters (from shot presets)
+    std::set<QString> m_hiddenCharNames;    // Permanently hidden characters
+    QMap<QString, QString> m_renamedDisplayNames; // folderName → custom display label
     QProgressBar* m_downloadProgress{nullptr};
     std::unique_ptr<SpineEngine> m_spineEngine; // For loading skeleton data
     QJsonObject   m_cachedCharacters;           // P1: Cached metadata
@@ -159,6 +165,7 @@ private:
     QLineEdit*    m_searchField{nullptr};
     QComboBox*    m_categoryFilter{nullptr};
     QCheckBox*    m_downloadedOnly{nullptr};
+    QCheckBox*    m_showHidden{nullptr};
     QListWidget*  m_characterList{nullptr};
     QPushButton*  m_refreshBtn{nullptr};
     QPushButton*  m_downloadBtn{nullptr};

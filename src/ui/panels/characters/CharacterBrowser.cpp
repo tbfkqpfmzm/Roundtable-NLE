@@ -1,4 +1,4 @@
-/*
+﻿/*
  * CharacterBrowser.cpp â€” Character download and preview panel.
  *
  * Ported from the original Python CharacterPanel.
@@ -25,6 +25,7 @@
 #include <QGuiApplication>
 #include <QClipboard>
 #include <QHBoxLayout>
+#include <QInputDialog>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -58,8 +59,61 @@ CharacterBrowser::CharacterBrowser(QWidget* parent)
 {
     setupUI();
 
-    // F6: Restore last selected character
+    // Load permanently hidden characters from settings
     QSettings settings;
+    const QStringList hidden = settings.value("CharacterBrowser/HiddenChars").toStringList();
+    for (const auto& h : hidden)
+        m_hiddenCharNames.insert(h);
+
+    // Default display name overrides for characters with duplicate/suffixed entries
+    // (these can be overridden by the user via the Rename... context menu)
+    auto setDefaultName = [&](const QString& folderName, const QString& customName) {
+        if (!m_renamedDisplayNames.contains(folderName))
+            m_renamedDisplayNames[folderName] = customName;
+    };
+    setDefaultName("E.H. (c113)", "E.H.");
+    setDefaultName("E.H. (c940)", "E.H. (Original)");
+    setDefaultName("Freesia (c9020)", "Freesia (Pretty)");
+    setDefaultName("Freesia (c960)", "Freesia (Child)");
+    setDefaultName("Laplace (c100)", "Laplace");
+    setDefaultName("Laplace (c103)", "Laplace (Upgraded)");
+    setDefaultName("Leviathan (c562)", "Leviathan");
+    setDefaultName("Leviathan (c996)", "Leviathan (Child)");
+    setDefaultName("Drake (c101)", "Drake");
+    setDefaultName("Drake (c104)", "Drake (Upgraded)");
+    setDefaultName("Maxwell (c102)", "Maxwell");
+    setDefaultName("Maxwell (c105)", "Maxwell (Upgraded)");
+    setDefaultName("Mustang (c902)", "Mustang");
+    setDefaultName("Mustang (c9022)", "Mustang (Evil)");
+    setDefaultName("Nayuta (c223)", "Nayuta");
+    setDefaultName("Nayuta (c9008)", "Nayuta (Monk)");
+    setDefaultName("Neon (c011)", "Neon");
+    setDefaultName("Neon (c018)", "Neon: Vision Eye");
+    setDefaultName("Anis (c012)", "Anis");
+    setDefaultName("Anis (c017)", "Anis: Star");
+    setDefaultName("Anis (c9021)", "Anis: Early Days");
+    setDefaultName("Nihilister (c261)", "Nihilister");
+    setDefaultName("Nihilister (c9009)", "Nihilister (Cloak)");
+    setDefaultName("Rapi (c010)", "Rapi");
+    setDefaultName("Rapi (c989)", "Rapi: Red Hood (Original)");
+    setDefaultName("Rapi (c990)", "Rapi (Teen)");
+    setDefaultName("Rapi (c992)", "Rapi (Child)");
+    setDefaultName("Rapi (c994)", "Rapi (Mass Produced)");
+    setDefaultName("Yuni (c160)", "Yuni");
+    setDefaultName("Yuni (c985)", "Yuni (Punished)");
+
+    // Load custom display name overrides from settings
+    const int renameCount = settings.beginReadArray("CharacterBrowser/RenamedDisplayNames");
+    for (int i = 0; i < renameCount; ++i) {
+        settings.setArrayIndex(i);
+        QString folderName = settings.value("folderName").toString();
+        QString customName = settings.value("customName").toString();
+        if (!folderName.isEmpty() && !customName.isEmpty())
+            m_renamedDisplayNames[folderName] = customName;
+    }
+    settings.endArray();
+
+    // F6: Restore last selected character
     QString lastChar = settings.value("CharacterBrowser/LastSelected").toString();
     if (!lastChar.isEmpty()) {
         for (int i = 0; i < m_characterList->count(); ++i) {
@@ -323,6 +377,11 @@ void CharacterBrowser::populateCharacterList()
         }
 #endif
 
+        // Hidden filter — skip permanently hidden characters unless "Show Hidden" is checked
+        bool isHidden = m_hiddenCharNames.contains(name);
+        if (isHidden && !m_showHidden->isChecked())
+            continue;
+
         bool isLocal = m_localCharNames.contains(name);
 
         // Check if character has pre-rendered video cache
@@ -336,17 +395,23 @@ void CharacterBrowser::populateCharacterList()
         }
 #endif
 
+        // Apply custom display name override if set
+        QString effectiveDisplay = display;
+        auto renameIt = m_renamedDisplayNames.find(name);
+        if (renameIt != m_renamedDisplayNames.end())
+            effectiveDisplay = renameIt.value();
+
         // U7: Download status icon per list item
         bool isVideoOnly = m_videoCharNames.contains(name);
         QString displayText;
         if (isVideoOnly)
-            displayText = QStringLiteral("\xF0\x9F\x8E\xAC  ") + display;
+            displayText = QStringLiteral("\xF0\x9F\x8E\xAC  ") + effectiveDisplay;
         else if (isLocal && hasCachedVideo)
-            displayText = QStringLiteral("\xE2\x9C\x85  \xF0\x9F\x8E\xAC  ") + display;
+            displayText = QStringLiteral("\xE2\x9C\x85  \xF0\x9F\x8E\xAC  ") + effectiveDisplay;
         else if (isLocal)
-            displayText = QStringLiteral("\xE2\x9C\x85  ") + display;
+            displayText = QStringLiteral("\xE2\x9C\x85  ") + effectiveDisplay;
         else
-            displayText = QStringLiteral("\xE2\xAC\x87  ") + display;
+            displayText = QStringLiteral("\xE2\xAC\x87  ") + effectiveDisplay;
 
         auto* item = new QListWidgetItem(displayText, m_characterList);
 
@@ -624,6 +689,11 @@ void CharacterBrowser::onCategoryChanged(int index)
 }
 
 void CharacterBrowser::onDownloadedOnlyToggled(bool /*checked*/)
+{
+    populateCharacterList();
+}
+
+void CharacterBrowser::onShowHiddenToggled(bool /*checked*/)
 {
     populateCharacterList();
 }
@@ -933,10 +1003,28 @@ void CharacterBrowser::onTalkingChanged(bool checked)
 #endif
 }
 
-// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-// Remote / Download
-// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
+void CharacterBrowser::saveHiddenChars()
+{
+    QSettings settings;
+    QStringList hidden;
+    for (const auto& h : m_hiddenCharNames)
+        hidden.append(h);
+    settings.setValue("CharacterBrowser/HiddenChars", hidden);
+}
+
+void CharacterBrowser::saveRenamedDisplayNames()
+{
+    QSettings settings;
+    settings.beginWriteArray("CharacterBrowser/RenamedDisplayNames");
+    int i = 0;
+    for (auto it = m_renamedDisplayNames.begin(); it != m_renamedDisplayNames.end(); ++it) {
+        settings.setArrayIndex(i++);
+        settings.setValue("folderName", it.key());
+        settings.setValue("customName", it.value());
+    }
+    settings.endArray();
+}
 
 void CharacterBrowser::onContextMenu(const QPoint& pos)
 {
@@ -948,25 +1036,21 @@ void CharacterBrowser::onContextMenu(const QPoint& pos)
 
     QMenu menu(this);
 
+    bool isHidden = m_hiddenCharNames.contains(name);
+
     if (isLocal) {
         menu.addAction(QStringLiteral("\xE2\x96\xB6  Preview"), this, [this]() {
             populateControls();
         });
         menu.addSeparator();
         menu.addAction(QStringLiteral("\xF0\x9F\x93\x82  Reveal in Explorer"), this, [name]() {
-            // Resolve the character directory using the working directory,
-            // which is set to the project root in main.cpp.
             QString charDir = QDir::currentPath() + "/assets/characters/" + name;
             QDir dir(charDir);
             if (!dir.exists()) {
-                // Fallback: try findProjectRoot() in case CWD changed
                 charDir = rt::findProjectRoot() + "/assets/characters/" + name;
                 dir.setPath(charDir);
             }
-
             if (dir.exists()) {
-                // Find the first Spine/Live2D file inside the character's
-                // outfit directories to select it in Explorer.
                 QStringList patterns = {"*.skel", "*.atlas", "*.png",
                                         "*.model3.json", "*.moc3", "*.json"};
                 QDirIterator it(charDir, patterns, QDir::Files,
@@ -980,7 +1064,6 @@ void CharacterBrowser::onContextMenu(const QPoint& pos)
                 QProcess::startDetached("explorer.exe",
                     {"/select,", selectPath});
             } else {
-                // Last resort: just open the characters folder
                 QString baseDir = QDir::currentPath() + "/assets/characters";
                 if (QDir(baseDir).exists())
                     QProcess::startDetached("explorer.exe",
@@ -991,6 +1074,40 @@ void CharacterBrowser::onContextMenu(const QPoint& pos)
             QGuiApplication::clipboard()->setText(name);
         });
         menu.addSeparator();
+        if (isHidden) {
+            menu.addAction(QStringLiteral("\xF0\x9F\x91\x81  Unhide"), this, [this, name]() {
+                m_hiddenCharNames.erase(name);
+                saveHiddenChars();
+                populateCharacterList();
+            });
+        } else {
+            menu.addAction(QStringLiteral("\xF0\x9F\x9A\xAB  Hide"), this, [this, name]() {
+                m_hiddenCharNames.insert(name);
+                saveHiddenChars();
+                populateCharacterList();
+            });
+        }
+        menu.addSeparator();
+        menu.addAction(QStringLiteral("\xF0\x9F\x93\x9D  Rename..."), this, [this, name]() {
+            QString currentName = name;
+            auto it = m_renamedDisplayNames.find(name);
+            if (it != m_renamedDisplayNames.end())
+                currentName = it.value();
+            bool ok = false;
+            QString newName = QInputDialog::getText(this, "Rename Character",
+                "New display name:", QLineEdit::Normal, currentName, &ok);
+            if (ok && !newName.isEmpty() && newName != currentName) {
+                m_renamedDisplayNames[name] = newName;
+                saveRenamedDisplayNames();
+                populateCharacterList();
+            } else if (ok && newName.isEmpty()) {
+                // Clear custom name (revert to default)
+                m_renamedDisplayNames.remove(name);
+                saveRenamedDisplayNames();
+                populateCharacterList();
+            }
+        });
+        menu.addSeparator();
         menu.addAction(QStringLiteral("\xF0\x9F\x97\x91  Delete"), this,
                        &CharacterBrowser::onDeleteClicked);
     } else {
@@ -999,14 +1116,43 @@ void CharacterBrowser::onContextMenu(const QPoint& pos)
         menu.addAction(QStringLiteral("\xF0\x9F\x93\x8B  Copy Name"), this, [name]() {
             QGuiApplication::clipboard()->setText(name);
         });
+        menu.addSeparator();
+        if (isHidden) {
+            menu.addAction(QStringLiteral("\xF0\x9F\x91\x81  Unhide"), this, [this, name]() {
+                m_hiddenCharNames.erase(name);
+                saveHiddenChars();
+                populateCharacterList();
+            });
+        } else {
+            menu.addAction(QStringLiteral("\xF0\x9F\x9A\xAB  Hide"), this, [this, name]() {
+                m_hiddenCharNames.insert(name);
+                saveHiddenChars();
+                populateCharacterList();
+            });
+        }
+        menu.addSeparator();
+        menu.addAction(QStringLiteral("\xF0\x9F\x93\x9D  Rename..."), this, [this, name]() {
+            QString currentName = name;
+            auto it = m_renamedDisplayNames.find(name);
+            if (it != m_renamedDisplayNames.end())
+                currentName = it.value();
+            bool ok = false;
+            QString newName = QInputDialog::getText(this, "Rename Character",
+                "New display name:", QLineEdit::Normal, currentName, &ok);
+            if (ok && !newName.isEmpty() && newName != currentName) {
+                m_renamedDisplayNames[name] = newName;
+                saveRenamedDisplayNames();
+                populateCharacterList();
+            } else if (ok && newName.isEmpty()) {
+                m_renamedDisplayNames.remove(name);
+                saveRenamedDisplayNames();
+                populateCharacterList();
+            }
+        });
     }
 
     menu.exec(m_characterList->mapToGlobal(pos));
 }
-
-// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-// Keyboard shortcuts (F3)
-// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 void CharacterBrowser::keyPressEvent(QKeyEvent* event)
 {
@@ -1031,7 +1177,6 @@ void CharacterBrowser::keyPressEvent(QKeyEvent* event)
             return;
         }
         if (event->key() == Qt::Key_A) {
-            // Select all downloaded characters
             m_characterList->clearSelection();
             for (int i = 0; i < m_characterList->count(); ++i) {
                 auto* item = m_characterList->item(i);
