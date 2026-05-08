@@ -1,4 +1,4 @@
-/*
+﻿/*
  * TimelineWorkspacePanels.cpp - Panel creation and dock layout for TimelineWorkspace.
  * Split from TimelineWorkspace.cpp for maintainability.
  */
@@ -17,7 +17,7 @@
 
 // Panels
 #include "panels/audio/AudioMixer.h"
-// ShotPanel removed � merged into PropertiesPanel
+// ShotPanel removed ï¿½ merged into PropertiesPanel
 #include "panels/characters/CharactersPanel.h"
 #include "panels/library/LibraryPanel.h"
 #include "panels/effects/EffectsPanel.h"
@@ -234,11 +234,11 @@ void TimelineWorkspace::buildPanels()
                     if (!ownerWidget) return;
                     // The HWND must be either the dock itself, a
                     // QDockWidgetGroupWindow, or a direct floating
-                    // container � never the QMainWindow application.
+                    // container ï¿½ never the QMainWindow application.
                     if (qobject_cast<QMainWindow*>(ownerWidget)
                         && !qobject_cast<QDockWidget*>(ownerWidget)
                         && ownerWidget->objectName() != QStringLiteral("EdgeColumn")) {
-                        return; // this is the app's main window � skip
+                        return; // this is the app's main window ï¿½ skip
                     }
 
                     LONG style = GetWindowLong(hwnd, GWL_STYLE);
@@ -248,7 +248,7 @@ void TimelineWorkspace::buildPanels()
                     SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
                                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER
                                  | SWP_FRAMECHANGED);
-                    // Force Qt to re-evaluate nativeWindowDeco � updating
+                    // Force Qt to re-evaluate nativeWindowDeco ï¿½ updating
                     // the internal layout shows the custom titleBarWidget.
                     if (auto* dw = qobject_cast<QDockWidget*>(ownerWidget)) {
                         // Toggle features to force QDockWidgetLayout refresh
@@ -276,6 +276,14 @@ void TimelineWorkspace::buildPanels()
         m_projectBin->setMediaPool(m_mediaPool);
     if (m_mediaSourceService)
         m_projectBin->setMediaSourceService(m_mediaSourceService);
+    // Auto-create a default project when user creates a sequence with no project open.
+    // Ownership is transferred to MainWindow via autoProjectCreated signal.
+    connect(m_projectBin, &ProjectBin::projectCreated,
+            this, [this](Project* project) {
+        m_projectBin->setProject(project);
+        setProject(project);
+        emit autoProjectCreated(project);
+    });
     auto* dockProjectBin = makeDock("Project Bin", m_projectBin);
 
     // -- Source Monitor ---------------------------------------------------
@@ -416,7 +424,7 @@ void TimelineWorkspace::buildPanels()
         for (auto& entry : fs::directory_iterator(dir, ec)) {
             if (!entry.is_regular_file()) continue;
             std::string stem = entry.path().stem().string();
-            // Skip talk variants � they're the same animation with mouth open
+            // Skip talk variants ï¿½ they're the same animation with mouth open
             if (stem.size() > 5 && stem.substr(stem.size() - 5) == "_talk")
                 continue;
             names.push_back(stem);
@@ -438,7 +446,7 @@ void TimelineWorkspace::buildPanels()
     m_ColorGradingPanel = new ColorGradingPanel(this);
     if (m_commandStack) m_ColorGradingPanel->setCommandStack(m_commandStack);
     if (m_timeline) m_ColorGradingPanel->setTimeline(m_timeline);
-    auto* dockLumetriColor = makeDock("Color Correction", m_ColorGradingPanel);
+    auto* dockColorGrading = makeDock("Color Correction", m_ColorGradingPanel);
 
     // -- Effects ----------------------------------------------------------
     m_effectsPanel = new EffectsPanel(this);
@@ -595,7 +603,7 @@ void TimelineWorkspace::buildPanels()
 
     auto* btnZoom = new ToolButton(ToolButton::Zoom);
     btnZoom->setFixedSize(40, 34);
-    btnZoom->setToolTip(QStringLiteral("Zoom Tool (Z) â€” Click: Zoom In, Alt+Click: Zoom Out"));
+    btnZoom->setToolTip(QStringLiteral("Zoom Tool (Z) Ã¢â‚¬â€ Click: Zoom In, Alt+Click: Zoom Out"));
 
     // Helper to add a thin horizontal separator line between tool buttons
     auto addToolSep = [&]() {
@@ -643,7 +651,7 @@ void TimelineWorkspace::buildPanels()
     centerLayout->setContentsMargins(0, 0, 0, 0);
     centerLayout->setSpacing(0);
 
-    // â”€â”€ Sequence tab bar row (top line) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Sequence tab bar row (top line) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     m_sequenceTabBar = new QTabBar;
     m_sequenceTabBar->setTabsClosable(true);
     m_sequenceTabBar->setExpanding(false);
@@ -672,7 +680,7 @@ void TimelineWorkspace::buildPanels()
         emit sequenceTabChanged(static_cast<size_t>(index));
     });
 
-    // Close tab (Premiere Pro style � don't allow closing the last sequence)
+    // Close tab (Premiere Pro style ï¿½ don't allow closing the last sequence)
     connect(m_sequenceTabBar, &QTabBar::tabCloseRequested, this, [this](int index) {
         if (!m_project || m_project->sequenceCount() <= 1) return;
         emit sequenceTabClosed(static_cast<size_t>(index));
@@ -703,7 +711,7 @@ void TimelineWorkspace::buildPanels()
 
     centerLayout->addWidget(m_sequenceTabBar);
 
-    // â”€â”€ Timeline toolbar row (Premiere Pro style) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Timeline toolbar row (Premiere Pro style) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // Layout: [Timecode] | [Nest] [Snap] [Linked] [Marker] [Settings] [CC] | [spacer] | [-] [zoom slider] [+]
     auto* toolbar = new QWidget;
     toolbar->setFixedHeight(30);
@@ -747,7 +755,7 @@ void TimelineWorkspace::buildPanels()
 
     // 1) Insert or overwrite sequences as nests or individual clips
     auto* btnNest = new QToolButton;
-    btnNest->setText(QStringLiteral("\u29C9"));  // â§‰ (nested squares)
+    btnNest->setText(QStringLiteral("\u29C9"));  // Ã¢Â§â€° (nested squares)
     btnNest->setToolTip(tr("Insert or overwrite sequences as nests or individual clips"));
     btnNest->setCheckable(true);
     btnNest->setStyleSheet(tbIconStyle);
@@ -755,7 +763,7 @@ void TimelineWorkspace::buildPanels()
 
     // 2) Snap in Timeline (magnet)
     auto* btnSnap = new QToolButton;
-    btnSnap->setText(QStringLiteral("\U0001F9F2"));  // ðŸ§² magnet
+    btnSnap->setText(QStringLiteral("\U0001F9F2"));  // Ã°Å¸Â§Â² magnet
     btnSnap->setToolTip(tr("Snap in Timeline (N)"));
     btnSnap->setCheckable(true);
     btnSnap->setChecked(true);
@@ -764,7 +772,7 @@ void TimelineWorkspace::buildPanels()
 
     // 3) Linked Selection (chain link)
     auto* btnLinked = new QToolButton;
-    btnLinked->setText(QStringLiteral("\U0001F517"));  // ðŸ”— link
+    btnLinked->setText(QStringLiteral("\U0001F517"));  // Ã°Å¸â€â€” link
     btnLinked->setToolTip(tr("Linked Selection"));
     btnLinked->setCheckable(true);
     btnLinked->setChecked(true);
@@ -773,7 +781,7 @@ void TimelineWorkspace::buildPanels()
 
     // 4) Add Marker
     auto* btnMarker = new QToolButton;
-    btnMarker->setText(QStringLiteral("\u2666"));  // â™¦ diamond
+    btnMarker->setText(QStringLiteral("\u2666"));  // Ã¢â„¢Â¦ diamond
     btnMarker->setToolTip(tr("Add Marker (M)"));
     btnMarker->setStyleSheet(tbIconStyle);
     toolbarLayout->addWidget(btnMarker);
@@ -927,8 +935,8 @@ void TimelineWorkspace::buildPanels()
 
     // Tab the remaining panels onto Effect Controls dock area
     m_innerMainWindow->tabifyDockWidget(dockEffectControls, dockEssentialGraphics);
-    m_innerMainWindow->tabifyDockWidget(dockEssentialGraphics, dockLumetriColor);
-    m_innerMainWindow->tabifyDockWidget(dockLumetriColor, dockEffects);
+    m_innerMainWindow->tabifyDockWidget(dockEssentialGraphics, dockColorGrading);
+    m_innerMainWindow->tabifyDockWidget(dockColorGrading, dockEffects);
     m_innerMainWindow->tabifyDockWidget(dockEffects, dockHistory);
     m_innerMainWindow->tabifyDockWidget(dockHistory, dockAudioMixer);
     m_innerMainWindow->tabifyDockWidget(dockAudioMixer, dockScopes);
@@ -954,7 +962,7 @@ void TimelineWorkspace::buildPanels()
 
     // -- Full-height edge docking (Premiere Pro style) --------------------
     // Wrap the inner QMainWindow in a horizontal QSplitter so that edge-
-    // docked panels become splitter children � naturally full height.
+    // docked panels become splitter children ï¿½ naturally full height.
     // DockEdgeDragWatcher creates EdgeColumnPanels in the splitter on drop.
     m_edgeSplitter = new QSplitter(Qt::Horizontal, this);
     m_edgeSplitter->setHandleWidth(2);
@@ -1041,7 +1049,7 @@ void TimelineWorkspace::buildPanels()
             // seekTo() already repositions the clock and audio atomically.
             // Calling scrub() during Playing would set the audio transport
             // to Scrubbing?Paused, killing audio output while video
-            // continues via wall-clock extrapolation � causing desync.
+            // continues via wall-clock extrapolation ï¿½ causing desync.
             if (m_audioEngine && !m_playbackController->isPlaying()) {
                 // Convert timeline ticks (48000/sec) to audio sample frames
                 const uint32_t sr = m_audioEngine->sampleRate();
@@ -1083,7 +1091,7 @@ void TimelineWorkspace::buildPanels()
             }
         });
 
-        // ProgramMonitor MiniTimeline in/out point changes â†’ Timeline
+        // ProgramMonitor MiniTimeline in/out point changes Ã¢â€ â€™ Timeline
         connect(m_programMonitor->miniTimeline(), &MiniTimeline::inPointChanged,
                 this, [this](int64_t tick) {
             if (m_timeline) {
@@ -1105,7 +1113,7 @@ void TimelineWorkspace::buildPanels()
             }
         });
 
-        // I/O key presses inside ProgramMonitor â†’ set in/out on timeline
+        // I/O key presses inside ProgramMonitor Ã¢â€ â€™ set in/out on timeline
         connect(m_programMonitor, &ProgramMonitor::inPointRequested,
                 this, [this]() {
             if (m_timeline && m_playbackController) {
@@ -1251,7 +1259,7 @@ void TimelineWorkspace::buildPanels()
 
     // Home / End: go to start / end of timeline
     // These are QShortcuts (not keyPressEvent) so they work when any
-    // child widget has focus � e.g. after clicking the ruler.
+    // child widget has focus ï¿½ e.g. after clicking the ruler.
     addShortcut(Qt::Key_Home, [this]() {
         auto* fw = QApplication::focusWidget();
         if (qobject_cast<QLineEdit*>(fw)) return;  // don't steal from text fields
@@ -1290,7 +1298,7 @@ void TimelineWorkspace::buildPanels()
     addShortcut(Qt::CTRL | Qt::SHIFT | Qt::Key_V, [this]() {
         if (m_timelinePanel) m_timelinePanel->showPasteAttributesDialog();
     });
-    // Ctrl+Shift+C: Paste Insert (Premiere Pro-style — push clips right)
+    // Ctrl+Shift+C: Paste Insert (Premiere Pro-style â€” push clips right)
     addShortcut(Qt::CTRL | Qt::SHIFT | Qt::Key_C, [this]() {
         if (m_timeline && m_timelinePanel && m_commandStack && !m_timelinePanel->clipboard().empty()) {
             auto cmd = EditOperations::pasteInsert(

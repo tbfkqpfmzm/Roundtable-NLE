@@ -395,7 +395,6 @@ void ProjectBin::syncIconView()
 void ProjectBin::refreshSequences()
 {
     if (m_listView) {
-        ensureDefaultBins();
         syncListView();
     }
 }

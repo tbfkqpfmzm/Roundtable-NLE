@@ -712,6 +712,28 @@ void MainWindow::buildPanels()
     connect(m_timelineWorkspace, &TimelineWorkspace::requestNewProjectForMedia,
             this, &MainWindow::onNewProjectForMedia);
 
+    // ── Wire auto-created project from sequence creation ────────────────
+    connect(m_timelineWorkspace, &TimelineWorkspace::autoProjectCreated,
+            this, [this](Project* project) {
+        // MainWindow takes ownership of the auto-created project
+        m_currentProject.reset(project);
+        m_lastSavedAudioSyncBlob = {};
+        if (m_currentProject->timeline()) {
+            m_timeline = m_currentProject->timeline();
+            if (m_timelineWorkspace)
+                m_timelineWorkspace->setTimeline(m_timeline);
+            if (m_playbackController)
+                m_playbackController->setTimeline(m_timeline);
+            if (m_exportPanel)
+                m_exportPanel->setTimeline(m_timeline);
+        }
+        QString name = QString::fromStdString(m_currentProject->name());
+        setWindowTitle(QString("ROUNDTABLE NLE %1 \u2014 %2")
+                       .arg(ROUNDTABLE_VERSION).arg(name));
+        if (auto* bin = projectBin())
+            bin->setProjectName(name);
+    });
+
     // ── Page 4: EXPORT ──────────────────────────────────────────────────
     m_exportPanel = new ExportPanel(this);
     if (m_timeline) m_exportPanel->setTimeline(m_timeline);
@@ -1105,11 +1127,17 @@ void MainWindow::applyDefaultLayout()
 
     QByteArray geo = settings.value("geometry").toByteArray();
     bool savedCollapsed = settings.value("navCollapsed", false).toBool();
+    int savedPage = static_cast<int>(Page::Projects); // default to Projects if no saved state
     if (!geo.isEmpty()) {
         restoreGeometry(geo);
         // Restore dock layout while still inside the workspace group
         if (m_timelineWorkspace)
             m_timelineWorkspace->restoreDockLayout(settings);
+        // Restore the last active page so the user returns to where they left off.
+        savedPage = settings.value("activePage",
+                                    static_cast<int>(Page::Projects)).toInt();
+        if (savedPage < 0 || savedPage > static_cast<int>(Page::Export))
+            savedPage = static_cast<int>(Page::Projects);
     }
 
     settings.endGroup();
@@ -1132,7 +1160,7 @@ void MainWindow::applyDefaultLayout()
             m_timelineWorkspace->resetToDefaultDockLayout();
     }
 
-    setCurrentPage(Page::Projects);
+    setCurrentPage(static_cast<Page>(savedPage));
 
     // Defer sidebar collapse until after the window is shown and laid out.
     // toggleNavRail() measures button positions (m_navButtons[1]->y() -
@@ -1167,7 +1195,6 @@ bool MainWindow::restoreWorkspace(const QString& name)
     settings.beginGroup("workspace/" + name);
 
     QByteArray geo = settings.value("geometry").toByteArray();
-    // activePage saved but always restored to PROJECTS tab below
 
     if (geo.isEmpty()) {
         settings.endGroup();
@@ -1176,8 +1203,12 @@ bool MainWindow::restoreWorkspace(const QString& name)
     }
 
     restoreGeometry(geo);
-    // Always start on the Projects page regardless of last session state
-    setCurrentPage(Page::Projects);
+    // Restore the last active page so the user returns to where they left off.
+    int savedPage = settings.value("activePage",
+                                    static_cast<int>(Page::Projects)).toInt();
+    if (savedPage < 0 || savedPage > static_cast<int>(Page::Export))
+        savedPage = static_cast<int>(Page::Projects);
+    setCurrentPage(static_cast<Page>(savedPage));
 
     // Restore sidebar collapsed/expanded state
     bool savedCollapsed = settings.value("navCollapsed", false).toBool();

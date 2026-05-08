@@ -39,6 +39,7 @@
 #include <QStyledItemDelegate>
 #include <QTreeWidgetItem>
 #include <QImage>
+#include <QRegularExpression>
 
 #include <map>
 #include <set>
@@ -1480,17 +1481,20 @@ void ProjectBin::revealByPath(const QString& filePath)
 
 void ProjectBin::createNewSequence()
 {
-    if (!m_project) return;
-
+    // Show dialog FIRST — no project is created until user confirms
     SequenceDialog dlg(this);
     dlg.setWindowTitle(tr("New Sequence"));
-    // Pre-fill with project's current resolution/fps as defaults
-    dlg.setMediaProperties(
-        m_project->settings().resolution().width,
-        m_project->settings().resolution().height,
-        m_project->settings().frameRate());
-    // Pre-fill the name
-    dlg.setSequenceName(QString::fromStdString(m_project->nextSequenceName()));
+
+    if (m_project) {
+        dlg.setMediaProperties(
+            m_project->settings().resolution().width,
+            m_project->settings().resolution().height,
+            m_project->settings().frameRate());
+        dlg.setSequenceName(QString::fromStdString(m_project->nextSequenceName()));
+    } else {
+        dlg.setMediaProperties(1920, 1080, 30.0);
+        dlg.setSequenceName(QStringLiteral("Sequence 1"));
+    }
 
     if (dlg.exec() != QDialog::Accepted)
         return;
@@ -1499,34 +1503,107 @@ void ProjectBin::createNewSequence()
     uint32_t w = dlg.width();
     uint32_t h = dlg.height();
     double fps = dlg.frameRate();
-
-    // Update project settings to match the chosen sequence properties
-    m_project->settings().setResolution(w, h);
-    m_project->settings().setFrameRate(fps);
-
     std::string name = seqName.toStdString();
-    if (m_commandStack) {
-        size_t newIdx = m_project->sequenceCount();
-        m_commandStack->execute(std::make_unique<LambdaCommand>(
-            "Add Sequence '" + name + "'",
-            [this, name, newIdx]() {
-                m_project->addSequence(name);
-                syncListView();
-                emit sequencesChanged();
-                // Auto-switch to the new sequence
-                emit sequenceOpened(newIdx);
-            },
-            [this, newIdx]() {
-                m_project->removeSequence(newIdx);
-                syncListView();
-                emit sequencesChanged();
-            }));
-    } else {
-        m_project->addSequence(name);
-        syncListView();
+
+    // Auto-create project if none exists, with the chosen settings
+    if (!m_project) {
+        auto* newProj = new Project();
+        newProj->setName("Untitled");
+        newProj->settings().setResolution(w, h);
+        newProj->settings().setFrameRate(fps);
+        // Name the default sequence what the user chose
+        if (newProj->sequenceCount() > 0 && newProj->sequence(0))
+            newProj->sequence(0)->setName(name);
+        emit projectCreated(newProj);
+        if (!m_project) { delete newProj; return; }
+        // Bin already reflects the project — just signal the sequence
         emit sequencesChanged();
-        emit sequenceOpened(m_project->sequenceCount() - 1);
+        emit sequenceOpened(0);
+    } else {
+        // Existing project: update settings and add a new sequence
+        m_project->settings().setResolution(w, h);
+        m_project->settings().setFrameRate(fps);
+        if (m_commandStack) {
+            size_t newIdx = m_project->sequenceCount();
+            m_commandStack->execute(std::make_unique<LambdaCommand>(
+                "Add Sequence '" + name + "'",
+                [this, name, newIdx]() {
+                    m_project->addSequence(name);
+                    syncListView();
+                    emit sequencesChanged();
+                    emit sequenceOpened(newIdx);
+                },
+                [this, newIdx]() {
+                    m_project->removeSequence(newIdx);
+                    syncListView();
+                    emit sequencesChanged();
+                }));
+        } else {
+            m_project->addSequence(name);
+            syncListView();
+            emit sequencesChanged();
+            emit sequenceOpened(m_project->sequenceCount() - 1);
+        }
     }
+}
+
+// -----------------------------------------------------------------------------
+//  Color Matte (Premiere Pro-style)
+// -----------------------------------------------------------------------------
+
+void ProjectBin::createColorMatte()
+{
+    // 1. Pick a color
+    QColor color = QColorDialog::getColor(Qt::white, this,
+                                          tr("Choose Color Matte Color"),
+                                          QColorDialog::ShowAlphaChannel);
+    if (!color.isValid())
+        return;
+
+    // 2. Ask for a name
+    bool ok = false;
+    QString name = QInputDialog::getText(this, tr("New Color Matte"),
+                                         tr("Matte name:"),
+                                         QLineEdit::Normal,
+                                         QStringLiteral("Color Matte"), &ok);
+    name = name.trimmed();
+    if (!ok || name.isEmpty())
+        return;
+
+    // 3. Determine output directory
+    std::filesystem::path matteDir;
+    if (m_project && !m_project->filePath().empty()) {
+        // Place alongside the project file
+        matteDir = m_project->filePath().parent_path() / "Mattes";
+    } else {
+        // Fallback to user data directory
+        matteDir = std::filesystem::path(userDataDir().toStdString()) / "Mattes";
+    }
+    std::filesystem::create_directories(matteDir);
+
+    // 4. Generate a unique filename
+    QString safeName = name;
+    safeName.replace(QRegularExpression(R"([<>:"/\\|?*])"), QStringLiteral("_"));
+    std::filesystem::path mattePath = matteDir / (safeName.toStdString() + ".png");
+    {
+        int counter = 1;
+        while (std::filesystem::exists(mattePath)) {
+            mattePath = matteDir / (safeName.toStdString() + "_" + std::to_string(counter++) + ".png");
+        }
+    }
+
+    // 5. Create the solid-color PNG (1920x1080 like Premiere's default)
+    QImage matteImage(1920, 1080, QImage::Format_ARGB32_Premultiplied);
+    matteImage.fill(color);
+    if (!matteImage.save(QString::fromStdString(mattePath.string()), "PNG")) {
+        spdlog::error("Failed to save color matte: {}", mattePath.string());
+        QMessageBox::warning(this, tr("Error"),
+                             tr("Failed to save color matte image."));
+        return;
+    }
+
+    // 6. Import the generated matte into the project bin
+    addFiles({mattePath});
 }
 
 void ProjectBin::createSequenceFromMedia(const std::filesystem::path& filePath)

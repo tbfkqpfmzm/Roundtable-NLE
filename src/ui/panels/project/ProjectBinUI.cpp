@@ -331,9 +331,26 @@ void ProjectBin::setupUI()
         menu.addAction("Import Media...", this, &ProjectBin::importFiles);
         menu.addAction("New Bin", this, &ProjectBin::createNewBin);
         menu.addSeparator();
-        menu.addAction("New Sequence", this, [this]() {
-            createNewSequence();
-        });
+        QMenu* newItemMenu = menu.addMenu("New Item");
+        newItemMenu->setStyleSheet(QStringLiteral(
+            "QMenu { background: %1; color: %2; border: 1px solid %3; }"
+            "QMenu::item:selected { background: %4; }")
+            .arg(Theme::hex(Theme::colors().surface2))
+            .arg(Theme::hex(Theme::colors().textPrimary))
+            .arg(Theme::hex(Theme::colors().border))
+            .arg(Theme::hex(Theme::colors().accent)));
+        {
+            auto* act = newItemMenu->addAction("Sequence");
+            QObject::connect(act, &QAction::triggered, this, [this]() {
+                createNewSequence();
+            });
+        }
+        {
+            auto* act = newItemMenu->addAction("Color Matte...");
+            QObject::connect(act, &QAction::triggered, this, [this]() {
+                createColorMatte();
+            });
+        }
         auto* selected = m_listWidget->itemAt(pos);
         if (selected) {
             // Rename (works for sequences, bins, and media items)
@@ -625,6 +642,28 @@ void ProjectBin::setupUI()
             .arg(Theme::hex(Theme::colors().textPrimary))
             .arg(Theme::hex(Theme::colors().border))
             .arg(Theme::hex(Theme::colors().accent)));
+
+        QMenu* newItemMenu = menu.addMenu("New Item");
+        newItemMenu->setStyleSheet(QStringLiteral(
+            "QMenu { background: %1; color: %2; border: 1px solid %3; }"
+            "QMenu::item:selected { background: %4; }")
+            .arg(Theme::hex(Theme::colors().surface2))
+            .arg(Theme::hex(Theme::colors().textPrimary))
+            .arg(Theme::hex(Theme::colors().border))
+            .arg(Theme::hex(Theme::colors().accent)));
+        {
+            auto* act = newItemMenu->addAction("Sequence");
+            QObject::connect(act, &QAction::triggered, this, [this]() {
+                createNewSequence();
+            });
+        }
+        {
+            auto* act = newItemMenu->addAction("Color Matte...");
+            QObject::connect(act, &QAction::triggered, this, [this]() {
+                createColorMatte();
+            });
+        }
+        menu.addSeparator();
 
         // Check if this is a sequence item (folder-named items that match a sequence)
         bool isSequence = false;

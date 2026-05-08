@@ -162,8 +162,19 @@ Timeline* Project::duplicateSequence(size_t srcIndex)
 
 bool Project::removeSequence(size_t index)
 {
-    if (m_sequences.size() <= 1 || index >= m_sequences.size())
+    if (m_sequences.empty() || index >= m_sequences.size())
         return false;
+
+    // If this is the last sequence, replace it with a fresh default instead of
+    // leaving the project with zero sequences (which would break the UI).
+    if (m_sequences.size() == 1) {
+        m_sequences[0] = std::make_unique<Timeline>();
+        m_sequences[0]->setName(nextSequenceName());
+        m_activeSequence = 0;
+        m_modified = true;
+        spdlog::info("Project: replaced last sequence with new empty sequence");
+        return true;
+    }
 
     std::string name = m_sequences[index]->name();
     m_sequences.erase(m_sequences.begin() + static_cast<ptrdiff_t>(index));

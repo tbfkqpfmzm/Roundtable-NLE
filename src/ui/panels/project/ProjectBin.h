@@ -183,6 +183,10 @@ public:
     /// Create a sequence from a dropped media file, matching its resolution/fps.
     void createSequenceFromMedia(const std::filesystem::path& filePath);
 
+    /// Create a solid-color matte image (like Premiere Pro's Color Matte).
+    /// Prompts for color and name, generates a PNG, and imports it.
+    void createColorMatte();
+
     // ── Size hints ──────────────────────────────────────────────────────
 
     QSize sizeHint() const override;
@@ -213,6 +217,10 @@ signals:
 
     /// Emitted when user wants to nest a sequence on the active timeline.
     void nestSequenceRequested(size_t sequenceIndex, const QString& sequenceName);
+
+    /// Emitted when a project needs to be created (e.g. creating a sequence
+    /// with no project open). The receiver takes ownership of the Project*.
+    void projectCreated(class Project* project);
 
 private slots:
     void onFilterChanged(int index);

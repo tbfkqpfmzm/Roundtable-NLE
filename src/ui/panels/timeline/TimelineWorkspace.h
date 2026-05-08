@@ -196,6 +196,11 @@ signals:
     void requestNewProjectForMedia(const QString& filePath, int64_t atTick,
                                    size_t trackIndex);
 
+    /// Emitted when a default project was auto-created (e.g. user created a
+    /// sequence with no project open). The receiver should call setCurrentProject
+    /// to take ownership.
+    void autoProjectCreated(class Project* project);
+
 protected:
     void keyPressEvent(QKeyEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
