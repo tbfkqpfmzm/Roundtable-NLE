@@ -60,7 +60,7 @@ inline const char* effectTypeName(EffectType t) noexcept
     case EffectType::LUT:          return "LUT";
     case EffectType::Letterbox:    return "Letterbox";
     case EffectType::ColorGrading: return "Color Grading";
-    case EffectType::LumetriColor: return "Color Grading";
+    case EffectType::LumetriColor: return "Color Grading (legacy)";
     case EffectType::OtsLeft:      return "OTS LEFT";
     case EffectType::OtsRight:     return "OTS RIGHT";
     case EffectType::FillLeftWithRight: return "Fill Left with Right";

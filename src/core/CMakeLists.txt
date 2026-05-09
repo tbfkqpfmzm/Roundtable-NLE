@@ -81,6 +81,7 @@ add_library(roundtable_core STATIC
     # Media (alpha encoding for pre-rendered animation cache)
     media/VP9AlphaEncoder.cpp
     media/HWAlphaEncoder.cpp
+    media/ChromaKeyEncoder.cpp
     media/ProResEncoder.cpp
 
     # Effects
@@ -90,7 +91,6 @@ add_library(roundtable_core STATIC
     effects/Transform2D.cpp
     effects/LUT.cpp
     effects/ColorGrading.cpp
-    effects/LumetriColor.cpp
     effects/Ots.cpp
     effects/SimpleEffects.cpp
 

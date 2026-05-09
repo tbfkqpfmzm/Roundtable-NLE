@@ -36,7 +36,7 @@ namespace rt {
 
 /// Configuration for a single pre-render job
 /// Encoder format preference for pre-render jobs
-enum class PrerenderFormat : uint8_t { Auto, HEVCPackedAlpha, ProRes4444 };
+enum class PrerenderFormat : uint8_t { Auto, GreenScreen, BlueScreen, CustomColor, HEVCPackedAlpha, ProRes4444 };
 
 struct PrerenderJob
 {
@@ -49,7 +49,10 @@ struct PrerenderJob
     float                 paddingFactor{0.9f}; ///< Viewport padding (0.9 = 10% margin)
     bool                  isTalking{false};    ///< Render with talk animation blended
     PrerenderFormat       format{PrerenderFormat::Auto}; ///< Encoder format preference
-};
+    // Chroma key background colour (used for GreenScreen/BlueScreen/CustomColor formats)
+    uint8_t               chromaKeyR{0};
+    uint8_t               chromaKeyG{255};
+    uint8_t               chromaKeyB{0};};
 
 /// Result of a pre-render job
 struct PrerenderResult

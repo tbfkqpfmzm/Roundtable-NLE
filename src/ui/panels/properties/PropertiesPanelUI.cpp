@@ -476,6 +476,17 @@ void PropertiesPanel::setupTransformSection(QWidget* container)
     container->layout()->addWidget(m_transformSection);
 }
 
+bool PropertiesPanel::eventFilter(QObject* obj, QEvent* event)
+{
+    if (event->type() == QEvent::Wheel) {
+        // Suppress wheel events on combo boxes to prevent accidental
+        // character/outfit/stance/animation changes when scrolling content.
+        if (qobject_cast<QComboBox*>(obj))
+            return true;
+    }
+    return QWidget::eventFilter(obj, event);
+}
+
 void PropertiesPanel::setupCharacterSection(QWidget* container)
 {
     const auto& m = Theme::metrics();
@@ -489,6 +500,7 @@ void PropertiesPanel::setupCharacterSection(QWidget* container)
     m_characterCombo->setToolTip(tr("Select the character for this clip"));
     m_characterCombo->setEditable(false);
     m_characterCombo->setMinimumWidth(150);
+    m_characterCombo->installEventFilter(this);
     connect(m_characterCombo, &QComboBox::currentTextChanged,
             this, [this](const QString&) {
                 if (m_updating) return;
@@ -503,6 +515,7 @@ void PropertiesPanel::setupCharacterSection(QWidget* container)
     m_outfitCombo = new QComboBox(m_characterSection);
     m_outfitCombo->setToolTip(tr("Select the character outfit"));
     m_outfitCombo->setEditable(false);
+    m_outfitCombo->installEventFilter(this);
     connect(m_outfitCombo, &QComboBox::currentTextChanged,
             this, [this](const QString&) {
                 if (m_updating) return;
@@ -516,6 +529,7 @@ void PropertiesPanel::setupCharacterSection(QWidget* container)
     m_stanceCombo = new QComboBox(m_characterSection);
     m_stanceCombo->setToolTip(tr("Select the character stance / pose"));
     m_stanceCombo->addItem("Default");
+    m_stanceCombo->installEventFilter(this);
     connect(m_stanceCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int) {
                 if (m_updating) return;
@@ -539,6 +553,7 @@ void PropertiesPanel::setupAnimationSection(QWidget* container)
     m_animationCombo = new QComboBox(m_animationSection);
     m_animationCombo->setToolTip(tr("Select a Spine animation to play"));
     m_animationCombo->setEditable(false);
+    m_animationCombo->installEventFilter(this);
     connect(m_animationCombo, &QComboBox::currentTextChanged,
             this, [this](const QString&) {
                 if (m_updating) return;

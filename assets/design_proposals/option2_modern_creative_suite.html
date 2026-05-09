@@ -1,0 +1,769 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>COMPOSE Redesign — Option 2: Modern Creative Suite</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #12121c;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    color: #e0e0e0;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  h1 { font-size: 22px; margin-bottom: 4px; color: #fff; }
+  .subtitle { color: #777; margin-bottom: 20px; font-size: 13px; }
+
+  .mockup {
+    width: 1360px;
+    height: 820px;
+    background: #16161f;
+    border-radius: 16px;
+    display: flex;
+    overflow: hidden;
+    box-shadow: 0 24px 80px rgba(0,0,0,0.7);
+    position: relative;
+  }
+
+  /* ═══════════ NARROW ICON RAIL ═══════════ */
+  .rail {
+    width: 56px;
+    background: #13131c;
+    border-right: 1px solid #22223a;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 16px 0;
+    gap: 0;
+  }
+  .rail-btn {
+    width: 40px; height: 40px;
+    border-radius: 10px;
+    border: none;
+    background: transparent;
+    color: #555;
+    font-size: 18px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s;
+    margin: 2px 0;
+  }
+  .rail-btn:hover { background: #22223a; color: #888; }
+  .rail-btn.active { background: #3d3d6b; color: #8b8bf8; }
+  .rail-btn .label { display: none; }
+
+  /* ═══════════ SMART PANEL (CHARACTER FILTER + SHOTS merged) ═══════════ */
+  .smart-panel {
+    width: 320px;
+    background: #181828;
+    border-right: 1px solid #22223a;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* Unified toolbar */
+  .panel-toolbar {
+    display: flex;
+    align-items: center;
+    padding: 10px 12px;
+    gap: 8px;
+    border-bottom: 1px solid #22223a;
+  }
+  .panel-toolbar .brand {
+    font-size: 14px;
+    font-weight: 800;
+    letter-spacing: 0.5px;
+    color: #8b8bf8;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .panel-toolbar .search-box {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    background: #10101a;
+    border: 1px solid #22223a;
+    border-radius: 20px;
+    padding: 0 10px;
+    gap: 6px;
+  }
+  .panel-toolbar .search-box input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    color: #ccc;
+    font-size: 12px;
+    padding: 6px 0;
+    outline: none;
+  }
+  .panel-toolbar .search-box input::placeholder { color: #444; }
+  .panel-toolbar .search-box .icon { color: #555; font-size: 12px; }
+
+  /* Filter pills (horizontal scroll) */
+  .filter-bar {
+    display: flex;
+    gap: 4px;
+    padding: 8px 12px;
+    overflow-x: auto;
+    border-bottom: 1px solid #22223a;
+    align-items: center;
+  }
+  .filter-bar::-webkit-scrollbar { height: 2px; }
+  .filter-bar::-webkit-scrollbar-thumb { background: #333; border-radius: 1px; }
+
+  .pill {
+    flex-shrink: 0;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 0 10px;
+    border-radius: 14px;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1.5px solid #22223a;
+    background: #10101a;
+    color: #777;
+    transition: all 0.12s;
+    white-space: nowrap;
+  }
+  .pill:hover { border-color: #444; color: #999; }
+  .pill.active {
+    background: #3d3d6b;
+    border-color: #8b8bf8;
+    color: #e0e0ff;
+  }
+  .pill .thumb {
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    background: #22223a;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+  .pill .count {
+    font-size: 9px;
+    color: #555;
+    background: #1a1a2e;
+    border-radius: 6px;
+    padding: 0 5px;
+    min-width: 14px;
+    text-align: center;
+  }
+
+  /* Split view: shots on top, character filter on bottom */
+  .panel-split {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  /* ── Shots section (top half) ── */
+  .shots-section {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border-bottom: 1px solid #22223a;
+  }
+  .shots-section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 12px;
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 1px;
+    color: #555;
+    text-transform: uppercase;
+  }
+  .shots-section-header .actions {
+    display: flex;
+    gap: 4px;
+  }
+  .shots-section-header .actions button {
+    background: transparent;
+    border: none;
+    color: #555;
+    font-size: 14px;
+    cursor: pointer;
+    width: 22px; height: 22px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .shots-section-header .actions button:hover { background: #22223a; color: #888; }
+
+  .shot-cards {
+    flex: 1;
+    overflow-y: auto;
+    padding: 4px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .shot-cards::-webkit-scrollbar { width: 3px; }
+  .shot-cards::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+
+  .shot-card {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.12s;
+    border: 1.5px solid transparent;
+    background: #1a1a2e;
+  }
+  .shot-card:hover { background: #22223a; }
+  .shot-card.active {
+    background: #2a2a48;
+    border-color: #8b8bf8;
+    box-shadow: 0 0 12px rgba(139,139,248,0.08);
+  }
+  .shot-card .thumb {
+    width: 64px; height: 36px;
+    border-radius: 5px;
+    background: #22223a;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+  }
+  .shot-card .meta { flex: 1; min-width: 0; }
+  .shot-card .meta .name { font-size: 12px; font-weight: 600; color: #ddd; }
+  .shot-card .meta .sub {
+    font-size: 10px;
+    color: #555;
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .shot-card .meta .sub .dot {
+    width: 3px; height: 3px;
+    background: #444;
+    border-radius: 50%;
+  }
+  .shot-card .badge {
+    font-size: 9px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: #2a2a3e;
+    color: #777;
+    flex-shrink: 0;
+  }
+  .shot-card .badge.wells { background: #2a2a4a; color: #8b8bf8; }
+  .shot-card .badge.modernia { background: #3a2a3a; color: #f08b8b; }
+
+  /* ── Character filter section (bottom half) ── */
+  .char-section {
+    flex: 0 0 auto;
+    max-height: 40%;
+    min-height: 80px;
+    display: flex;
+    flex-direction: column;
+  }
+  .char-section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 12px;
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 1px;
+    color: #555;
+    text-transform: uppercase;
+  }
+  .char-grid {
+    flex: 1;
+    overflow-x: hidden;
+    overflow-y: auto;
+    padding: 2px 8px 8px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(70px, 1fr));
+    gap: 4px;
+  }
+  .char-grid::-webkit-scrollbar { width: 3px; }
+  .char-grid::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+
+  .char-tile {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 6px 2px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.12s;
+    border: 2px solid transparent;
+    background: #1a1a2e;
+    text-align: center;
+  }
+  .char-tile:hover { background: #22223a; }
+  .char-tile.active { border-color: #8b8bf8; background: #2a2a48; }
+  .char-tile .avatar {
+    width: 44px; height: 44px;
+    border-radius: 50%;
+    background: #22223a;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 22px;
+  }
+  .char-tile .cname { font-size: 9px; color: #888; font-weight: 600; }
+  .char-tile .ccount { font-size: 8px; color: #555; }
+
+  /* ═══════════ MAIN CONTENT ═══════════ */
+  .content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background: #16161f;
+    min-width: 0;
+  }
+
+  /* Top bar */
+  .top-bar {
+    display: flex;
+    align-items: center;
+    padding: 8px 14px;
+    border-bottom: 1px solid #22223a;
+    gap: 10px;
+    background: #181828;
+  }
+  .top-bar .label {
+    font-size: 11px;
+    font-weight: 700;
+    color: #666;
+    letter-spacing: 1px;
+  }
+  .top-bar .shot-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: #ddd;
+    margin-left: 4px;
+  }
+  .top-bar .spacer { flex: 1; }
+
+  .top-bar .status-badge {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background: #1a2a1a;
+    color: #6a6;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 10px;
+    border-radius: 10px;
+    border: 1px solid #2a3a2a;
+  }
+  .top-bar .status-badge .dot {
+    width: 6px; height: 6px;
+    background: #6a6;
+    border-radius: 50%;
+  }
+
+  .top-bar .btn-group { display: flex; gap: 4px; }
+  .top-bar .btn-group button {
+    background: transparent;
+    border: 1px solid #22223a;
+    border-radius: 6px;
+    color: #666;
+    padding: 4px 10px;
+    font-size: 10px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.12s;
+  }
+  .top-bar .btn-group button:hover { background: #22223a; color: #999; }
+  .top-bar .btn-group button.primary { background: #8b8bf8; color: #fff; border-color: #8b8bf8; }
+  .top-bar .btn-group button.primary:hover { background: #7a7ae0; }
+  .top-bar .btn-group button.danger { color: #e06666; border-color: #3a2020; }
+  .top-bar .btn-group button.danger:hover { background: #3a2020; }
+
+  /* Preview */
+  .preview-area {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #101018;
+    position: relative;
+    min-height: 0;
+  }
+  .preview-frame {
+    width: 75%;
+    aspect-ratio: 16/9;
+    max-height: 88%;
+    background: #0a0a12;
+    border-radius: 8px;
+    border: 1px solid #22223a;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 48px;
+    color: #222;
+    position: relative;
+    overflow: hidden;
+  }
+  .preview-frame .overlay-info {
+    position: absolute;
+    bottom: 10px;
+    left: 12px;
+    font-size: 10px;
+    color: #444;
+    display: flex;
+    gap: 12px;
+  }
+
+  /* Bottom toolbar + library */
+  .bottom-area {
+    height: 170px;
+    border-top: 1px solid #22223a;
+    display: flex;
+    flex-direction: column;
+    background: #181828;
+  }
+  .bottom-tabs {
+    display: flex;
+    padding: 0 12px;
+    background: #13131c;
+    border-bottom: 1px solid #22223a;
+  }
+  .bottom-tab {
+    padding: 6px 14px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #555;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    transition: all 0.12s;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .bottom-tab:hover { color: #888; }
+  .bottom-tab.active { color: #8b8bf8; border-bottom-color: #8b8bf8; }
+  .bottom-tab .cnt { font-size: 9px; color: #555; font-weight: 400; }
+
+  .bottom-grid {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    overflow-x: auto;
+  }
+  .bottom-grid::-webkit-scrollbar { height: 3px; }
+  .bottom-grid::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+
+  .asset-item {
+    width: 72px;
+    flex-shrink: 0;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.12s;
+    border-radius: 8px;
+    padding: 4px;
+  }
+  .asset-item:hover { background: #22223a; }
+  .asset-item .preview {
+    width: 64px; height: 64px;
+    border-radius: 6px;
+    background: #22223a;
+    margin: 0 auto 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 24px;
+  }
+  .asset-item .alabel { font-size: 9px; color: #777; }
+
+  /* ═══════════ RIGHT CONTEXT PANEL ═══════════ */
+  .context-panel {
+    width: 48px;
+    background: #13131c;
+    border-left: 1px solid #22223a;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 12px 0;
+    gap: 4px;
+  }
+  .context-btn {
+    width: 34px; height: 34px;
+    border-radius: 8px;
+    border: none;
+    background: transparent;
+    color: #555;
+    font-size: 14px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.12s;
+  }
+  .context-btn:hover { background: #22223a; color: #888; }
+  .context-btn.active { background: #3d3d6b; color: #8b8bf8; }
+
+  /* Global scrollbar */
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+</style>
+</head>
+<body>
+<div style="text-align:center; width:1360px;">
+  <h1>🎬 Option 2: Modern Creative Suite</h1>
+  <p class="subtitle">Slim icon rail, pill-based filters, split-panel browsing — clean &amp; contemporary</p>
+</div>
+
+<div class="mockup">
+
+  <!-- ═══ NARROW RAIL ═══ -->
+  <div class="rail">
+    <div class="rail-btn"><span>📚</span></div>
+    <div class="rail-btn"><span>🔄</span></div>
+    <div class="rail-btn active"><span>🎬</span></div>
+    <div class="rail-btn"><span>⚙</span></div>
+    <div style="flex:1"></div>
+    <div class="rail-btn" style="margin-top:auto; font-size:14px;">👤</div>
+  </div>
+
+  <!-- ═══ SMART PANEL ═══ -->
+  <div class="smart-panel">
+
+    <!-- Unified toolbar -->
+    <div class="panel-toolbar">
+      <div class="brand">🎬 COMPOSE</div>
+      <div class="search-box">
+        <span class="icon">🔍</span>
+        <input type="text" placeholder="Search shots or characters…" value="Wells">
+      </div>
+    </div>
+
+    <!-- Filter pills -->
+    <div class="filter-bar">
+      <span class="pill active">
+        <span class="thumb">⊞</span> All <span class="count">24</span>
+      </span>
+      <span class="pill">
+        <span class="thumb">⊟</span> Unassigned <span class="count">3</span>
+      </span>
+      <span class="pill active" style="background:#2a2a4a; border-color:#8b8bf8;">
+        <span class="thumb">🧑</span> Wells <span class="count">12</span>
+      </span>
+      <span class="pill">
+        <span class="thumb">👩</span> Modernia <span class="count">8</span>
+      </span>
+      <span class="pill">
+        <span class="thumb">👧</span> Rapi <span class="count">5</span>
+      </span>
+      <span class="pill">
+        <span class="thumb">👸</span> Dorothy <span class="count">4</span>
+      </span>
+      <span class="pill">
+        <span class="thumb">🧔</span> Anis <span class="count">3</span>
+      </span>
+      <span class="pill">
+        <span class="thumb">👱</span> Neon <span class="count">2</span>
+      </span>
+    </div>
+
+    <!-- Split: shots above, characters below -->
+    <div class="panel-split">
+
+      <!-- ═══ SHOTS ═══ -->
+      <div class="shots-section">
+        <div class="shots-section-header">
+          <span>Shots <span style="color:#555; font-weight:400;">· 24 total</span></span>
+          <div class="actions">
+            <button title="Sort">↕</button>
+            <button title="New Shot">+</button>
+          </div>
+        </div>
+        <div class="shot-cards">
+          <div class="shot-card active">
+            <div class="thumb">🎬</div>
+            <div class="meta">
+              <div class="name">Wells Intro <span style="font-size:9px; color:#f0c040;">★</span></div>
+              <div class="sub">🧑 Wells <span class="dot"></span> 4 layers <span class="dot"></span> just now</div>
+            </div>
+            <span class="badge wells">Wells</span>
+          </div>
+          <div class="shot-card">
+            <div class="thumb">🎬</div>
+            <div class="meta">
+              <div class="name">Wells Closeup <span style="font-size:9px; color:#f0c040;">★</span></div>
+              <div class="sub">🧑 Wells <span class="dot"></span> 2 layers</div>
+            </div>
+            <span class="badge wells">Wells</span>
+          </div>
+          <div class="shot-card">
+            <div class="thumb">🎬</div>
+            <div class="meta">
+              <div class="name">Wells – Script A</div>
+              <div class="sub">🧑 Wells <span class="dot"></span> 1 layer</div>
+            </div>
+            <span class="badge wells">Wells</span>
+          </div>
+          <div class="shot-card">
+            <div class="thumb">🎬</div>
+            <div class="meta">
+              <div class="name">Wells – Reaction</div>
+              <div class="sub">🧑 Wells <span class="dot"></span> 🖼 Office <span class="dot"></span> 3 layers</div>
+            </div>
+            <span class="badge wells">Wells</span>
+          </div>
+          <div class="shot-card">
+            <div class="thumb">🎬</div>
+            <div class="meta">
+              <div class="name">Modernia – Scene 2</div>
+              <div class="sub">👩 Modernia <span class="dot"></span> 5 layers</div>
+            </div>
+            <span class="badge modernia">Modernia</span>
+          </div>
+          <div class="shot-card">
+            <div class="thumb">🎬</div>
+            <div class="meta">
+              <div class="name">Modernia – Glow Pose</div>
+              <div class="sub">👩 Modernia <span class="dot"></span> 🖼 Dark BG <span class="dot"></span> 3 layers</div>
+            </div>
+            <span class="badge modernia">Modernia</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══ CHARACTER AVATARS ═══ -->
+      <div class="char-section">
+        <div class="char-section-header">
+          <span>Characters</span>
+          <span style="color:#555;">Filter by character</span>
+        </div>
+        <div class="char-grid">
+          <div class="char-tile active">
+            <div class="avatar">🧑</div>
+            <div class="cname">Wells</div>
+            <div class="ccount">12 shots</div>
+          </div>
+          <div class="char-tile">
+            <div class="avatar">👩</div>
+            <div class="cname">Modernia</div>
+            <div class="ccount">8 shots</div>
+          </div>
+          <div class="char-tile">
+            <div class="avatar">👧</div>
+            <div class="cname">Rapi</div>
+            <div class="ccount">5 shots</div>
+          </div>
+          <div class="char-tile">
+            <div class="avatar">👸</div>
+            <div class="cname">Dorothy</div>
+            <div class="ccount">4 shots</div>
+          </div>
+          <div class="char-tile">
+            <div class="avatar">🧔</div>
+            <div class="cname">Anis</div>
+            <div class="ccount">3 shots</div>
+          </div>
+          <div class="char-tile">
+            <div class="avatar">👱</div>
+            <div class="cname">Neon</div>
+            <div class="ccount">2 shots</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ MAIN CONTENT ═══ -->
+  <div class="content">
+    <div class="top-bar">
+      <span class="label">COMPOSE</span>
+      <span class="shot-title">/ Wells Intro</span>
+      <div class="status-badge"><span class="dot"></span> Saved</div>
+      <div class="spacer"></div>
+      <div class="btn-group">
+        <button>+ NEW</button>
+        <button class="primary">SAVE</button>
+        <button class="danger">🗑</button>
+      </div>
+    </div>
+
+    <!-- Preview -->
+    <div class="preview-area">
+      <div class="preview-frame">
+        🎬
+        <div class="overlay-info">
+          <span>1920×1080</span>
+          <span>30 fps</span>
+          <span>Camera: 1.0×</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bottom library -->
+    <div class="bottom-area">
+      <div class="bottom-tabs">
+        <span class="bottom-tab active">Characters <span class="cnt">6</span></span>
+        <span class="bottom-tab">Backgrounds <span class="cnt">12</span></span>
+        <span class="bottom-tab">Videos <span class="cnt">4</span></span>
+        <span class="bottom-tab">Emojis <span class="cnt">8</span></span>
+        <span style="flex:1"></span>
+        <span class="bottom-tab" style="cursor:default; border:none; color:#444;">🔍</span>
+      </div>
+      <div class="bottom-grid">
+        <div class="asset-item"><div class="preview">🧑</div><div class="alabel">Wells</div></div>
+        <div class="asset-item"><div class="preview">👩</div><div class="alabel">Modernia</div></div>
+        <div class="asset-item"><div class="preview">👧</div><div class="alabel">Rapi</div></div>
+        <div class="asset-item"><div class="preview">👸</div><div class="alabel">Dorothy</div></div>
+        <div class="asset-item"><div class="preview" style="background:#2a3a2a;">🌄</div><div class="alabel">Office</div></div>
+        <div class="asset-item"><div class="preview" style="background:#2a2a3a;">🌃</div><div class="alabel">City</div></div>
+        <div class="asset-item"><div class="preview" style="background:#2a1a1a;">🌅</div><div class="alabel">Sunset</div></div>
+        <div class="asset-item"><div class="preview" style="background:#1a2a2a;">🌊</div><div class="alabel">Beach</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ RIGHT CONTEXT PANEL ═══ -->
+  <div class="context-panel">
+    <div class="context-btn active" title="Layers">☰</div>
+    <div class="context-btn" title="Properties">⚙</div>
+    <div class="context-btn" title="History">↩</div>
+    <div class="context-btn" title="Info">ℹ</div>
+    <div style="flex:1"></div>
+    <div class="context-btn" style="margin-top:auto;" title="Collapse">▶</div>
+  </div>
+
+</div>
+
+<div style="width:1360px; margin-top: 24px; padding: 16px; background: #181828; border-radius: 8px; line-height: 1.6;">
+  <h3 style="color:#8b8bf8; margin-bottom: 8px;">Key Improvements</h3>
+  <ul style="color: #999; font-size: 13px; padding-left: 20px;">
+    <li><strong style="color:#ccc;">Slim icon rail</strong> — Minimal 56px rail frees up space for content. Icons-only navigation keeps the UI uncluttered.</li>
+    <li><strong style="color:#ccc;">Pill-based character filter</strong> — Horizontal scrollable pills with character avatars &amp; shot counts sit at the top of the panel. Much more compact than the current thumbnail grid.</li>
+    <li><strong style="color:#ccc;">Split-panel browsing</strong> — Shots (top) and character avatars (bottom) live in one unified panel with a draggable splitter. Shots list shows layers count, character tag, and recency.</li>
+    <li><strong style="color:#ccc;">Unified search</strong> — A single search bar at the top searches both shot names AND character names simultaneously.</li>
+    <li><strong style="color:#ccc;">Circular character avatars</strong> — Filter by character uses round avatar tiles instead of square thumbnail buttons, making it visually distinct from shots.</li>
+    <li><strong style="color:#ccc;">Right context panel</strong> — Quick-access icons for layers, properties, history, and info. Can be collapsed entirely for more content space.</li>
+    <li><strong style="color:#ccc;">Status badge</strong> — "Saved" indicator gives confidence that your work is persisted without needing to check.</li>
+    <li><strong style="color:#ccc;">Drag-handle on split panel</strong> — User can resize the shots vs characters split to prioritize what they need most.</li>
+  </ul>
+</div>
+
+</body>
+</html>

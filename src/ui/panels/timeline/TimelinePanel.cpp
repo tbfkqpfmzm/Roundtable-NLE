@@ -285,6 +285,10 @@ void TimelinePanel::setTimeline(Timeline* timeline)
     ++m_waveformLoadGeneration;
     m_pendingWaveformPaths.clear();
     m_failedWaveformPaths.clear();
+
+    // Clear clip selection when switching to a new timeline so stale
+    // clip IDs from the previous project don't persist in m_selection.
+    m_selection.clear();
     m_timeline = timeline;
     if (timeline)
     {
@@ -316,6 +320,13 @@ void TimelinePanel::setTimeline(Timeline* timeline)
                 if (dur <= 0 || dur > maxTicks) dur = maxTicks;
                 m_layoutEngine.zoomToFit(0, dur, w);
                 onScrollChanged();
+
+                // Scroll to the saved playhead position so the timeline
+                // viewport matches where the user left off (e.g. after
+                // crash recovery / project re-open).  Without this, the
+                // timeline always opens at scroll=0 regardless of the
+                // playhead position stored in the project file.
+                setPlayheadPosition(m_timeline->playheadPosition());
             }
         });
     }

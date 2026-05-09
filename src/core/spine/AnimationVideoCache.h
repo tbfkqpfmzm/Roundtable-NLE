@@ -44,8 +44,10 @@ class SpinePrerenderer;
 /// Encoder format preference for new cache renders
 enum class SpineCacheFormat : uint8_t
 {
-    HEVCPackedAlpha, ///< HEVC packed-alpha (.mp4) — all-intra, ~10-20× smaller
-    ProRes4444,      ///< ProRes 4444 (.mov) — intra-frame, native alpha
+    GreenScreen,  ///< Character on bright green (#00FF00) background (.mp4)
+    BlueScreen,   ///< Character on bright blue (#0000FF) background (.mp4)
+    CustomColor,  ///< Character on user-chosen color background (.mp4)
+    ProRes4444,   ///< ProRes 4444 (.mov) — intra-frame, native alpha
 };
 
 /// Information about a single cached animation video
@@ -109,6 +111,17 @@ public:
     /// Set the encoder format for new renders.
     void setEncoderFormat(SpineCacheFormat fmt) { m_encoderFormat = fmt; }
     [[nodiscard]] SpineCacheFormat encoderFormat() const { return m_encoderFormat; }
+
+    /// Set the chroma key background color (used for GreenScreen/BlueScreen/CustomColor formats).
+    void setChromaKeyColor(uint8_t r, uint8_t g, uint8_t b)
+    {
+        m_chromaKeyR = r;
+        m_chromaKeyG = g;
+        m_chromaKeyB = b;
+    }
+    [[nodiscard]] uint8_t chromaKeyR() const { return m_chromaKeyR; }
+    [[nodiscard]] uint8_t chromaKeyG() const { return m_chromaKeyG; }
+    [[nodiscard]] uint8_t chromaKeyB() const { return m_chromaKeyB; }
 
     /// Set the MediaPool (can be set after construction, non-owning).
     void setMediaPool(MediaPool* pool) { m_mediaPool = pool; }
@@ -261,7 +274,12 @@ private:
     std::string                 m_assetsDir;
     MediaPool*                   m_mediaPool{nullptr};
     AnimCacheCompleteFn         m_completeFn;
-    SpineCacheFormat            m_encoderFormat{SpineCacheFormat::HEVCPackedAlpha};
+    SpineCacheFormat            m_encoderFormat{SpineCacheFormat::GreenScreen};
+
+    // Chroma key background color (default: bright green #00FF00)
+    uint8_t                     m_chromaKeyR{0};
+    uint8_t                     m_chromaKeyG{255};
+    uint8_t                     m_chromaKeyB{0};
 
     // Inventory: key → entry
     mutable std::mutex m_mutex;

@@ -304,6 +304,10 @@ private:
 
     /// Build Ultra Key grouped sections (key color, matte gen, cleanup, spill, CC)
     void buildUltraKeyUI(Effect& fx, size_t effectIdx, int& rowIdx);
+    /// Build LUT effect UI with file browser for .cube files
+    void buildLUTUI(Effect& fx, size_t effectIdx, int& rowIdx);
+    /// Build Letterbox effect UI with preset aspect ratio dropdown
+    void buildLetterboxUI(Effect& fx, size_t effectIdx, int& rowIdx);
     /// Build generic flat parameter rows for a non-Ultra Key effect
     void buildGenericEffectUI(Effect& fx, size_t effectIdx, int& rowIdx);
     /// Wire a single effect parameter spin box to live preview + undo commit

@@ -29,6 +29,7 @@ struct TextureConfig
 {
     uint32_t     width{1};
     uint32_t     height{1};
+    uint32_t     depth{1};   ///< 1 for 2D, >1 for 3D textures (e.g. LUT)
     VkFormat     format{VK_FORMAT_R8G8B8A8_SRGB};
     VkImageUsageFlags usage{VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT};
     uint32_t     mipLevels{1};
@@ -125,6 +126,7 @@ public:
     [[nodiscard]] VkSampler     sampler()   const noexcept { return m_sampler; }
     [[nodiscard]] uint32_t      width()     const noexcept { return m_width; }
     [[nodiscard]] uint32_t      height()    const noexcept { return m_height; }
+    [[nodiscard]] uint32_t      depth()     const noexcept { return m_depth; }
     [[nodiscard]] VkFormat      format()    const noexcept { return m_format; }
     [[nodiscard]] VkImageLayout layout()    const noexcept { return m_currentLayout; }
     [[nodiscard]] uint32_t      mipLevels() const noexcept { return m_mipLevels; }
@@ -147,6 +149,7 @@ private:
 
     uint32_t      m_width{0};
     uint32_t      m_height{0};
+    uint32_t      m_depth{1};
     VkFormat      m_format{VK_FORMAT_UNDEFINED};
     VkImageLayout m_currentLayout{VK_IMAGE_LAYOUT_UNDEFINED};
     uint32_t      m_mipLevels{1};

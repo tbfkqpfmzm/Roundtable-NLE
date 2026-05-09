@@ -25,6 +25,12 @@
 #include "panels/timeline/TimelineWorkspace.h"
 #include "panels/library/LibraryPanel.h"
 
+// Spine cache warming after export
+#include "spine/AnimationVideoCache.h"
+#include "timeline/Track.h"
+#include "timeline/Clip.h"
+#include "timeline/SpineClip.h"
+
 // Delegated panel headers (for accessor forwarding)
 #include "panels/audio/AudioMixer.h"
 #include "panels/effects/EffectsPanel.h"
@@ -487,12 +493,12 @@ void MainWindow::buildPanels()
     // Give AudioSync access to the ShotPresetManager for default shot lookup
     m_audioSync->setShotPresetManager(&m_characterShotPanel->shotComposer()->presetManager());
 
-    // When a script is loaded, ensure default shots exist for all characters
+    // When a script is loaded, refresh the shot list so any newly-referenced
+    // characters appear in the COMPOSE character filter (if they are downloaded
+    // or have existing user-created shots).  Do NOT auto-create default shots.
     connect(m_audioSync, &AudioSync::scriptLoaded, this, [this](int /*lineCount*/) {
         if (m_characterShotPanel && m_characterShotPanel->shotComposer() && m_audioSync) {
-            auto chars = m_audioSync->scriptCharacters();
-            if (!chars.isEmpty())
-                m_characterShotPanel->shotComposer()->ensureDefaultShotsForCharacters(chars);
+            m_characterShotPanel->shotComposer()->refreshShotList();
         }
     });
 
@@ -543,6 +549,40 @@ void MainWindow::buildPanels()
             auto* panel = m_timelineWorkspace->timelinePanel();
             panel->rebuildTracks();
             panel->notifyZoomChanged();
+        }
+
+        // ── Warm the Spine animation cache ─────────────────────────────
+        // Proactively queue pre-renders for unique character/outfit pairs
+        // on the timeline, so the timeline turns green (cached) immediately
+        // instead of staying orange (uncached).  Cap at 10 pairs to avoid
+        // flooding the cache worker with hundreds of jobs in large projects.
+        static constexpr int kMaxWarmChars = 10;
+        if (auto* cache = m_timelineWorkspace
+                ? m_timelineWorkspace->animVideoCacheMutable() : nullptr) {
+            std::set<std::pair<std::string, std::string>> queuedChars;
+            bool capped = false;
+            for (size_t ti = 0; ti < targetTimeline->trackCount() && !capped; ++ti) {
+                auto* track = targetTimeline->track(ti);
+                if (!track || track->type() != TrackType::Video) continue;
+                for (size_t ci = 0; ci < track->clipCount() && !capped; ++ci) {
+                    auto* clip = track->clip(ci);
+                    if (!clip || clip->clipType() != ClipType::Spine) continue;
+                    auto* sc = static_cast<SpineClip*>(clip);
+                    auto key = std::make_pair(sc->characterName(),
+                                               sc->outfit());
+                    if (queuedChars.insert(key).second) {
+                        if (queuedChars.size() > static_cast<size_t>(kMaxWarmChars)) {
+                            spdlog::debug("Spine cache warm: capped at {}, "
+                                          "remaining chars warmed on first use",
+                                          kMaxWarmChars);
+                            capped = true;
+                            break;
+                        }
+                        cache->queueAllAnimations(sc->characterName(),
+                                                   sc->outfit());
+                    }
+                }
+            }
         }
 
         // Force a full blocking audio reload so every clip is decoded

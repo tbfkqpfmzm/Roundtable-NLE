@@ -1,5 +1,5 @@
 /*
- * EffectProcessor — GPU compute-shader effects pipeline.
+ * EffectProcessor â€” GPU compute-shader effects pipeline.
  *
  * Step 22: Processes effects on clip images using Vulkan compute shaders.
  *
@@ -34,7 +34,7 @@
 
 namespace rt {
 
-// ── Configuration ───────────────────────────────────────────────────────────
+// â”€â”€ Configuration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 struct EffectProcessorConfig
 {
@@ -43,7 +43,7 @@ struct EffectProcessorConfig
     VkFormat format{VK_FORMAT_R8G8B8A8_UNORM};
 };
 
-// ── Push constants for effect shaders ───────────────────────────────────────
+// â”€â”€ Push constants for effect shaders â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 struct EffectPushConstants
 {
@@ -55,7 +55,7 @@ struct EffectPushConstants
 };
 static_assert(sizeof(EffectPushConstants) == 128);
 
-// ── Statistics ──────────────────────────────────────────────────────────────
+// â”€â”€ Statistics â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 struct EffectProcessorStats
 {
@@ -63,7 +63,7 @@ struct EffectProcessorStats
     float gpuTimeMs{0.0f};
 };
 
-// ═════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 class EffectProcessor
 {
@@ -74,7 +74,7 @@ public:
     EffectProcessor(const EffectProcessor&) = delete;
     EffectProcessor& operator=(const EffectProcessor&) = delete;
 
-    // ── Lifecycle ───────────────────────────────────────────────────────
+    // â”€â”€ Lifecycle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     bool init(Device& device,
               Allocator& allocator,
@@ -86,7 +86,7 @@ public:
 
     [[nodiscard]] bool isInitialized() const noexcept { return m_initialized; }
 
-    // ── Processing ──────────────────────────────────────────────────────
+    // â”€â”€ Processing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Apply effects from a snapshot (evaluated EffectStack) to a source image.
     /// Records commands into the provided command buffer.
@@ -94,15 +94,15 @@ public:
                  const VkDescriptorImageInfo& sourceImage,
                  const std::vector<EffectStack::EffectSnapshot>& effects);
 
-    /// Synchronous version — creates its own command buffer.
+    /// Synchronous version â€” creates its own command buffer.
     bool processSync(const VkDescriptorImageInfo& sourceImage,
                      const std::vector<EffectStack::EffectSnapshot>& effects);
 
-    // ── Resize ──────────────────────────────────────────────────────────
+    // â”€â”€ Resize â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     bool resize(uint32_t width, uint32_t height);
 
-    // ── Output access ───────────────────────────────────────────────────
+    // â”€â”€ Output access â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     [[nodiscard]] VkImage       outputImage()     const noexcept;
     [[nodiscard]] VkImageView   outputImageView() const noexcept;
@@ -114,22 +114,26 @@ public:
     /// Read back output pixels (for testing).
     bool readbackOutput(std::vector<uint8_t>& outPixels);
 
-    // ── Statistics ──────────────────────────────────────────────────────
+    // â”€â”€ Statistics â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     [[nodiscard]] const EffectProcessorStats& stats() const noexcept { return m_stats; }
+
+public:
+    bool uploadLUT3D(const std::vector<float>& lutData, int lutSize);
+    void clearLUT3D();
 
 private:
     bool createStorageTextures();
     bool createPipelines();
     bool createDescriptorResources();
 
-    /// Dispatch a single effect — writes to pingPong[targetIdx].
+    /// Dispatch a single effect â€” writes to pingPong[targetIdx].
     bool dispatchEffect(VkCommandBuffer cmd,
                         EffectType type,
                         const std::vector<float>& params,
                         int sourceIdx, int targetIdx);
 
-    /// Ultra Key multi-pass dispatch (matte → cleanup → finalize).
+    /// Ultra Key multi-pass dispatch (matte â†’ cleanup â†’ finalize).
     /// Returns the final targetIdx written to.
     int dispatchUltraKey(VkCommandBuffer cmd,
                          const std::vector<float>& params,
@@ -140,9 +144,12 @@ private:
                       VkDescriptorSet ds,
                       const std::vector<float>& params);
 
+    /// Copy source storage image into target — used to bypass effects.
+    void copyImage(VkCommandBuffer cmd, int sourceIdx, int targetIdx);
+
     VkPipeline getPipeline(EffectType type) const;
 
-    // ── Vulkan handles ──────────────────────────────────────────────────
+    // â”€â”€ Vulkan handles â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     Device*       m_device{nullptr};
     Allocator*    m_allocator{nullptr};
@@ -170,18 +177,21 @@ private:
     VkPipeline       m_vignettePipeline{VK_NULL_HANDLE};
     VkPipeline       m_lutPipeline{VK_NULL_HANDLE};
     VkPipeline       m_letterboxPipeline{VK_NULL_HANDLE};
-    VkPipeline       m_lumetriColorPipeline{VK_NULL_HANDLE};
+    VkPipeline       m_colorGradingPipeline{VK_NULL_HANDLE};
     VkPipeline       m_otsPipeline{VK_NULL_HANDLE};
     VkPipelineLayout m_pipelineLayout{VK_NULL_HANDLE};
 
     // Descriptors
     VkDescriptorPool      m_descriptorPool{VK_NULL_HANDLE};
     VkDescriptorSetLayout m_descriptorSetLayout{VK_NULL_HANDLE};
+    VkDescriptorSetLayout m_lutDescriptorSetLayout{VK_NULL_HANDLE}; // LUT-specific layout (has binding 2)
     VkDescriptorSet       m_descriptorSets[2]{VK_NULL_HANDLE, VK_NULL_HANDLE};
     VkDescriptorSet       m_sourceDescriptorSet{VK_NULL_HANDLE};
+    VkDescriptorSet       m_lutDescriptorSet{VK_NULL_HANDLE};       // LUT-only set (has binding 2 for sampler3D)
 
-    // Placeholder texture
+    // Placeholder texture + LUT 3D texture
     Texture m_placeholderTexture;
+    Texture m_lutTexture3D;           ///< 3D texture holding the LUT cube data
 
     // Reusable fence for processSync (avoids create/destroy per call)
     VkFence m_syncFence{VK_NULL_HANDLE};
@@ -198,3 +208,4 @@ private:
 };
 
 } // namespace rt
+

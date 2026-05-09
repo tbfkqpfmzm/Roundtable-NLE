@@ -365,7 +365,7 @@ void EffectsPanel::populateBrowser()
                                  EffectType::Sharpen, EffectType::Glow,
                                  EffectType::ChromaKey, EffectType::Transform2D,
                                  EffectType::Vignette, EffectType::LUT,
-                                 EffectType::Letterbox, EffectType::LumetriColor,
+                                 EffectType::Letterbox, EffectType::ColorGrading,
                                  EffectType::OtsLeft, EffectType::OtsRight } },
         { "Video Transitions", {} },   // populated separately below
         { "Legacy",            {} },

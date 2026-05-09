@@ -29,7 +29,8 @@ public:
         KeyColorB,        // 0–1  (default 0.0)
 
         // Output / preset
-        OutputMode,       // 0=Composite, 1=Alpha Channel, 2=Color Channel
+        OutputMode,       // 0=Composite, 1=Alpha Matte, 2=Color Channel,
+                          // 3=Original, 4=Removed Color, 5=Spill Map
         Setting,          // 0=Default, 1=Relaxed, 2=Aggressive, 3=Custom
 
         // Matte Generation

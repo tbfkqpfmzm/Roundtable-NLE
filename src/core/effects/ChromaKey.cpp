@@ -15,7 +15,9 @@ ChromaKey::ChromaKey()
     addParam("Key Color B",     0.0f,    0.0f, 1.0f);
 
     // Output / preset
-    addParam("Output",          0.0f,    0.0f, 2.0f);   // 0=Composite, 1=Alpha, 2=Color
+    addParam("Output",          0.0f,    0.0f, 5.0f);   // 0=Composite, 1=Alpha Matte,
+                                                         // 2=Color, 3=Original,
+                                                         // 4=Removed Color, 5=Spill Map
     addParam("Setting",         0.0f,    0.0f, 3.0f);   // 0=Default, 1=Relaxed, 2=Aggressive, 3=Custom
 
     // Matte Generation

@@ -43,6 +43,7 @@
 #include "media/FrameCache.h"
 #include "media/MediaPool.h"
 #include "media/PlaybackController.h"
+#include "media/PlaybackScheduler.h"
 #include "spine/ModelManager.h"
 #include "timeline/Timeline.h"
 #include "timeline/Track.h"
@@ -262,6 +263,47 @@ void MainWindow::refreshProjectsList()
 
 void MainWindow::setCurrentProject(std::unique_ptr<Project> project)
 {
+    // ── Pre-move cleanup: stop all background operations BEFORE destroying
+    // the old project.  The old project's timeline is about to be destroyed
+    // via std::move, but raw pointers (m_timeline, etc.)  and background
+    // threads (FrameProducer, audio playback) may still reference it.
+    // Without this, a concurrent composite or audio callback reads a
+    // dangling timeline pointer → crash during project switching.
+    if (m_currentProject) {
+        // 1. Stop audio playback / transport
+        if (m_playbackController && m_playbackController->isPlaying())
+            m_playbackController->stop();
+
+        // 2. Stop the async composite pipeline (FrameProducer thread)
+        if (m_timelineWorkspace) {
+            if (auto* pm = m_timelineWorkspace->programMonitor()) {
+                pm->stopPolling();
+                if (auto* pl = pm->pipeline())
+                    pl->stop();
+            }
+        }
+        // Also stop source monitor pipeline
+        if (m_timelineWorkspace) {
+            if (auto* sm = m_timelineWorkspace->sourceMonitor()) {
+                if (auto* ctrl = sm->controller()) {
+                    if (ctrl->isPlaying()) ctrl->stop();
+                }
+            }
+        }
+
+        // 3. Disconnect old timeline from composite service so the next
+        //    poll-timer tick or producer thread doesn't access destroyed data
+        if (m_timelineWorkspace) {
+            if (auto* pm = m_timelineWorkspace->programMonitor())
+                pm->setCompositeCallback(nullptr);
+            m_timelineWorkspace->setTimeline(nullptr);
+        }
+        if (m_playbackController)
+            m_playbackController->setTimeline(nullptr);
+        m_timeline = nullptr;
+    }
+
+    // Now safe to destroy the old project and set up the new one
     m_currentProject = std::move(project);
     m_lastSavedAudioSyncBlob = m_currentProject ? m_currentProject->audioSyncBlob()
                                                : std::vector<uint8_t>{};

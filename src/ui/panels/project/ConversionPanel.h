@@ -24,6 +24,7 @@
 #pragma once
 
 #include <QCheckBox>
+#include <QColor>
 #include <QComboBox>
 #include <QLabel>
 #include <QMenu>
@@ -84,6 +85,7 @@ private:
     QPushButton*   m_cancelBtn{nullptr};
     QPushButton*   m_refreshBtn{nullptr};
     QComboBox*     m_encoderCombo{nullptr};
+    QPushButton*   m_colorSwatchBtn{nullptr};  ///< Opens color picker for chroma key colour
     QCheckBox*     m_hideConvertedCheck{nullptr};
 
     // Periodic refresh while rendering

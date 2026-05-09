@@ -1,0 +1,1129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>COMPOSE Redesign — Your UI + Option 1 SHOTS Filter</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1a2e;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    color: #e0e0e0;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  h1 { font-size: 22px; margin-bottom: 4px; color: #fff; }
+  .subtitle { color: #888; margin-bottom: 20px; font-size: 13px; }
+  .label-bar {
+    width: 1460px;
+    display: flex;
+    align-items: center;
+    gap: 0;
+    margin-bottom: 6px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    color: #666;
+    text-transform: uppercase;
+  }
+  .label-bar span {
+    flex-shrink: 0;
+    text-align: center;
+    padding: 2px 0;
+  }
+
+  .mockup {
+    width: 1460px;
+    height: 820px;
+    background: #1e1e32;
+    border-radius: 10px;
+    display: flex;
+    overflow: hidden;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+    position: relative;
+  }
+
+  /* ═══════════ RAIL ═══════════ (same as current) */
+  .rail {
+    width: 150px;
+    background: #1e1e32;
+    border-right: 1px solid #333350;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px 8px;
+    gap: 0;
+  }
+  .rail-btn {
+    width: 128px; height: 84px;
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    cursor: pointer;
+    transition: all 0.15s;
+    border: none;
+    background: transparent;
+    color: #666;
+    font-size: 42px;
+  }
+  .rail-btn:hover { background: #2a2a48; color: #aaa; }
+  .rail-btn.active { background: #3d3d6b; color: #7c7cf0; }
+  .rail-btn .label { font-size: 15px; font-weight: 800; letter-spacing: 0px; color: #ccc; margin-top: 2px; }
+  .rail-divider {
+    width: 90px; height: 1px;
+    background: #333350;
+    margin: 6px 0;
+  }
+
+  /* ═══════════ CHARACTER FILTER COLUMN (redesigned ⬅ OPTION 1) ═══════════ */
+  .char-filter {
+    width: 200px;
+    background: #1e1e32;
+    border-right: 1px solid #333350;
+    display: flex;
+    flex-direction: column;
+    padding: 10px 10px;
+  }
+  .filter-header {
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 1.5px;
+    color: #666;
+    text-transform: uppercase;
+    padding: 4px 4px 8px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .filter-header .badge {
+    background: #3d3d6b;
+    color: #aaa;
+    font-size: 9px;
+    border-radius: 8px;
+    padding: 1px 7px;
+  }
+
+  /* ── Search inside filter ── */
+  .filter-search {
+    position: relative;
+    margin-bottom: 6px;
+  }
+  .filter-search input {
+    width: 100%;
+    background: #16162a;
+    border: 1px solid #333350;
+    border-radius: 6px;
+    padding: 5px 8px 5px 26px;
+    color: #ccc;
+    font-size: 11px;
+    outline: none;
+  }
+  .filter-search input:focus { border-color: #7c7cf0; }
+  .filter-search input::placeholder { color: #555; font-size: 11px; }
+  .filter-search .icon {
+    position: absolute;
+    left: 7px; top: 5px;
+    font-size: 11px;
+    color: #555;
+  }
+
+  /* ── Chip-style filter buttons ── */
+  .filter-chips {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .chip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.12s;
+    border: 1.5px solid transparent;
+    background: transparent;
+    color: #999;
+    font-size: 12px;
+    text-align: left;
+    width: 100%;
+  }
+  .chip:hover { background: #2a2a48; }
+  .chip.active { background: #2a2a48; border-color: #7c7cf0; color: #ccc; }
+  .chip .thumb {
+    width: 28px; height: 28px;
+    border-radius: 6px;
+    background: #333350;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+  }
+  .chip .name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
+  .chip .count {
+    font-size: 10px;
+    color: #555;
+    background: #2a2a3e;
+    border-radius: 6px;
+    padding: 0 6px;
+    min-width: 18px;
+    text-align: center;
+    font-weight: 600;
+  }
+  .chip.divider {
+    border-top: 1px solid #333350;
+    border-radius: 0;
+    padding: 3px 8px;
+    margin: 4px 0;
+    cursor: default;
+    height: 1px;
+  }
+  .chip.divider:hover { background: transparent; }
+
+  .filter-scroll {
+    flex: 1;
+    overflow-y: auto;
+    margin: 0 -10px;
+    padding: 0 10px;
+  }
+  .filter-scroll::-webkit-scrollbar { width: 4px; }
+  .filter-scroll::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+
+  /* ═══════════ SHOTS COLUMN (redesigned ⬅ OPTION 1) ═══════════ */
+  .shots-column {
+    width: 280px;
+    background: #20203a;
+    border-right: 1px solid #333350;
+    display: flex;
+    flex-direction: column;
+    padding: 10px 10px;
+  }
+  .shots-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+  }
+  .shots-header h2 {
+    font-size: 14px;
+    font-weight: 800;
+    letter-spacing: 0.5px;
+    color: #ccc;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .shots-header .controls {
+    display: flex;
+    gap: 3px;
+  }
+  .shots-header .controls button {
+    background: transparent;
+    border: 1px solid #333350;
+    border-radius: 5px;
+    color: #777;
+    width: 26px; height: 26px;
+    cursor: pointer;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.12s;
+  }
+  .shots-header .controls button:hover { background: #2a2a48; color: #bbb; }
+
+  /* ── Search + Sort toolbar ── */
+  .shots-toolbar {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 6px;
+  }
+  .shots-toolbar input {
+    flex: 1;
+    background: #16162a;
+    border: 1px solid #333350;
+    border-radius: 5px;
+    padding: 5px 8px;
+    color: #ccc;
+    font-size: 11px;
+    outline: none;
+  }
+  .shots-toolbar input:focus { border-color: #7c7cf0; }
+  .shots-toolbar input::placeholder { color: #555; }
+  .shots-toolbar select {
+    background: #16162a;
+    border: 1px solid #333350;
+    border-radius: 5px;
+    color: #888;
+    padding: 5px 4px;
+    font-size: 10px;
+    outline: none;
+    cursor: pointer;
+    max-width: 70px;
+  }
+
+  /* ── Action buttons row ── */
+  .shots-actions {
+    display: flex;
+    gap: 3px;
+    margin-bottom: 8px;
+  }
+  .shots-actions button {
+    flex: 1;
+    height: 26px;
+    border-radius: 5px;
+    border: none;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    cursor: pointer;
+    transition: all 0.12s;
+  }
+  .btn-new { background: #7c7cf0; color: #fff; }
+  .btn-new:hover { background: #6a6ad8; }
+  .btn-save { background: #2a6b3c; color: #b0f0b0; border: 1px solid #3a7a4a !important; }
+  .btn-save:hover { background: #217a3a; }
+  .btn-del { background: #3a1a1a; color: #dd7777; border: 1px solid #4a2828 !important; }
+  .btn-del:hover { background: #4a2828; }
+
+  /* ── Shot list with groups ── */
+  .shot-list {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    margin: 0 -10px;
+    padding: 0 10px;
+  }
+  .shot-list::-webkit-scrollbar { width: 4px; }
+  .shot-list::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+
+  .shot-group-label {
+    font-size: 9px;
+    font-weight: 700;
+    color: #555;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    padding: 8px 6px 3px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .shot-item {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 4px 6px;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: all 0.1s;
+    border: 1.5px solid transparent;
+  }
+  .shot-item:hover { background: #2a2a48; }
+  .shot-item.active { background: #2a2a48; border-color: #7c7cf0; }
+  .shot-item .thumb {
+    width: 64px; height: 36px;
+    border-radius: 4px;
+    background: #333350;
+    flex-shrink: 0;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+  }
+  .shot-item .info { flex: 1; min-width: 0; }
+  .shot-item .info .name { font-size: 11px; font-weight: 600; color: #ccc; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .shot-item .info .meta { font-size: 9px; color: #666; display: flex; gap: 4px; align-items: center; }
+  .shot-item .info .meta .tag {
+    background: #2a2a3e;
+    padding: 0 5px;
+    border-radius: 3px;
+    font-size: 8px;
+    color: #777;
+  }
+  .shot-item .star { color: #444; font-size: 11px; cursor: pointer; }
+  .shot-item .star.filled { color: #f0c040; }
+
+  /* ═══════════ LETTER SIDE PANEL ═══════════ */
+  .letter-panel {
+    width: 0;
+    overflow: hidden;
+    background: #1a1a2e;
+    border-right: 1px solid #333350;
+  }
+
+  /* ═══════════ COMPOSE CONTENT (same as current UI) ═══════════ */
+  .content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background: #22223a;
+    min-width: 0;
+  }
+
+  /* ── Shot header bar ── */
+  .content-header {
+    display: flex;
+    align-items: center;
+    padding: 6px 14px;
+    border-bottom: 1px solid #333350;
+    background: #1e1e32;
+    gap: 8px;
+  }
+  .content-header h3 {
+    font-size: 13px;
+    font-weight: 700;
+    color: #888;
+    letter-spacing: 1px;
+  }
+  .content-header .shot-name-input {
+    background: #16162a;
+    border: 1px solid #333350;
+    border-radius: 4px;
+    padding: 3px 8px;
+    color: #ccc;
+    font-size: 12px;
+    width: 180px;
+    outline: none;
+  }
+  .content-header .shot-name-input:focus { border-color: #7c7cf0; }
+  .content-header .spacer { flex: 1; }
+  .content-header .default-check {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: #888;
+  }
+  .content-header .default-check input { accent-color: #7c7cf0; }
+
+  /* ── Main body: splitter layout ── */
+  .main-body {
+    flex: 1;
+    display: flex;
+    min-height: 0;
+  }
+
+  /* ── Left panel: preview + library ── */
+  .left-panel {
+    flex: 2;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  .preview-area {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #1a1a2e;
+    position: relative;
+    min-height: 0;
+  }
+  .preview-frame {
+    width: 80%;
+    max-height: 85%;
+    aspect-ratio: 16/9;
+    background: #0d0d1a;
+    border-radius: 5px;
+    border: 1px solid #333350;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 40px;
+    color: #333;
+    position: relative;
+  }
+  .preview-frame .label { position: absolute; bottom: 10px; left: 12px; font-size: 10px; color: #444; }
+
+  /* ── Preview toolbar ── */
+  .preview-toolbar {
+    display: flex;
+    align-items: center;
+    padding: 3px 14px;
+    gap: 6px;
+    border-top: 1px solid #333350;
+    background: #1e1e32;
+  }
+  .preview-toolbar button {
+    background: #1a1a2e;
+    border: 1px solid #333350;
+    border-radius: 4px;
+    color: #888;
+    padding: 2px 10px;
+    font-size: 11px;
+    cursor: pointer;
+    height: 24px;
+  }
+  .preview-toolbar button:hover { background: #2a2a48; }
+  .preview-toolbar button.checked { background: #3d3d6b; color: #7c7cf0; }
+
+  /* ── Library section ── */
+  .library-section {
+    height: 180px;
+    border-top: 1px solid #333350;
+    background: #1e1e32;
+    display: flex;
+    flex-direction: column;
+  }
+  .lib-tabs {
+    display: flex;
+    padding: 0 8px;
+    border-bottom: 1px solid #333350;
+    background: #1a1a2e;
+  }
+  .lib-tab {
+    padding: 6px 12px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #666;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    transition: all 0.12s;
+  }
+  .lib-tab:hover { color: #999; }
+  .lib-tab.active { color: #7c7cf0; border-bottom-color: #7c7cf0; }
+
+  .lib-zoom-row {
+    display: flex;
+    align-items: center;
+    padding: 4px 10px;
+    gap: 4px;
+    font-size: 10px;
+    color: #555;
+  }
+  .lib-zoom-row .slider-track {
+    width: 80px; height: 4px;
+    background: #333350;
+    border-radius: 2px;
+    position: relative;
+    cursor: pointer;
+  }
+  .lib-zoom-row .slider-track .thumb {
+    width: 10px; height: 10px;
+    background: #888;
+    border-radius: 50%;
+    position: absolute;
+    top: -3px;
+    left: 40px;
+  }
+
+  .lib-grid {
+    flex: 1;
+    padding: 6px 10px;
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    align-items: flex-start;
+  }
+  .lib-grid::-webkit-scrollbar { height: 3px; }
+  .lib-grid::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+
+  .lib-item {
+    width: 64px;
+    flex-shrink: 0;
+    text-align: center;
+    cursor: pointer;
+    border-radius: 5px;
+    padding: 3px;
+    transition: all 0.1s;
+  }
+  .lib-item:hover { background: #2a2a48; }
+  .lib-item .preview {
+    width: 56px; height: 56px;
+    border-radius: 5px;
+    background: #333350;
+    margin: 0 auto 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 22px;
+  }
+  .lib-item .lbl { font-size: 9px; color: #888; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* ── Right properties panel ── */
+  .right-panel {
+    width: 360px;
+    background: #20203a;
+    border-left: 1px solid #333350;
+    display: flex;
+    flex-direction: column;
+    padding: 10px 12px;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+  .right-panel .section {
+    border-bottom: 1px solid #333350;
+    padding-bottom: 8px;
+  }
+  .right-panel .section-title {
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 1.5px;
+    color: #666;
+    text-transform: uppercase;
+    margin-bottom: 5px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .right-panel input:focus { border-color: #7c7cf0; }
+
+  /* Layer list */
+  .layer-list {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: 0 -12px;
+    padding: 0 12px;
+    min-height: 60px;
+  }
+  .layer-item {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 6px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    border: 1.5px solid transparent;
+    transition: all 0.1s;
+    height: 32px;
+  }
+  .layer-item:hover { background: #2a2a48; }
+  .layer-item.active { background: #2a2a48; border-color: #7c7cf0; }
+  .layer-item .vis-toggle {
+    width: 26px; height: 26px;
+    border-radius: 3px;
+    border: 1px solid #555;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    color: #555;
+    background: transparent;
+    flex-shrink: 0;
+  }
+  .layer-item .vis-toggle.on { color: #ccc; border-color: #777; }
+  .layer-item .l-icon { font-size: 16px; width: 22px; text-align: center; flex-shrink: 0; }
+  .layer-item .l-name { flex: 1; font-size: 13px; color: #bbb; font-weight: 500; }
+
+  .layer-btns {
+    display: flex;
+    gap: 2px;
+    margin-top: 2px;
+  }
+  .layer-btns button {
+    width: 36px;
+    height: 32px;
+    background: #16162a;
+    border: 1px solid #333350;
+    border-radius: 4px;
+    color: #888;
+    font-size: 13px;
+    cursor: pointer;
+    text-align: center;
+    transition: all 0.1s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .layer-btns button:hover { background: #2a2a48; }
+
+  /* Global scrollbar */
+  ::-webkit-scrollbar { width: 5px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #3a3a5a; border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #4a4a6a; }
+</style>
+</head>
+<body>
+
+<div style="text-align:center; max-width:1460px;">
+  <h1>🎬 Your Current UI + Option 1's Redesigned SHOTS Filter &amp; List</h1>
+  <p class="subtitle">Same layout you have now — only the Character Filter (left of SHOTS) and the SHOTS column are redesigned</p>
+</div>
+
+<div class="label-bar">
+  <span style="width:150px;">RAIL (unchanged)</span>
+  <span style="width:200px; color:#7c7cf0;">⬅ CHARACTER FILTER (REDESIGNED)</span>
+  <span style="width:280px; color:#7c7cf0;">⬅ SHOTS COLUMN (REDESIGNED)</span>
+  <span style="flex:1; color:#888;">⬅ COMPOSE CONTENT (unchanged)</span>
+  <span style="width:360px; color:#888;">⬅ PROPERTIES (unchanged)</span>
+</div>
+
+<div class="mockup">
+
+  <!-- ═══════════ RAIL (EXACTLY AS CURRENT) ═══════════ -->
+  <div class="rail">
+    <div class="rail-btn"><span>📚</span><span class="label">LIBRARY</span></div>
+    <div class="rail-divider"></div>
+    <div class="rail-btn"><span>🔄</span><span class="label">CONVERT</span></div>
+    <div class="rail-divider"></div>
+    <div class="rail-btn active"><span>🎬</span><span class="label">COMPOSE</span></div>
+    <div class="rail-divider"></div>
+    <div class="rail-btn"><span>⚙</span><span class="label">SETTINGS</span></div>
+  </div>
+
+  <!-- ═══════════ CHARACTER FILTER COLUMN (REDESIGNED) ═══════════ -->
+  <div class="char-filter">
+    <div class="filter-header">
+      CHARACTERS <span class="badge">8</span>
+    </div>
+
+    <!-- Inline search for characters -->
+    <div class="filter-search">
+      <span class="icon">🔍</span>
+      <input type="text" placeholder="Filter characters...">
+    </div>
+
+    <div class="filter-chips">
+      <!-- ALL / UNASSIGNED special chips -->
+      <button class="chip active">
+        <span class="thumb" style="background:#3d3d6b;">⊞</span>
+        <span class="name" style="font-weight:700;">All Characters</span>
+        <span class="count">24</span>
+      </button>
+      <button class="chip">
+        <span class="thumb" style="background:#3a2a2a;">⊟</span>
+        <span class="name">Unassigned (no chars)</span>
+        <span class="count">3</span>
+      </button>
+
+      <!-- Thin visual divider -->
+      <div class="chip divider"></div>
+    </div>
+
+    <div class="filter-scroll">
+      <button class="chip active">
+        <span class="thumb">🧑</span>
+        <span class="name">Wells</span>
+        <span class="count">12</span>
+      </button>
+      <button class="chip">
+        <span class="thumb">👩</span>
+        <span class="name">Modernia</span>
+        <span class="count">8</span>
+      </button>
+      <button class="chip">
+        <span class="thumb">👧</span>
+        <span class="name">Rapi</span>
+        <span class="count">5</span>
+      </button>
+      <button class="chip">
+        <span class="thumb">👸</span>
+        <span class="name">Dorothy</span>
+        <span class="count">4</span>
+      </button>
+      <button class="chip">
+        <span class="thumb">🧔</span>
+        <span class="name">Anis</span>
+        <span class="count">3</span>
+      </button>
+      <button class="chip">
+        <span class="thumb">👱</span>
+        <span class="name">Neon</span>
+        <span class="count">2</span>
+      </button>
+      <button class="chip">
+        <span class="thumb">🦸</span>
+        <span class="name">Scarlet</span>
+        <span class="count">2</span>
+      </button>
+      <button class="chip">
+        <span class="thumb">🧝</span>
+        <span class="name">Privaty</span>
+        <span class="count">1</span>
+      </button>
+      <button class="chip">
+        <span class="thumb">🐱</span>
+        <span class="name">Neko</span>
+        <span class="count">1</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- ═══════════ SHOTS COLUMN (REDESIGNED) ═══════════ -->
+  <div class="shots-column">
+    <div class="shots-header">
+      <h2>🎬 SHOTS</h2>
+      <div class="controls">
+        <button title="Sort options">↕</button>
+        <button title="List view">☰</button>
+        <button title="Grid view">⊞</button>
+      </div>
+    </div>
+
+    <!-- Search + Sort -->
+    <div class="shots-toolbar">
+      <input type="text" placeholder="🔍 Search shots..." value="Wells">
+      <select>
+        <option>Sort: A–Z</option>
+        <option selected>Recent</option>
+        <option>Character</option>
+        <option>Favorites</option>
+      </select>
+    </div>
+
+    <!-- Action buttons -->
+    <div class="shots-actions">
+      <button class="btn-new">+ NEW</button>
+      <button class="btn-save">SAVE</button>
+      <button class="btn-del">🗑</button>
+    </div>
+
+    <!-- Shot list — shows ONLY shots containing the selected character (Wells is active) -->
+    <div class="shot-list">
+
+      <!-- Favorites group — pinned Wells shots -->
+      <div class="shot-group-label">⭐ FAVORITES</div>
+      <div class="shot-item active">
+        <div class="thumb">🎬</div>
+        <div class="info">
+          <div class="name">Wells Intro</div>
+          <div class="meta"><span class="tag">🧑 Wells</span> <span>4 layers</span></div>
+        </div>
+        <span class="star filled">★</span>
+      </div>
+      <div class="shot-item">
+        <div class="thumb">🎬</div>
+        <div class="info">
+          <div class="name">Wells Closeup</div>
+          <div class="meta"><span class="tag">🧑 Wells</span> <span>2 layers</span></div>
+        </div>
+        <span class="star filled">★</span>
+      </div>
+
+      <!-- All remaining Wells shots -->
+      <div class="shot-group-label">📁 ALL WELLS SHOTS</div>
+      <div class="shot-item">
+        <div class="thumb">🎬</div>
+        <div class="info">
+          <div class="name">Wells – Script A</div>
+          <div class="meta"><span class="tag">🧑 Wells</span> <span>1 layer</span></div>
+        </div>
+        <span class="star">☆</span>
+      </div>
+      <div class="shot-item">
+        <div class="thumb">🎬</div>
+        <div class="info">
+          <div class="name">Wells – Reaction</div>
+          <div class="meta"><span class="tag">🧑 Wells</span> <span class="tag">🌄 Office</span> <span>3 layers</span></div>
+        </div>
+        <span class="star">☆</span>
+      </div>
+      <div class="shot-item">
+        <div class="thumb">🎬</div>
+        <div class="info">
+          <div class="name">Wells – Full Body</div>
+          <div class="meta"><span class="tag">🧑 Wells</span> <span>2 layers</span></div>
+        </div>
+        <span class="star">☆</span>
+      </div>
+      <div class="shot-item">
+        <div class="thumb">🎬</div>
+        <div class="info">
+          <div class="name">Wells &amp; Modernia – Scene 2</div>
+          <div class="meta"><span class="tag">🧑 Wells</span> <span class="tag">👩 Modernia</span> <span class="tag">🌄 Office</span> <span>5 layers</span></div>
+        </div>
+        <span class="star">☆</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════ LETTER SIDE PANEL (hidden, as in COMPOSE mode) ═══════════ -->
+  <div class="letter-panel"></div>
+
+  <!-- ═══════════ COMPOSE CONTENT (unchanged layout) ═══════════ -->
+  <div class="content">
+
+    <!-- Shot header bar (as in current code) -->
+    <div class="content-header">
+      <h3>🎬 COMPOSE</h3>
+      <input class="shot-name-input" type="text" value="Wells Intro">
+      <div class="spacer"></div>
+      <div class="default-check">
+        <input type="checkbox" checked> <span>Default for: <strong style="color:#aaa;">Wells</strong></span>
+      </div>
+    </div>
+
+    <!-- Main body: left (preview + library) | right (properties) -->
+    <div class="main-body">
+
+      <!-- LEFT PANEL -->
+      <div class="left-panel">
+
+        <!-- Preview viewport -->
+        <div class="preview-area">
+          <div class="preview-frame">
+            🎬
+            <span class="label">Preview — 1920×1080</span>
+          </div>
+        </div>
+
+        <!-- Preview toolbar -->
+        <div class="preview-toolbar">
+          <button>Reset View</button>
+          <button class="checked">Safe Margins</button>
+          <span style="flex:1"></span>
+          <span style="font-size:10px; color:#555;">Zoom: 100%  ◉────────</span>
+        </div>
+
+        <!-- Library section -->
+        <div class="library-section">
+          <div class="lib-tabs">
+            <span class="lib-tab active">Characters</span>
+            <span class="lib-tab">Backgrounds</span>
+            <span class="lib-tab">Videos</span>
+          </div>
+          <div class="lib-zoom-row">
+            <span>−</span>
+            <div class="slider-track"><div class="thumb"></div></div>
+            <span>+</span>
+          </div>
+          <div class="lib-grid">
+            <div class="lib-item"><div class="preview">🧑</div><div class="lbl">Wells</div></div>
+            <div class="lib-item"><div class="preview">👩</div><div class="lbl">Modernia</div></div>
+            <div class="lib-item"><div class="preview">👧</div><div class="lbl">Rapi</div></div>
+            <div class="lib-item"><div class="preview">👸</div><div class="lbl">Dorothy</div></div>
+            <div class="lib-item"><div class="preview" style="background:#2a3a2a;">🌄</div><div class="lbl">Office</div></div>
+            <div class="lib-item"><div class="preview" style="background:#2a2a3a;">🌃</div><div class="lbl">City</div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- RIGHT PANEL (Properties — matches current ShotComposerProperties.cpp) -->
+      <div class="right-panel">
+
+        <!-- ═══ SHOT section ═══ (matches QGroupBox "SHOT") -->
+        <div class="section" style="border:none; padding:0;">
+          <div class="section-title">SHOT</div>
+          <!-- Shot name + SAVE SHOT row -->
+          <div style="display:flex; gap:4px; margin-bottom:4px;">
+            <input type="text" value="Wells Intro" placeholder="Shot name..." style="flex:1; height:36px;">
+            <button style="background:#2a6b3c; color:#b0f0b0; border:1px solid #3a7a4a; border-radius:4px; font-size:10px; font-weight:700; padding:0 10px; height:36px; cursor:pointer;">SAVE SHOT</button>
+          </div>
+          <!-- Default character combo + SET DEFAULT row -->
+          <div style="display:flex; gap:3px;">
+            <select style="flex:1; height:36px; background:#16162a; border:1px solid #333350; border-radius:4px; color:#888; font-size:11px; padding:0 6px; outline:none;">
+              <option>Wells</option>
+              <option>Modernia</option>
+              <option>Rapi</option>
+            </select>
+            <button style="background:#3d3d6b; color:#ccc; border:1px solid #7c7cf0; border-radius:4px; font-size:10px; font-weight:700; padding:0 10px; height:36px; cursor:pointer; white-space:nowrap;">SET DEFAULT</button>
+          </div>
+        </div>
+
+        <!-- ═══ LAYERS section ═══ (matches QGroupBox "LAYERS") -->
+        <div class="section" style="flex:1; display:flex; flex-direction:column; min-height:0; border:none; padding:0;">
+          <div class="section-title">LAYERS</div>
+          <!-- Layer list -->
+          <div class="layer-list">
+            <div class="layer-item">
+              <button class="vis-toggle on">👁</button>
+              <span class="l-icon">🖼</span>
+              <span class="l-name">Office Background</span>
+            </div>
+            <div class="layer-item active">
+              <button class="vis-toggle on">👁</button>
+              <span class="l-icon">👤</span>
+              <span class="l-name">Wells</span>
+            </div>
+            <div class="layer-item">
+              <button class="vis-toggle">👁</button>
+              <span class="l-icon">💬</span>
+              <span class="l-name">Speech Bubble</span>
+            </div>
+          </div>
+          <!-- Layer action buttons (matches code: 👤 Add CH, 🖼 Add BG, ▲ up, ▼ down, 🗑 remove) -->
+          <div class="layer-btns">
+            <button title="Add selected character">👤</button>
+            <button title="Add selected background">🖼</button>
+            <span style="flex:1; min-width:4px;"></span>
+            <button title="Move layer up">▲</button>
+            <button title="Move layer down">▼</button>
+            <button title="Remove layer (Del)" style="color:#dd7777;">🗑</button>
+          </div>
+        </div>
+
+        <!-- ═══ Properties: two-column layout (matches charPropsGroup) ═══ -->
+        <div class="section" style="display:flex; gap:0; padding:0; border:none; min-height:0; flex:0 0 auto;">
+
+          <!-- LEFT COLUMN: Transform -->
+          <div style="flex:1; min-width:0; padding-right:4px;">
+            <div style="font-weight:bold; font-size:13px; color:#999; margin-bottom:6px;">TRANSFORM</div>
+
+            <!-- Position -->
+            <div style="display:flex; align-items:center; gap:4px; margin-bottom:3px;">
+              <span style="font-size:10px; color:#888; width:52px;">Position</span>
+              <span style="font-size:10px; color:#666; width:16px; text-align:right;">X</span>
+              <input type="text" value="50.0%" style="flex:1; height:24px; font-size:10px; background:#16162a; border:1px solid #333350; border-radius:3px; color:#bbb; padding:0 6px; outline:none;">
+              <span style="font-size:10px; color:#666; width:16px; text-align:right;">Y</span>
+              <input type="text" value="50.0%" style="flex:1; height:24px; font-size:10px; background:#16162a; border:1px solid #333350; border-radius:3px; color:#bbb; padding:0 6px; outline:none;">
+            </div>
+            <div style="height:1px; background:#2a2a48; margin:3px 0;"></div>
+
+            <!-- Scale -->
+            <div style="display:flex; align-items:center; gap:4px; margin-bottom:3px;">
+              <span style="font-size:10px; color:#888; width:52px;">Scale</span>
+              <input type="text" value="100.0%" style="flex:1; height:24px; font-size:10px; background:#16162a; border:1px solid #333350; border-radius:3px; color:#bbb; padding:0 6px; outline:none;">
+            </div>
+            <div style="height:1px; background:#2a2a48; margin:3px 0;"></div>
+
+            <!-- Rotation -->
+            <div style="display:flex; align-items:center; gap:4px; margin-bottom:3px;">
+              <span style="font-size:10px; color:#888; width:52px;">Rotation</span>
+              <input type="text" value="0.0°" style="flex:1; height:24px; font-size:10px; background:#16162a; border:1px solid #333350; border-radius:3px; color:#bbb; padding:0 6px; outline:none;">
+            </div>
+            <div style="height:1px; background:#2a2a48; margin:3px 0;"></div>
+
+            <!-- Opacity -->
+            <div style="display:flex; align-items:center; gap:4px; margin-bottom:3px;">
+              <span style="font-size:10px; color:#888; width:52px;">Opacity</span>
+              <input type="text" value="100.0%" style="flex:1; height:24px; font-size:10px; background:#16162a; border:1px solid #333350; border-radius:3px; color:#bbb; padding:0 6px; outline:none;">
+            </div>
+            <div style="height:1px; background:#2a2a48; margin:3px 0;"></div>
+
+            <!-- Blur -->
+            <div style="display:flex; align-items:center; gap:4px; margin-bottom:3px;">
+              <span style="font-size:10px; color:#888; width:52px;">Blur</span>
+              <input type="text" value="0.0 px" style="flex:1; height:24px; font-size:10px; background:#16162a; border:1px solid #333350; border-radius:3px; color:#bbb; padding:0 6px; outline:none;">
+            </div>
+            <div style="height:1px; background:#2a2a48; margin:3px 0;"></div>
+
+            <!-- Options -->
+            <div style="display:flex; gap:8px; margin:2px 0;">
+              <label style="font-size:10px; color:#888; display:flex; align-items:center; gap:3px; cursor:pointer;">
+                <input type="checkbox" style="accent-color:#7c7cf0;"> Flip Horizontal
+              </label>
+              <label style="font-size:10px; color:#888; display:flex; align-items:center; gap:3px; cursor:pointer;">
+                <input type="checkbox" checked style="accent-color:#7c7cf0;"> Visible
+              </label>
+            </div>
+
+            <!-- CROP group -->
+            <div style="margin-top:4px; border:1px solid #2a2a48; border-radius:4px; padding:6px;">
+              <div style="display:flex; align-items:center; gap:4px; margin-bottom:4px;">
+                <span style="font-size:10px; font-weight:700; color:#888;">Crop</span>
+                <input type="checkbox" style="accent-color:#7c7cf0;">
+              </div>
+              <div style="display:grid; grid-template-columns:1fr 1fr; gap:3px;">
+                <div style="display:flex; align-items:center; gap:2px;">
+                  <span style="font-size:9px; color:#666; width:30px;">Left</span>
+                  <input type="text" value="0.0%" style="flex:1; height:22px; font-size:9px; background:#16162a; border:1px solid #333350; border-radius:3px; color:#bbb; padding:0 4px; outline:none;">
+                </div>
+                <div style="display:flex; align-items:center; gap:2px;">
+                  <span style="font-size:9px; color:#666; width:30px;">Right</span>
+                  <input type="text" value="0.0%" style="flex:1; height:22px; font-size:9px; background:#16162a; border:1px solid #333350; border-radius:3px; color:#bbb; padding:0 4px; outline:none;">
+                </div>
+                <div style="display:flex; align-items:center; gap:2px;">
+                  <span style="font-size:9px; color:#666; width:30px;">Top</span>
+                  <input type="text" value="0.0%" style="flex:1; height:22px; font-size:9px; background:#16162a; border:1px solid #333350; border-radius:3px; color:#bbb; padding:0 4px; outline:none;">
+                </div>
+                <div style="display:flex; align-items:center; gap:2px;">
+                  <span style="font-size:9px; color:#666; width:30px;">Bot</span>
+                  <input type="text" value="0.0%" style="flex:1; height:22px; font-size:9px; background:#16162a; border:1px solid #333350; border-radius:3px; color:#bbb; padding:0 4px; outline:none;">
+                </div>
+              </div>
+              <button style="width:100%; height:28px; margin-top:4px; background:#16162a; border:1px solid #333350; border-radius:4px; color:#888; font-size:10px; cursor:pointer;">Reset Crop</button>
+            </div>
+          </div>
+
+          <!-- Vertical divider -->
+          <div style="width:1px; background:#2a2a48; margin:0 4px;"></div>
+
+          <!-- RIGHT COLUMN: Character settings -->
+          <div style="flex:1; min-width:0; padding-left:4px;">
+            <div style="font-weight:bold; font-size:13px; color:#999; margin-bottom:6px;">CHARACTER</div>
+
+            <div style="display:flex; flex-direction:column; gap:6px;">
+              <div style="display:flex; align-items:center; gap:4px;">
+                <span style="font-size:10px; color:#888; width:42px; text-align:right;">Outfit:</span>
+                <select style="flex:1; height:24px; background:#16162a; border:1px solid #333350; border-radius:3px; color:#bbb; font-size:10px; outline:none; padding:0 4px;">
+                  <option>Default</option>
+                  <option>Casual</option>
+                  <option>Formal</option>
+                </select>
+              </div>
+              <div style="display:flex; align-items:center; gap:4px;">
+                <span style="font-size:10px; color:#888; width:42px; text-align:right;">Stance:</span>
+                <select style="flex:1; height:24px; background:#16162a; border:1px solid #333350; border-radius:3px; color:#bbb; font-size:10px; outline:none; padding:0 4px;">
+                  <option>Default</option>
+                  <option>Aim</option>
+                  <option>Cover</option>
+                </select>
+              </div>
+              <div style="display:flex; align-items:center; gap:4px;">
+                <span style="font-size:10px; color:#888; width:42px; text-align:right;">Anim:</span>
+                <select style="flex:1; height:24px; background:#16162a; border:1px solid #333350; border-radius:3px; color:#bbb; font-size:10px; outline:none; padding:0 4px;">
+                  <option>idle</option>
+                  <option>talk</option>
+                  <option>wave</option>
+                </select>
+              </div>
+              <label style="font-size:10px; color:#888; display:flex; align-items:center; gap:4px; cursor:pointer;">
+                <input type="checkbox" style="accent-color:#7c7cf0;"> Talking Loop
+              </label>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+    </div> <!-- main-body -->
+  </div> <!-- content -->
+
+</div> <!-- mockup -->
+
+<div style="max-width:1460px; margin-top: 24px; padding: 16px; background: #1e1e32; border-radius: 8px; line-height: 1.6;">
+  <h3 style="color:#7c7cf0; margin-bottom: 8px;">What Changed (vs. your current UI)</h3>
+
+  <div style="display:grid; grid-template-columns:1fr 1fr; gap: 16px;">
+
+    <div style="background:#1a1a2e; border-radius:6px; padding:12px;">
+      <h4 style="color:#e0c080; margin-bottom:6px;">⬅ CHARACTER FILTER (was: tall thumbnail grid)</h4>
+      <ul style="color: #999; font-size: 12px; padding-left: 16px; line-height: 1.7;">
+        <li><strong style="color:#ccc;">Instead of tall 90×90 thumbnails</strong> → compact chip list (Photoshop layers style)</li>
+        <li><strong style="color:#ccc;">Character count badges</strong> — see at a glance how many shots use each character</li>
+        <li><strong style="color:#ccc;">All / Unassigned as chips</strong> — same function, more compact</li>
+        <li><strong style="color:#ccc;">Inline search</strong> — filter characters by name right in the filter panel</li>
+        <li><strong style="color:#ccc;">Wider column</strong> — 200px instead of ~106px, fits character names better</li>
+      </ul>
+    </div>
+
+    <div style="background:#1a1a2e; border-radius:6px; padding:12px;">
+      <h4 style="color:#e0c080; margin-bottom:6px;">⬅ SHOTS COLUMN (was: flat list + combo)</h4>
+      <ul style="color: #999; font-size: 12px; padding-left: 16px; line-height: 1.7;">
+        <li><strong style="color:#ccc;">Auto-grouped into sections</strong> — ⭐ Favorites, 📁 Character groups, Recent</li>
+        <li><strong style="color:#ccc;">Sort dropdown</strong> — Sort by A–Z, Recent, Character, Favorites</li>
+        <li><strong style="color:#ccc;">Star/favorites toggle</strong> — ⭐ pin shots to top (same as Photoshop's star in layers)</li>
+        <li><strong style="color:#ccc;">Character &amp; BG tag badges</strong> — see what's in each shot without opening it</li>
+        <li><strong style="color:#ccc;">Removed the redundant combo dropdown</strong> — the sorted list + groups replaces it</li>
+        <li><strong style="color:#ccc;">View toggle buttons</strong> — switch between list and grid views (stub for future)</li>
+      </ul>
+    </div>
+
+  </div>
+
+  <p style="color:#666; margin-top:12px; font-size:12px;">
+    ✅ Everything else — the rail, the preview area, the library tabs, the layers panel, the properties panel — stays exactly as you have it now.
+    Only the two left columns received the Option 1 treatment.
+  </p>
+</div>
+
+</body>
+</html>

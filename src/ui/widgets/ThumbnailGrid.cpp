@@ -579,6 +579,8 @@ void ThumbnailGrid::mouseDoubleClickEvent(QMouseEvent* event)
         int idx = hitTest(event->pos());
         if (idx >= 0)
             emit itemDoubleClicked(idx, m_items[idx].filePath);
+        else
+            emit emptySpaceDoubleClicked();
     }
     QWidget::mouseDoubleClickEvent(event);
 }

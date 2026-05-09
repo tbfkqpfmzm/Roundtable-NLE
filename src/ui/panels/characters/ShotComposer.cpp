@@ -401,6 +401,21 @@ void ShotComposer::ensureDefaultShotsForCharacters(const QStringList& characters
         refreshShotList();
 }
 
+QString ShotComposer::activeCharFilter() const
+{
+    // The character filter list now contains ALL (item 0, empty UserRole),
+    // UNASSIGNED (item 1, "__UNASSIGNED__"), and character entries.
+    if (m_charFilterList) {
+        auto* curItem = m_charFilterList->currentItem();
+        if (curItem) {
+            QString val = curItem->data(Qt::UserRole).toString();
+            if (!val.isEmpty())
+                return val;
+        }
+    }
+    return {};
+}
+
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // Shot management
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -418,6 +433,44 @@ void ShotComposer::newShot(const QString& name)
 {
     m_currentShot = ShotPreset(name.toStdString());
     m_selectedLayer = -1;
+    m_lastSavedName = name.toStdString();
+
+    // If a specific character filter is active, auto-add that character
+    QString filterVal = activeCharFilter();
+    if (!filterVal.isEmpty() && filterVal != QStringLiteral("__UNASSIGNED__")) {
+        // Convert display name → folder name (e.g. "Drake" → "Drake (c101)")
+        std::string folderName = m_modelManager
+            ? m_modelManager->getFolderName(filterVal.toStdString())
+            : filterVal.toStdString();
+
+        CharacterState ch;
+        ch.characterName = folderName;
+        ch.outfit    = "default";
+        ch.animation = "idle";
+        ch.isTalking = true;
+        ch.posX      = 0.5f;
+        ch.posY      = 0.75f;
+        ch.scale     = 1.0f;
+
+        // Check for video character (e.g. "Wells")
+        {
+            QString qFolder  = QString::fromStdString(folderName).toLower();
+            QString qDisplay = filterVal.toLower();
+            for (const auto& [fn, info] : videoCharacterFiles()) {
+                if (QString::fromStdString(fn).toLower() == qFolder ||
+                    QString::fromStdString(info.charName).toLower() == qDisplay) {
+                    ch.videoMutePath = info.mutePath;
+                    ch.videoTalkPath = info.talkPath;
+                    break;
+                }
+            }
+        }
+
+        m_currentShot.addCharacter(ch);
+    }
+
+    // Save the new shot immediately so it appears in the preset list
+    m_presetManager.save(m_currentShot);
 
     m_updating = true;
     m_shotNameEdit->setText(name);
@@ -430,6 +483,7 @@ void ShotComposer::newShot(const QString& name)
 
     refreshLayerList();
     clearLayerProperties();
+    refreshShotList();
     emit shotChanged();
 }
 
@@ -437,6 +491,7 @@ void ShotComposer::setCurrentShot(const ShotPreset& preset)
 {
     m_currentShot = preset;
     m_selectedLayer = -1;
+    m_lastSavedName = preset.name();  // Last saved name = this preset's name
 
     // â”€â”€ Migrate legacy video-character backgrounds â†’ proper CharacterState â”€â”€
     // Old shots stored Wells as a Background with layerType="video".
@@ -577,8 +632,69 @@ bool ShotComposer::saveCurrentShot()
 {
     if (m_currentShot.name().empty())
         return false;
+
+    const std::string& name = m_currentShot.name();
+    const auto& chars = m_currentShot.characters();
+
+    // ── Detect name/content mismatch ────────────────────────────────────
+    // If the shot name looks like "CharacterName (Default)" but that
+    // character is no longer in the shot, the user likely modified an old
+    // default shot in-place.  Warn them and offer to auto-rename.
+    {
+        auto defaultPos = name.find(" (Default)");
+        if (defaultPos != std::string::npos) {
+            std::string expectedChar = name.substr(0, defaultPos);
+            bool found = false;
+            for (const auto& ch : chars) {
+                if (ch.characterName == expectedChar) {
+                    found = true;
+                    break;
+                }
+                // Also check display name — e.g. characterName "Drake (c101)"
+                // has display name "Drake", so shot "Drake (Default)" matches.
+                if (m_modelManager) {
+                    const std::string disp = m_modelManager->getDisplayName(ch.characterName);
+                    if (disp == expectedChar) {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if (!found && !chars.empty()) {
+                // Suggest a name based on the first character in the shot
+                std::string suggestion = chars[0].characterName + " (Default)";
+                if (name != suggestion) {
+                    auto reply = QMessageBox::question(
+                        this, "Shot Name Mismatch",
+                        QString("This shot is named \"%1\" but no longer contains "
+                                "the character \"%2\".\n\n"
+                                "Rename to \"%3\"?")
+                            .arg(QString::fromStdString(name))
+                            .arg(QString::fromStdString(expectedChar))
+                            .arg(QString::fromStdString(suggestion)),
+                        QMessageBox::Yes | QMessageBox::No);
+                    if (reply == QMessageBox::Yes) {
+                        m_updating = true;
+                        m_shotNameEdit->setText(QString::fromStdString(suggestion));
+                        m_updating = false;
+                        m_currentShot.setName(suggestion);
+                        // Fall through — save with the new name
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Clean up orphaned file on rename ────────────────────────────────
+    // If the shot was previously saved under a different name, delete the
+    // old file so it doesn't linger on disk and confuse things.
+    if (!m_lastSavedName.empty() && m_lastSavedName != m_currentShot.name()) {
+        m_presetManager.remove(m_lastSavedName);
+    }
+
     bool ok = m_presetManager.save(m_currentShot);
     if (ok) {
+        m_lastSavedName = m_currentShot.name();
         // Generate & persist a thumbnail PNG next to the preset JSON
         saveShotThumbnail(m_currentShot);
         refreshShotList();
@@ -638,6 +754,8 @@ int ShotComposer::addCharacter(const std::string& characterName,
     ch.videoTalkPath = videoTalkPath;
 
     int idx = m_currentShot.addCharacter(ch);
+    if (!m_shotNameEdit->isEnabled())
+        m_shotNameEdit->setEnabled(true);
     refreshLayerList();
 
     int layerIdx = m_currentShot.findLayerIndex({LayerType::Character, idx});
@@ -671,6 +789,8 @@ int ShotComposer::addBackground(const std::string& path)
     bg.scale = 1.0f;
 
     int idx = m_currentShot.addBackground(bg);
+    if (!m_shotNameEdit->isEnabled())
+        m_shotNameEdit->setEnabled(true);
     refreshLayerList();
 
     int layerIdx = m_currentShot.findLayerIndex({LayerType::Background, idx});
@@ -871,12 +991,10 @@ void ShotComposer::pasteLayer()
          (m_charFilterList && m_charFilterList->hasFocus()) ||
          !m_layerList->hasFocus())) {
         // Determine target character from character filter
-        QString charFilter;
-        if (m_charFilterList && m_charFilterList->currentRow() > 0) {
-            auto* curItem = m_charFilterList->currentItem();
-            if (curItem)
-                charFilter = curItem->data(Qt::UserRole).toString();
-        }
+        QString charFilter = activeCharFilter();
+        // UNASSIGNED filter behaves like ALL for paste purposes
+        if (charFilter == QStringLiteral("__UNASSIGNED__"))
+            charFilter.clear();
 
         // Build a new name: replace source character prefix with target character
         std::string srcName = m_shotClipboard->name();

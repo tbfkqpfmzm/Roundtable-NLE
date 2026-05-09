@@ -116,14 +116,74 @@ QWidget* ShotComposer::createShotsColumn()
     colLayout->setContentsMargins(6, 8, 6, 6);
     colLayout->setSpacing(4);
 
-    // â”€â”€ Header â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    auto* headerLabel = new QLabel(QStringLiteral("\xF0\x9F\x8E\xAC  SHOTS"));
+    // Header with view toggle
+    auto* headerRow = new QHBoxLayout;
+    auto* headerLabel = new QLabel(QStringLiteral("\xf0\x9f\x8e\xac  SHOTS"));
     headerLabel->setStyleSheet(QStringLiteral(
         "font-weight: bold; font-size: 13px; color: %1; padding: 2px 0;")
         .arg(Theme::hex(c.textSecondary)));
-    colLayout->addWidget(headerLabel);
+    headerRow->addWidget(headerLabel);
+    headerRow->addStretch();
 
-    // â”€â”€ Action buttons â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // View toggle buttons (list/grid) - placeholder visual indicators
+    auto* listViewBtn = new QPushButton(QStringLiteral("\xe2\x98\xb0"));
+    listViewBtn->setFixedSize(24, 24);
+    listViewBtn->setToolTip("List view");
+    listViewBtn->setCheckable(true);
+    listViewBtn->setChecked(true);
+    listViewBtn->setStyleSheet(QStringLiteral(
+        "QPushButton { background: %1; color: %2; border: 1px solid %3;"
+        "  border-radius: 3px; font-size: 12px; padding: 0; }"
+        "QPushButton:checked { background: %4; color: %5; }")
+        .arg(Theme::hex(c.surface0))
+        .arg(Theme::hex(c.textSecondary))
+        .arg(Theme::hex(c.border))
+        .arg(Theme::hex(c.accent))
+        .arg(Theme::hex(c.textBright)));
+    headerRow->addWidget(listViewBtn);
+
+    auto* gridViewBtn = new QPushButton(QStringLiteral("\xe2\x96\xa4"));
+    gridViewBtn->setFixedSize(24, 24);
+    gridViewBtn->setToolTip("Grid view");
+    gridViewBtn->setCheckable(true);
+    gridViewBtn->setStyleSheet(listViewBtn->styleSheet());
+    headerRow->addWidget(gridViewBtn);
+
+    colLayout->addLayout(headerRow);
+
+    // Search + Sort row
+    auto* searchSortRow = new QHBoxLayout;
+    searchSortRow->setSpacing(4);
+
+    m_shotSearchEdit = new QLineEdit;
+    m_shotSearchEdit->setPlaceholderText(QStringLiteral("\xf0\x9f\x94\x8d Search shots..."));
+    m_shotSearchEdit->setClearButtonEnabled(true);
+    m_shotSearchEdit->setStyleSheet(QStringLiteral(
+        "QLineEdit { background: %1; color: %2; border: 1px solid %3;"
+        "  border-radius: 4px; padding: 4px 8px; font-size: 12px; }")
+        .arg(Theme::hex(c.surface1))
+        .arg(Theme::hex(c.text))
+        .arg(Theme::hex(c.border)));
+    searchSortRow->addWidget(m_shotSearchEdit, 1);
+
+    m_shotSortCombo = new QComboBox;
+    m_shotSortCombo->addItems({"A-Z", "Favorites", "Character", "Recent"});
+    m_shotSortCombo->setFixedWidth(90);
+    m_shotSortCombo->setStyleSheet(QStringLiteral(
+        "QComboBox { background: %1; color: %2; border: 1px solid %3;"
+        "  border-radius: 4px; padding: 3px 6px; font-size: 11px; }"
+        "QComboBox::drop-down { border: none; width: 16px; }"
+        "QComboBox QAbstractItemView { background: %1; color: %2;"
+        "  selection-background-color: %4; }")
+        .arg(Theme::hex(c.surface1))
+        .arg(Theme::hex(c.text))
+        .arg(Theme::hex(c.border))
+        .arg(Theme::hex(c.accent)));
+    searchSortRow->addWidget(m_shotSortCombo);
+
+    colLayout->addLayout(searchSortRow);
+
+    // Action buttons
     auto* shotBtnsRow = new QHBoxLayout;
     shotBtnsRow->setSpacing(m.spacingSm);
 
@@ -140,7 +200,7 @@ QWidget* ShotComposer::createShotsColumn()
     m_saveShotBtn->setObjectName("SaveBtn");
     shotBtnsRow->addWidget(m_saveShotBtn);
 
-    m_deleteShotBtn = new QPushButton(QStringLiteral("\xF0\x9F\x97\x91 DELETE"));
+    m_deleteShotBtn = new QPushButton(QStringLiteral("\xf0\x9f\x97\x91 DELETE"));
     m_deleteShotBtn->setToolTip("Delete Shot");
     m_deleteShotBtn->setFixedHeight(28);
     m_deleteShotBtn->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
@@ -149,13 +209,7 @@ QWidget* ShotComposer::createShotsColumn()
 
     colLayout->addLayout(shotBtnsRow);
 
-    // â”€â”€ Search â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    m_shotSearchEdit = new QLineEdit;
-    m_shotSearchEdit->setPlaceholderText(QStringLiteral("\xF0\x9F\x94\x8D Search shots..."));
-    m_shotSearchEdit->setClearButtonEnabled(true);
-    colLayout->addWidget(m_shotSearchEdit);
-
-    // â”€â”€ Shot thumbnail grid (vertical scrolling) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Shot thumbnail list (vertical scrolling)
     m_shotList = new QListWidget;
     m_shotList->setObjectName("ShotThumbnailStrip");
     m_shotList->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -181,77 +235,144 @@ QWidget* ShotComposer::createShotsColumn()
         .arg(Theme::hex(c.surface2))
         .arg(Theme::hex(c.surface2)));
 
-    // Custom delegate that preserves per-item foreground color when selected
+    // Custom delegate that paints shot items with structured layout
     class ShotItemDelegate : public QStyledItemDelegate {
     public:
         using QStyledItemDelegate::QStyledItemDelegate;
         void paint(QPainter* painter, const QStyleOptionViewItem& option,
-                   const QModelIndex& index) const override {
+                   const QModelIndex& index) const override
+        {
+            painter->save();
+            painter->setRenderHint(QPainter::Antialiasing);
+
             QStyleOptionViewItem opt = option;
-            QVariant fg = index.data(Qt::ForegroundRole);
-            if (fg.isValid())
-                opt.palette.setColor(QPalette::HighlightedText,
-                                     fg.value<QBrush>().color());
-            QStyledItemDelegate::paint(painter, opt, index);
+            initStyleOption(&opt, index);
+
+            QRect r = option.rect;
+            const int margin = 8;
+            const int innerW = r.width() - margin * 2;
+            const int thumbH = static_cast<int>(innerW * 9.0 / 16.0);
+            if (thumbH < 60) return; // too narrow
+
+            bool isDefault = index.data(Qt::UserRole + 3).toBool();
+
+            // Content rect: 10px gap at top, divided evenly around divider line
+            QRect contentR = r.adjusted(0, 10, 0, 0);
+
+            // Background (drawn on content rect only)
+            QColor bgColor;
+            if (opt.state & QStyle::State_Selected) {
+                bgColor = QColor(60, 60, 100, 80);
+            } else if (opt.state & QStyle::State_MouseOver) {
+                bgColor = QColor(60, 60, 100, 40);
+            } else if (isDefault) {
+                bgColor = QColor(70, 55, 15, 80);
+            } else {
+                bgColor = QColor(45, 45, 70, 60);
+            }
+            painter->setBrush(bgColor);
+            painter->setPen(Qt::NoPen);
+            painter->drawRoundedRect(QRectF(contentR).adjusted(1, 1, -1, -1), 5, 5);
+
+            // Divider line centered in the 10px gap — 5px above, 5px below
+            if (index.row() > 0) {
+                int lineY = r.top() + 5;
+                painter->setPen(QPen(QColor(190, 190, 220, 150), 1));
+                painter->drawLine(r.left() + 8, lineY, r.right() - 8, lineY);
+            }
+
+            // Gold left accent for default shots
+            if (isDefault) {
+                painter->setPen(Qt::NoPen);
+                painter->setBrush(QColor(220, 180, 50, 120));
+                painter->drawRoundedRect(QRectF(contentR.left() + 3, contentR.top() + 6, 4, contentR.height() - 12), 2, 2);
+            }
+
+            // Selection border
+            if (opt.state & QStyle::State_Selected) {
+                painter->setPen(QPen(QColor(124, 124, 240), 2));
+                painter->setBrush(Qt::NoBrush);
+                painter->drawRoundedRect(QRectF(contentR).adjusted(1, 1, -1, -1), 5, 5);
+            }
+
+            // Thumbnail - full width
+            QIcon icon = index.data(Qt::DecorationRole).value<QIcon>();
+            if (!icon.isNull()) {
+                QPixmap pix = icon.pixmap(innerW, thumbH);
+                if (!pix.isNull()) {
+                    QRect thumbRect(contentR.left() + margin, contentR.top() + 3, innerW, thumbH);
+                    painter->drawPixmap(thumbRect, pix);
+                }
+            }
+
+            // Text area below thumbnail
+            const int textMargin = 10;
+            const int textTop = contentR.top() + 3 + thumbH + 6;
+            const int textAreaW = innerW - textMargin * 2;
+            const int textLeft = r.left() + margin + textMargin;
+
+            // Shot name (bold, 1.5x larger, centered)
+            QString name = index.data(Qt::DisplayRole).toString();
+            if (!name.isEmpty()) {
+                QFont nameFont = opt.font;
+                nameFont.setPixelSize(18);
+                nameFont.setBold(true);
+                painter->setFont(nameFont);
+
+                QColor nameColor = index.data(Qt::ForegroundRole).value<QColor>();
+                if (!nameColor.isValid()) nameColor = QColor(200, 200, 200);
+                painter->setPen(nameColor);
+
+                QRect nameRect(textLeft, textTop, textAreaW, 24);
+                QString elidedName = painter->fontMetrics().elidedText(name, Qt::ElideRight, textAreaW);
+                painter->drawText(nameRect, Qt::AlignCenter, elidedName);
+            }
+
+            // Subtitle: character tags only (centered)
+            auto charTags = index.data(Qt::UserRole + 1).toStringList();
+
+            QStringList parts;
+            for (const auto& t : charTags) {
+                QString shortTag = t.length() > 20 ? t.left(18) + "..." : t;
+                parts << QString::fromUtf8("\xf0\x9f\x91\xa4 ") + shortTag;
+            }
+            if (isDefault)
+                parts << QString::fromUtf8("\xe2\xad\x90");
+
+            QString subText = parts.isEmpty() ? QString() : parts.join("  |  ");
+            if (!subText.isEmpty()) {
+                QFont subFont = opt.font;
+                subFont.setPixelSize(15);
+                painter->setFont(subFont);
+                painter->setPen(QColor(140, 140, 140));
+
+                QRect subRect(textLeft, textTop + 26, textAreaW, 20);
+                QString elidedSub = painter->fontMetrics().elidedText(subText, Qt::ElideRight, textAreaW);
+                painter->drawText(subRect, Qt::AlignCenter, elidedSub);
+            }
+
+            painter->restore();
+        }
+        QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override
+        {
+            Q_UNUSED(option);
+            Q_UNUSED(index);
+            // Height: 3px divider gap + thumbnail (16:9) + name (24px) + subtitle (20px) + padding
+            return QSize(0, 210);
         }
     };
     m_shotList->setItemDelegate(new ShotItemDelegate(m_shotList));
 
     colLayout->addWidget(m_shotList, 1);
 
-    // â”€â”€ Shot dropdown combo â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    m_shotCombo = new QComboBox;
-    m_shotCombo->setObjectName("ShotCombo");
-    m_shotCombo->setMinimumHeight(28);
-    m_shotCombo->setStyleSheet(QStringLiteral(
-        "QComboBox { background: %1; color: %2; border: 1px solid %3;"
-        "  border-radius: 4px; padding: 4px 8px; font-size: 12px; }"
-        "QComboBox::drop-down { border: none; }"
-        "QComboBox QAbstractItemView { background: %1; color: %2;"
-        "  selection-background-color: %4; }")
-        .arg(Theme::hex(c.surface1))
-        .arg(Theme::hex(c.text))
-        .arg(Theme::hex(c.border))
-        .arg(Theme::hex(c.accent)));
-    colLayout->addWidget(m_shotCombo);
-
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     // Connections
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
-    // Shot thumbnail strip selection â†’ load preset and sync combo
+    // Shot thumbnail strip selection -> load preset
     connect(m_shotList, &QListWidget::currentItemChanged,
             this, [this](QListWidgetItem* current, QListWidgetItem* /*previous*/) {
         if (!current) return;
         auto name = current->data(Qt::UserRole).toString().toStdString();
         if (name.empty()) return;
-
-        m_shotCombo->blockSignals(true);
-        int comboIdx = m_shotCombo->findData(current->data(Qt::UserRole));
-        if (comboIdx >= 0) m_shotCombo->setCurrentIndex(comboIdx);
-        m_shotCombo->blockSignals(false);
-
-        auto preset = m_presetManager.load(name);
-        if (preset)
-            setCurrentShot(*preset);
-    });
-
-    // Shot dropdown combo selection â†’ load preset and sync thumbnail strip
-    connect(m_shotCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, [this](int index) {
-        if (index < 0) return;
-        auto name = m_shotCombo->itemData(index).toString().toStdString();
-        if (name.empty()) return;
-
-        m_shotList->blockSignals(true);
-        for (int i = 0; i < m_shotList->count(); ++i) {
-            auto* item = m_shotList->item(i);
-            if (item && item->data(Qt::UserRole).toString().toStdString() == name) {
-                m_shotList->setCurrentRow(i);
-                break;
-            }
-        }
-        m_shotList->blockSignals(false);
 
         auto preset = m_presetManager.load(name);
         if (preset)
@@ -288,7 +409,7 @@ QWidget* ShotComposer::createShotsColumn()
         clearLayerProperties();
     });
 
-    // Shot list context menu (right-click) â†’ Delete / Duplicate / Rename
+    // Shot list context menu (right-click) -> Delete / Duplicate / Rename
     connect(m_shotList, &QListWidget::customContextMenuRequested,
             this, [this](const QPoint& pos) {
         auto* item = m_shotList->itemAt(pos);
@@ -306,7 +427,6 @@ QWidget* ShotComposer::createShotsColumn()
         if (!chosen) return;
 
         if (chosen == actDuplicate) {
-            // Load the shot, prompt for a name, save as duplicate
             auto preset = m_presetManager.load(shotName.toStdString());
             if (!preset) return;
             std::string baseName = shotName.toStdString() + " Copy";
@@ -347,7 +467,7 @@ QWidget* ShotComposer::createShotsColumn()
             m_presetManager.remove(shotName.toStdString());
             setCurrentShot(renamed);
             refreshShotList();
-            spdlog::info("ShotComposer: Renamed shot '{}' â†’ '{}'",
+            spdlog::info("ShotComposer: Renamed shot '{}' -> '{}'",
                 shotName.toStdString(), newNameStd);
         }
         else if (chosen == actDelete) {
@@ -374,74 +494,187 @@ QWidget* ShotComposer::createShotsColumn()
         }
     });
 
-    // Shot search â†’ refresh shot list
+    // Shot search -> refresh shot list
     connect(m_shotSearchEdit, &QLineEdit::textChanged,
             this, [this]() { refreshShotList(); });
 
+    // Sort combo -> refresh shot list
+    connect(m_shotSortCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int) { refreshShotList(); });
+
     return column;
 }
+
 
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // Character filter thumbnail column â€” sits between rail and shots column
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
+// Delegate that paints a small count badge on the right side of filter items
+class FilterCountDelegate : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+    void paint(QPainter* painter, const QStyleOptionViewItem& option,
+               const QModelIndex& index) const override
+    {
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+
+        QRect r = option.rect;
+        QString text = index.data(Qt::DisplayRole).toString();
+        int count = index.data(Qt::UserRole + 1).toInt();
+        bool isSelected = option.state & QStyle::State_Selected;
+        bool isHovered = option.state & QStyle::State_MouseOver;
+
+        // Draw background
+        QColor bgColor;
+        if (isSelected) {
+            bgColor = QColor(60, 60, 100, 100);
+        } else if (isHovered) {
+            bgColor = QColor(60, 60, 100, 50);
+        } else {
+            bgColor = QColor(45, 45, 70, 40);
+        }
+        painter->setBrush(bgColor);
+        painter->setPen(Qt::NoPen);
+        painter->drawRoundedRect(QRectF(r).adjusted(1, 1, -1, -1), 5, 5);
+
+        // Selection border
+        if (isSelected) {
+            painter->setPen(QPen(QColor(124, 124, 240), 2));
+            painter->setBrush(Qt::NoBrush);
+            painter->drawRoundedRect(QRectF(r).adjusted(1, 1, -1, -1), 5, 5);
+        }
+
+        // Calculate badge dimensions first
+        int badgeWidth = 0;
+        if (count > 0) {
+            QString countStr = QString::number(count);
+            QFont bf = option.font;
+            bf.setPixelSize(11);
+            bf.setBold(true);
+            painter->setFont(bf);
+            badgeWidth = painter->fontMetrics().horizontalAdvance(countStr) + 14;
+        }
+
+        // Draw icon (48x48)
+        int iconOffset = 6; // left padding for text when no icon
+        QIcon icon = index.data(Qt::DecorationRole).value<QIcon>();
+        if (!icon.isNull()) {
+            QPixmap pix = icon.pixmap(36, 36);
+            if (!pix.isNull()) {
+                int iconY = r.top() + (r.height() - 36) / 2;
+                painter->drawPixmap(r.left() + 6, iconY, 36, 36, pix);
+                iconOffset = 6 + 36 + 8; // icon + gap
+            }
+        }
+
+        // Draw text with proper elision, leaving room for badge
+        if (!text.isEmpty()) {
+            QFont tf = option.font;
+            painter->setFont(tf);
+            painter->setPen(option.palette.color(QPalette::Text));
+
+            int leftEdge = r.left() + iconOffset;
+            int rightEdge = (badgeWidth > 0) ? (r.right() - badgeWidth - 8) : (r.right() - 8);
+            int textAvail = rightEdge - leftEdge;
+            if (textAvail > 20) {
+                QRect textRect(leftEdge, r.top(), textAvail, r.height());
+                QString elided = painter->fontMetrics().elidedText(text, Qt::ElideRight, textAvail);
+                painter->drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter, elided);
+            }
+        }
+
+        // Draw badge on top of everything
+        if (count > 0 && badgeWidth > 0) {
+            QString countStr = QString::number(count);
+            QFont bf = option.font;
+            bf.setPixelSize(11);
+            bf.setBold(true);
+            painter->setFont(bf);
+
+            QRect badgeRect(r.right() - badgeWidth - 4, r.top() + 6, badgeWidth, r.height() - 12);
+            QColor badgeBg = QColor(128, 128, 128, 70);
+            painter->setBrush(badgeBg);
+            painter->setPen(Qt::NoPen);
+            painter->drawRoundedRect(badgeRect, 8, 8);
+
+            painter->setPen(option.palette.color(QPalette::Text));
+            painter->drawText(badgeRect, Qt::AlignCenter, countStr);
+        }
+
+        painter->restore();
+    }
+};
+
 QWidget* ShotComposer::createCharFilterColumn()
 {
     const auto& c = Theme::colors();
 
-    constexpr int kFilterThumbSz = 90;
-
     auto* column = new QWidget;
     column->setObjectName("CharFilterColumn");
-    column->setFixedWidth(kFilterThumbSz + 24);
+    column->setFixedWidth(220);
     column->setStyleSheet(QStringLiteral(
         "#CharFilterColumn { background: %1; border-right: 1px solid %2; }")
         .arg(Theme::hex(c.surface0))
         .arg(Theme::hex(c.border)));
 
     auto* colLayout = new QVBoxLayout(column);
-    colLayout->setContentsMargins(4, 8, 4, 4);
-    colLayout->setSpacing(0);
+    colLayout->setContentsMargins(6, 8, 6, 6);
+    colLayout->setSpacing(4);
 
+    // Header "CHARACTERS"
+    auto* headerLabel = new QLabel(QStringLiteral("CHARACTERS"));
+    headerLabel->setStyleSheet(QStringLiteral(
+        "font-weight: bold; font-size: 13px; color: %1; padding: 2px 0; letter-spacing: 0.5px;")
+        .arg(Theme::hex(c.textSecondary)));
+    colLayout->addWidget(headerLabel);
+
+    // Search bar
+    m_filterSearchEdit = new QLineEdit;
+    m_filterSearchEdit->setPlaceholderText(QStringLiteral("ð Filter characters..."));
+    m_filterSearchEdit->setClearButtonEnabled(true);
+    m_filterSearchEdit->setStyleSheet(QStringLiteral(
+        "QLineEdit { background: %1; color: %2; border: 1px solid %3;"
+        "  border-radius: 4px; padding: 4px 8px; font-size: 12px; }")
+        .arg(Theme::hex(c.surface1))
+        .arg(Theme::hex(c.text))
+        .arg(Theme::hex(c.border)));
+    colLayout->addWidget(m_filterSearchEdit);
+
+    // Character filter chip list (ListMode, compact rows)
     m_charFilterList = new QListWidget;
     m_charFilterList->setObjectName("CharFilterList");
     m_charFilterList->setSelectionMode(QAbstractItemView::SingleSelection);
-    m_charFilterList->setViewMode(QListView::IconMode);
-    m_charFilterList->setFlow(QListView::TopToBottom);
-    m_charFilterList->setWrapping(false);
+    m_charFilterList->setViewMode(QListView::ListMode);
     m_charFilterList->setMovement(QListView::Static);
-    m_charFilterList->setResizeMode(QListView::Adjust);
-    m_charFilterList->setIconSize(QSize(kFilterThumbSz, kFilterThumbSz));
-    m_charFilterList->setGridSize(QSize(kFilterThumbSz + 8, kFilterThumbSz + 22));
     m_charFilterList->setSpacing(2);
+    m_charFilterList->setIconSize(QSize(48, 48));
     m_charFilterList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_charFilterList->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     m_charFilterList->setStyleSheet(QStringLiteral(
         "QListWidget { background: transparent; border: none; outline: none; }"
-        "QListWidget::item { background: %1; border: 2px solid transparent;"
-        "  border-radius: 6px; padding: 2px; }"
+        "QListWidget::item { background: %1; border: 1.5px solid transparent;"
+        "  border-radius: 6px; padding: 6px 10px; min-height: 54px; }"
         "QListWidget::item:selected { border-color: %2; background: %3; }"
         "QListWidget::item:hover { background: %4; }")
-        .arg(Theme::hex(c.surface1))
+        .arg(Theme::hex(c.surface0))
         .arg(Theme::hex(c.accent))
         .arg(Theme::hex(c.surface2))
         .arg(Theme::hex(c.surface2)));
+    m_charFilterList->setItemDelegate(new FilterCountDelegate(m_charFilterList));
     colLayout->addWidget(m_charFilterList, 1);
 
-    // "ALL" item â€” will be populated with thumbnails in refreshShotList()
-    auto* allItem = new QListWidgetItem(QStringLiteral("ALL"));
-    allItem->setData(Qt::UserRole, QString());
-    allItem->setTextAlignment(Qt::AlignHCenter | Qt::AlignBottom);
-    allItem->setSizeHint(QSize(kFilterThumbSz + 8, 32));
-    m_charFilterList->addItem(allItem);
-    m_charFilterList->setCurrentRow(0);
-
-    // Selecting a character filters the shots list
+    // Connect filter list and search to refresh shot list
     connect(m_charFilterList, &QListWidget::currentItemChanged,
+            this, [this]() { refreshShotList(); });
+    connect(m_filterSearchEdit, &QLineEdit::textChanged,
             this, [this]() { refreshShotList(); });
 
     return column;
 }
+
+
 
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // UI Setup â€” B3-C layout: left=preview+library, right=properties+layers

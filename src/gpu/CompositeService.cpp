@@ -124,6 +124,8 @@ void CompositeService::reset()
     m_gpuLayerTexKeys.clear();
     m_gpuMaskTextures.clear();
     m_gpuCompositeState = 0;
+    m_gpuBackoffAttempts = 0;
+    m_gpuBackoffUntil = {};
     m_lastActiveClipIds.clear();
     m_prewarmedClipIds.clear();
     m_lastLookaheadScan = {};
@@ -238,6 +240,8 @@ void CompositeService::destroyCompositeSlot()
 {
     m_gpuSubmission.reset();
     m_gpuCompositeState = 0;
+    m_gpuBackoffAttempts = 0;
+    m_gpuBackoffUntil = {};
 }
 
 void CompositeService::clearGpuTexCache()

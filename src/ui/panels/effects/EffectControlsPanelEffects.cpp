@@ -18,6 +18,8 @@
 #include "effects/Effect.h"
 #include "effects/EffectStack.h"
 #include "effects/ChromaKey.h"
+#include "effects/LUT.h"
+#include "effects/Letterbox.h"
 
 #include <QFrame>
 #include <QGridLayout>
@@ -25,6 +27,10 @@
 #include <QColorDialog>
 #include <QComboBox>
 #include <QPushButton>
+#include <QFileDialog>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QFileInfo>
 
 namespace rt {
 
@@ -284,7 +290,8 @@ void EffectControlsPanel::buildUltraKeyUI(Effect& fx, size_t effectIdx,
         ol->addWidget(lbl);
 
         auto* combo = new QComboBox(outputWidget);
-        combo->addItems({"Composite", "Alpha Channel", "Color Channel"});
+        combo->addItems({"Composite", "Alpha Matte", "Color Channel",
+                         "Original", "Removed Color", "Spill Map"});
         combo->setCurrentIndex(static_cast<int>(fx.param(ChromaKey::OutputMode).track.evaluate(0)));
         combo->setFixedHeight(22);
         ol->addWidget(combo, 1);
@@ -631,6 +638,233 @@ void EffectControlsPanel::buildMaskUI(int& /*rowIdx*/)
             m_propLayout->addWidget(chk);
         }
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  buildLUTUI — LUT effect with file browser for .cube files
+// ═══════════════════════════════════════════════════════════════════════════
+
+void EffectControlsPanel::buildLUTUI(Effect& fx, size_t effectIdx, int& rowIdx)
+{
+    const auto& tc = Theme::colors();
+    auto* lutFx = dynamic_cast<LUT*>(&fx);
+
+    // Row builder helper
+    auto makeRow = [&](const QString& name,
+                       KeyframeTrack<float>* track) -> PropertyRow* {
+        auto* row = new PropertyRow(name, track, m_propContainer);
+        row->setRowIndex(rowIdx++);
+        m_propertyRows.push_back(row);
+        connect(row, &PropertyRow::addKeyframeRequested,
+                this, &EffectControlsPanel::onAddKeyframe);
+        connect(row, &PropertyRow::deleteKeyframeRequested,
+                this, &EffectControlsPanel::onDeleteKeyframe);
+        connect(row, &PropertyRow::goToPrevKeyframe,
+                this, &EffectControlsPanel::onGoToPrevKeyframe);
+        connect(row, &PropertyRow::goToNextKeyframe,
+                this, &EffectControlsPanel::onGoToNextKeyframe);
+        return row;
+    };
+
+    // ── LUT file path label + load button ─────────────────────────────
+    {
+        auto* lutWidget = new QWidget(m_propContainer);
+        lutWidget->setFixedHeight(28);
+        auto* lutLayout = new QHBoxLayout(lutWidget);
+        lutLayout->setContentsMargins(36, 2, 6, 2);
+        lutLayout->setSpacing(6);
+
+        auto* loadBtn = new QPushButton(QStringLiteral("Load LUT..."), lutWidget);
+        loadBtn->setFixedHeight(22);
+        loadBtn->setStyleSheet(QStringLiteral(
+            "QPushButton { background: %1; color: %2; border: 1px solid %3; "
+            "border-radius: 3px; padding: 2px 8px; font-size: 11px; }"
+            "QPushButton:hover { background: %4; }")
+            .arg(Theme::hex(tc.surface3), Theme::hex(tc.textPrimary),
+                 Theme::hex(tc.controlBorder), Theme::hex(tc.controlBgHover)));
+        lutLayout->addWidget(loadBtn);
+
+        QString loadedPath;
+        if (lutFx && lutFx->hasLUT()) {
+            loadedPath = QString::fromStdString(lutFx->lutPath());
+        }
+
+        auto* pathLabel = new QLabel(loadedPath.isEmpty()
+            ? QStringLiteral("No LUT loaded")
+            : QFileInfo(loadedPath).fileName(), lutWidget);
+        pathLabel->setStyleSheet(QStringLiteral(
+            "color: %1; font-size: 11px; background: transparent;")
+            .arg(loadedPath.isEmpty() ? Theme::hex(tc.textTertiary)
+                                      : Theme::hex(tc.textSecondary)));
+        pathLabel->setToolTip(loadedPath);
+        lutLayout->addWidget(pathLabel, 1);
+
+        m_propLayout->addWidget(lutWidget);
+
+        if (lutFx) {
+            connect(loadBtn, &QPushButton::clicked, this, [this, lutFx, pathLabel]() {
+                QString filePath = QFileDialog::getOpenFileName(
+                    nullptr, QStringLiteral("Load LUT File"),
+                    QString(), QStringLiteral("Cube LUT files (*.cube);;All files (*)"));
+                if (filePath.isEmpty()) return;
+
+                if (lutFx->loadCubeFile(filePath.toStdString())) {
+                    pathLabel->setText(QFileInfo(filePath).fileName());
+                    pathLabel->setToolTip(filePath);
+                    pathLabel->setStyleSheet(QStringLiteral(
+                        "color: %1; font-size: 11px; background: transparent;")
+                        .arg(Theme::hex(Theme::colors().textSecondary)));
+                    emit propertyChanged();
+                }
+            });
+        }
+    }
+
+    // ── Intensity parameter ───────────────────────────────────────────
+    if (fx.paramCount() > LUT::Param::Intensity) {
+        auto& intensityParam = fx.param(LUT::Param::Intensity);
+        auto* fxRow = makeRow(QStringLiteral("Intensity"), &intensityParam.track);
+        auto* fxSpin = createScrubby(intensityParam.minVal, intensityParam.maxVal,
+                                      0.01, 2);
+        fxSpin->setValue(static_cast<double>(
+            intensityParam.track.evaluate(clipRelativeTick())));
+        fxRow->addValueWidget(fxSpin);
+        m_propLayout->addWidget(fxRow);
+        wireEffectParam(fxSpin, effectIdx, LUT::Param::Intensity);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  buildLetterboxUI — Letterbox with preset aspect ratio dropdown
+// ═══════════════════════════════════════════════════════════════════════════
+
+void EffectControlsPanel::buildLetterboxUI(Effect& fx, size_t effectIdx, int& rowIdx)
+{
+    const auto& tc = Theme::colors();
+
+    // Row builder helper
+    auto makeRow = [&](const QString& name,
+                       KeyframeTrack<float>* track) -> PropertyRow* {
+        auto* row = new PropertyRow(name, track, m_propContainer);
+        row->setRowIndex(rowIdx++);
+        m_propertyRows.push_back(row);
+        connect(row, &PropertyRow::addKeyframeRequested,
+                this, &EffectControlsPanel::onAddKeyframe);
+        connect(row, &PropertyRow::deleteKeyframeRequested,
+                this, &EffectControlsPanel::onDeleteKeyframe);
+        connect(row, &PropertyRow::goToPrevKeyframe,
+                this, &EffectControlsPanel::onGoToPrevKeyframe);
+        connect(row, &PropertyRow::goToNextKeyframe,
+                this, &EffectControlsPanel::onGoToNextKeyframe);
+        return row;
+    };
+
+    // ── Aspect ratio presets ──────────────────────────────────────────
+    struct AspectPreset {
+        const char* label;
+        float width;
+        float height;
+    };
+    static const AspectPreset presets[] = {
+        {"2.39:1 (CinemaScope)",  2.39f, 1.0f},
+        {"2.35:1 (Classic scope)", 2.35f, 1.0f},
+        {"2.76:1 (Ultra Panavision)", 2.76f, 1.0f},
+        {"1.85:1 (Academy Flat)", 1.85f, 1.0f},
+        {"1.78:1 (16:9)",         1.78f, 1.0f},
+        {"1.33:1 (4:3)",          1.33f, 1.0f},
+        {"1:1 (Square)",          1.0f,  1.0f},
+        {"1.43:1 (IMAX)",         1.43f, 1.0f},
+    };
+    constexpr int kNumPresets = sizeof(presets) / sizeof(presets[0]);
+
+    // ── Preset combo box ──────────────────────────────────────────────
+    {
+        auto* presetWidget = new QWidget(m_propContainer);
+        presetWidget->setFixedHeight(28);
+        auto* presetLayout = new QHBoxLayout(presetWidget);
+        presetLayout->setContentsMargins(36, 2, 6, 2);
+        presetLayout->setSpacing(6);
+
+        auto* presetLabel = new QLabel(QStringLiteral("Aspect Ratio"), presetWidget);
+        presetLabel->setStyleSheet(QStringLiteral(
+            "color: %1; font-size: 12px; background: transparent;")
+            .arg(Theme::hex(tc.textPrimary)));
+        presetLayout->addWidget(presetLabel);
+
+        auto* presetCombo = new QComboBox(presetWidget);
+        presetCombo->setFixedHeight(22);
+        for (int i = 0; i < kNumPresets; ++i)
+            presetCombo->addItem(QString::fromUtf8(presets[i].label));
+        presetCombo->setStyleSheet(QStringLiteral(
+            "QComboBox { background: %1; color: %2; border: 1px solid %3; "
+            "border-radius: 3px; padding: 1px 4px; font-size: 11px; }"
+            "QComboBox:hover { border-color: %4; }"
+            "QComboBox::drop-down { border: none; width: 16px; }")
+            .arg(Theme::hex(tc.inputBg), Theme::hex(tc.textPrimary),
+                 Theme::hex(tc.controlBorder), Theme::hex(tc.accent)));
+        presetLayout->addWidget(presetCombo, 1);
+
+        m_propLayout->addWidget(presetWidget);
+
+        // Try to detect current preset from param values
+        float curW = fx.paramCount() > Letterbox::Param::AspectWidth
+            ? fx.param(Letterbox::Param::AspectWidth).track.evaluate(clipRelativeTick())
+            : 2.39f;
+        float curH = fx.paramCount() > Letterbox::Param::AspectHeight
+            ? fx.param(Letterbox::Param::AspectHeight).track.evaluate(clipRelativeTick())
+            : 1.0f;
+        float curRatio = curW / std::max(curH, 0.001f);
+
+        int bestPreset = 0;
+        float bestDist = std::abs(curRatio - presets[0].width / presets[0].height);
+        for (int i = 1; i < kNumPresets; ++i) {
+            float dist = std::abs(curRatio - presets[i].width / presets[i].height);
+            if (dist < bestDist) {
+                bestDist = dist;
+                bestPreset = i;
+            }
+        }
+        presetCombo->setCurrentIndex(bestPreset);
+
+        // Wire preset selection to update AspectWidth/AspectHeight
+        connect(presetCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                this, [this, &fx, effectIdx, presetCombo](int index) {
+            if (!m_clip || m_updating) return;
+            if (index < 0 || index >= kNumPresets) return;
+
+            float newW = presets[index].width;
+            float newH = presets[index].height;
+
+            auto& st = m_clip->effects();
+            if (effectIdx >= st.effectCount()) return;
+            auto& ef = st.effect(effectIdx);
+
+            if (ef.paramCount() > Letterbox::Param::AspectWidth)
+                ef.param(Letterbox::Param::AspectWidth).track.writeValue(
+                    clipRelativeTick(), newW);
+            if (ef.paramCount() > Letterbox::Param::AspectHeight)
+                ef.param(Letterbox::Param::AspectHeight).track.writeValue(
+                    clipRelativeTick(), newH);
+
+            emit propertyChanged();
+        });
+    }
+
+    // ── Bar Opacity ──────────────────────────────────────────────────
+    if (fx.paramCount() > Letterbox::Param::BarOpacity) {
+        auto& opParam = fx.param(Letterbox::Param::BarOpacity);
+        auto* opRow = makeRow(QStringLiteral("Bar Opacity"), &opParam.track);
+        auto* opSpin = createScrubby(opParam.minVal, opParam.maxVal, 0.01, 2);
+        opSpin->setValue(static_cast<double>(
+            opParam.track.evaluate(clipRelativeTick())));
+        opRow->addValueWidget(opSpin);
+        m_propLayout->addWidget(opRow);
+        wireEffectParam(opSpin, effectIdx, Letterbox::Param::BarOpacity);
+    }
+
+    // ── Bar Color (R, G, B) — simplified as a single color swatch ────
+    // (hidden for now — bars default to black)
+    // ── Feather (hidden for simplicity ─ bars are clean)
 }
 
 } // namespace rt

@@ -717,6 +717,68 @@ bool ShotPresetManager::hasPreset(const std::string& name) const
                        [&](const auto& pair) { return pair.first == name; });
 }
 
+std::optional<ShotPreset> ShotPresetManager::resolveDefaultShot(
+    const std::string& characterName) const
+{
+    if (m_directory.empty())
+        return std::nullopt;
+
+    // ── Step 1: Check _defaults.json for an explicit mapping ────────────
+    auto defaultsPath = m_directory / "_defaults.json";
+    std::ifstream f(defaultsPath);
+    if (f.is_open()) {
+        std::string content((std::istreambuf_iterator<char>(f)),
+                             std::istreambuf_iterator<char>());
+        JLexer lex(content);
+        if (lex.next() == JTok::LBrace) {
+            // Parse flat object: {"charName": "shotName", ...}
+            while (true) {
+                auto t = lex.next();
+                if (t == JTok::RBrace) break;
+                if (t == JTok::Comma) continue;
+                if (t != JTok::String) break;
+
+                std::string key = lex.sval;
+                if (lex.next() != JTok::Colon) break;
+                if (lex.next() != JTok::String) break;
+                std::string val = lex.sval;
+
+                if (key == characterName) {
+                    // Found an explicit mapping — look up the named preset
+                    auto preset = load(val);
+                    if (preset)
+                        return preset;
+                    // If the mapped shot doesn't exist, fall through
+                    break;
+                }
+            }
+        }
+    }
+
+    // ── Step 2: Fall back to naming convention ──────────────────────────
+    std::string defaultName = characterName + " (Default)";
+    {
+        auto preset = load(defaultName);
+        if (preset) return preset;
+    }
+
+    // ── Step 3: Case-insensitive fallback ───────────────────────────────
+    {
+        std::string lowerChar = characterName;
+        std::transform(lowerChar.begin(), lowerChar.end(), lowerChar.begin(), ::tolower);
+        std::string targetLower = lowerChar + " (default)";
+        auto names = presetNames();
+        for (const auto& pn : names) {
+            std::string lowerPN = pn;
+            std::transform(lowerPN.begin(), lowerPN.end(), lowerPN.begin(), ::tolower);
+            if (lowerPN == targetLower)
+                return load(pn);
+        }
+    }
+
+    return std::nullopt;
+}
+
 std::filesystem::path ShotPresetManager::pathForPreset(const std::string& name) const
 {
     // Sanitize the name for use as a filename

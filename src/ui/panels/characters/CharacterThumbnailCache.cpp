@@ -85,6 +85,28 @@ QPixmap loadCachedCharacterFullBody(const std::string& charName)
     return QPixmap::fromImage(img);
 }
 
+QPixmap loadCachedCharacterOutfitFullBody(const std::string& charName,
+                                           const std::string& outfit)
+{
+    // Try outfit-specific path first
+    std::string outfitPath = cachedCharacterOutfitFullBodyPath(charName, outfit);
+    QImage img(outfitPath.c_str());
+    if (!img.isNull())
+        return QPixmap::fromImage(img);
+    // Fall back to generic full-body
+    return loadCachedCharacterFullBody(charName);
+}
+
+std::string cachedCharacterOutfitFullBodyPath(const std::string& charName,
+                                                const std::string& outfit)
+{
+    if (outfit.empty() || outfit == "default")
+        return cachedCharacterFullBodyPath(charName);
+    return std::string("assets/cache/")
+        + kCharacterThumbCacheDir + "/"
+        + charName + "_" + outfit + "_full.png";
+}
+
 #ifdef ROUNDTABLE_HAS_SPINE
 
 static QColor extractDominantColorForThumb(const QImage& img)
@@ -353,6 +375,18 @@ bool renderAndCacheCharacterThumbnail(const std::string& charName,
     }
     int cW = cMaxX - cMinX + 1;
     int cH = cMaxY - cMinY + 1;
+
+    // For tall/thin characters not in the manual adjustment table (e.g. Drake),
+    // apply Kilo-like defaults: tighter vertical zoom to focus on the head/face,
+    // wider horizontal zoom to give breathing room, keep crop anchored at top.
+    if (cW > 0 && static_cast<float>(cH) / static_cast<float>(cW) > 2.2f) {
+        bool hasManualAdj = kThumbCropAdj.find(charName) != kThumbCropAdj.end();
+        if (!hasManualAdj) {
+            cropAdj.zoomH = 0.7f;   // tighter vertically → headshot
+            cropAdj.zoomW = 1.5f;   // wider horizontally → breathing room
+        }
+    }
+
     int cCX = cMinX + cW / 2;
 
     int cropH = static_cast<int>(cH * 0.55f * cropAdj.zoomH);
@@ -395,6 +429,18 @@ bool renderAndCacheCharacterThumbnail(const std::string& charName,
         } else {
             spdlog::info("ThumbnailCache: saved full-body for '{}' ({}x{})",
                          charName, fullCopy.width(), fullCopy.height());
+        }
+
+        // Also save an outfit-specific full-body render if this is a non-default outfit
+        if (!outfit.empty() && outfit != "default") {
+            std::string outfitPath = cachedCharacterOutfitFullBodyPath(charName, outfit);
+            if (!fullCopy.save(QString::fromStdString(outfitPath), "PNG")) {
+                spdlog::warn("ThumbnailCache: failed to save full-body for '{}/{}'",
+                             charName, outfit);
+            } else {
+                spdlog::info("ThumbnailCache: saved full-body for '{}/{}' ({}x{})",
+                             charName, outfit, fullCopy.width(), fullCopy.height());
+            }
         }
     }
 

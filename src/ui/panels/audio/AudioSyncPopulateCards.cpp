@@ -130,12 +130,22 @@ void AudioSync::populateCards()
         // Find matched clip(s) for this line
         auto clipIt = lineToClips.find(line.lineNumber);
         bool hasClip = (clipIt != lineToClips.end() && !clipIt->second.empty());
-        size_t primaryClipIdx = hasClip ? clipIt->second[0] : SIZE_MAX;
+        size_t primaryClipIdx = SIZE_MAX;
         int matchState = 0;
         float confidence = 0.0f;
         if (hasClip) {
-            matchState = m_clips[primaryClipIdx].matchState;
-            confidence = m_clips[primaryClipIdx].confidence;
+            // Pick the clip with the highest match state (confirmed > tentative > unmatched)
+            // so the card visual matches the aggregate counters which count a line as
+            // confirmed if ANY clip for that line is confirmed.
+            for (size_t ci : clipIt->second) {
+                const auto& c = m_clips[ci];
+                if (c.matchState > matchState ||
+                    (c.matchState == matchState && c.confidence > confidence)) {
+                    primaryClipIdx = ci;
+                    matchState = c.matchState;
+                    confidence = c.confidence;
+                }
+            }
         }
 
         // â”€â”€ Card frame â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -575,7 +585,7 @@ void AudioSync::populateCards()
                         m_clips[clipIdx].matchState = 2;
                         populateLeftList();
                         updateCardMatchStyle(clipIdx);
-                        updateSmartBar();
+                        updateWorkflowState();
                     }
                 });
                 rightLayout->addWidget(confirmBtn);
@@ -811,6 +821,7 @@ void AudioSync::populateCards()
     // Also update left list to stay in sync
     populateLeftList();
     updateSmartBar();
+    updateWorkflowState();
 
     // Restore scroll position after rebuild
     if (m_rightScrollArea && m_rightScrollArea->verticalScrollBar() && savedScrollPos > 0) {

@@ -814,6 +814,13 @@ void ProjectPanel::applyNewPanelResponsiveLayout()
 
 void ProjectPanel::updateSummaryLabels()
 {
+    // Project name
+    if (m_summaryNameLabel) {
+        QString name = m_nameInput ? m_nameInput->text().trimmed() : QString();
+        QString display = name.isEmpty() ? QStringLiteral("New Project") : name;
+        m_summaryNameLabel->setText(QStringLiteral("\U0001F4C4  ") + display);
+    }
+
     // Resolution
     uint32_t rw = customResWidth();
     uint32_t rh = customResHeight();

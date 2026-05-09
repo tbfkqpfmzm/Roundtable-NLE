@@ -108,6 +108,9 @@ public:
 
     QSize sizeHint() const override;
 
+protected:
+    bool eventFilter(QObject* obj, QEvent* event) override;
+
 signals:
     /// Emitted when any property changes.
     void propertyChanged();

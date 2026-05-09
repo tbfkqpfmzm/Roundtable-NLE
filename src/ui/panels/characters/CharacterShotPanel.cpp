@@ -250,12 +250,15 @@ void CharacterShotPanel::setupUI()
     // Auto-show letter panel since Library is the default page
     showLetterPanel();
 
-    // When a character is deleted from LIBRARY, refresh the COMPOSE characters list
+    // When a character is deleted from LIBRARY, refresh both the COMPOSE
+    // character library and the shot list (which also rebuilds the character
+    // filter column) so deleted characters disappear from the filter.
     connect(m_characterBrowser, &CharacterBrowser::deleteRequested,
             this, [this](const QString&) {
         if (m_shotComposer) {
             m_shotComposer->clearCharacterThumbCache();
             m_shotComposer->refreshCharacterLibrary();
+            m_shotComposer->refreshShotList();
         }
     });
 

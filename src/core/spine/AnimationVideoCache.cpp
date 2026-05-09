@@ -63,16 +63,19 @@ std::filesystem::path AnimationVideoCache::cachePath(const std::string& charName
                                                        const std::string& outfit,
                                                        const std::string& animName) const
 {
-    // Check if an HEVC packed-alpha .mp4 already exists (preferred — smallest, all-intra)
+    // Check if an existing .mp4 already exists (chroma key or legacy packed-alpha)
     auto mp4Path = m_cacheDir / charName / outfit / (animName + ".mp4");
     if (fs::exists(mp4Path))
         return mp4Path;
-    // Check if a ProRes .mov already exists (fallback — intra-frame, native alpha)
+    // Check if a ProRes .mov already exists
     auto movPath = m_cacheDir / charName / outfit / (animName + ".mov");
     if (fs::exists(movPath))
         return movPath;
     // Default extension matches the currently selected encoder format
-    const char* ext = (m_encoderFormat == SpineCacheFormat::HEVCPackedAlpha) ? ".mp4" : ".mov";
+    bool isChromaKey = (m_encoderFormat == SpineCacheFormat::GreenScreen ||
+                        m_encoderFormat == SpineCacheFormat::BlueScreen ||
+                        m_encoderFormat == SpineCacheFormat::CustomColor);
+    const char* ext = isChromaKey ? ".mp4" : ".mov";
     return m_cacheDir / charName / outfit / (animName + ext);
 }
 
@@ -503,10 +506,28 @@ void AnimationVideoCache::workerLoop()
             // flickering / swapping.  Packed alpha is R=G=B=A so chroma is
             // constant; quality is dominated by Y precision and QP=22 is
             // visually lossless for this use.
-            renderJob.crf           = 22;  // was 18 -- too high bitrate for 4K packed-alpha @60fps
-            renderJob.format        = (m_encoderFormat == SpineCacheFormat::HEVCPackedAlpha)
-                                        ? PrerenderFormat::HEVCPackedAlpha
-                                        : PrerenderFormat::ProRes4444;
+            // CRF — chroma key formats use slightly lower CRF (better quality)
+            // since the output is normal (not packed) height so bitrate is lower.
+            renderJob.crf           = 22;
+            // Map SpineCacheFormat → PrerenderFormat
+            switch (m_encoderFormat) {
+            case SpineCacheFormat::GreenScreen:
+                renderJob.format = PrerenderFormat::GreenScreen;
+                break;
+            case SpineCacheFormat::BlueScreen:
+                renderJob.format = PrerenderFormat::BlueScreen;
+                break;
+            case SpineCacheFormat::CustomColor:
+                renderJob.format = PrerenderFormat::CustomColor;
+                break;
+            default:
+                renderJob.format = PrerenderFormat::ProRes4444;
+                break;
+            }
+            // Propagate chroma key colour
+            renderJob.chromaKeyR = m_chromaKeyR;
+            renderJob.chromaKeyG = m_chromaKeyG;
+            renderJob.chromaKeyB = m_chromaKeyB;
 
             // Create .rendering marker so an interrupted render is
             // detected and cleaned up on next startup.

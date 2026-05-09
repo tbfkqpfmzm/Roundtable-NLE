@@ -174,6 +174,9 @@ signals:
     /// Emitted when item count changes.
     void itemCountChanged(int count);
 
+    /// Emitted when the user double-clicks empty space (no item under cursor).
+    void emptySpaceDoubleClicked();
+
 protected:
     void paintEvent(QPaintEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;

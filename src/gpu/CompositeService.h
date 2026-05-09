@@ -357,6 +357,15 @@ private:
     StagingRing m_stagingRing;
     bool m_gpuDisplayMode{false};
 
+    // GPU failure backoff — exponential cooldown with automatic retry.
+    // After a GPU submit failure we wait 100ms, then 500ms, 2s, 5s, 10s
+    // (doubling each time, capped at 10s).  After the cooldown expires,
+    // the next composite call retries GPU fresh.  No permanent disable.
+    static constexpr int kGpuBackoffInitialMs = 100;
+    static constexpr int kGpuBackoffMaxMs      = 10000;
+    std::chrono::steady_clock::time_point m_gpuBackoffUntil{};
+    int m_gpuBackoffAttempts{0};
+
     // Inter-queue semaphore: signaled after compute queue composite work,
     // waited on by graphics queue before VulkanViewport present.
     // Prevents GPU-side data hazard between compositor output write (compute)

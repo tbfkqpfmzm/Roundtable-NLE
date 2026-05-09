@@ -246,6 +246,7 @@ private:
 
     // Summary bar
     QWidget*       m_summaryBar{nullptr};
+    QLabel*        m_summaryNameLabel{nullptr};
     QLabel*        m_summaryResLabel{nullptr};
     QLabel*        m_summaryFpsLabel{nullptr};
     QPushButton*   m_createBtn{nullptr};

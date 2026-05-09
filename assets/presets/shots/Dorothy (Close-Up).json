@@ -19,7 +19,8 @@
       "cropLeft": 0.000000,
       "cropRight": 0.000000,
       "cropTop": 0.000000,
-      "cropBottom": 0.000000
+      "cropBottom": 0.000000,
+      "blur": 0.000000
     },
     {
       "path": "TABLE_LARGE_FINAL.png",
@@ -36,7 +37,8 @@
       "cropLeft": 0.000000,
       "cropRight": 0.000000,
       "cropTop": 0.000000,
-      "cropBottom": 0.000000
+      "cropBottom": 0.000000,
+      "blur": 0.000000
     }
   ],
   "characters": [
@@ -56,6 +58,7 @@
       "cropRight": 0.000000,
       "cropTop": 0.000000,
       "cropBottom": 0.000000,
+      "blur": 0.000000,
       "visible": true
     }
   ],

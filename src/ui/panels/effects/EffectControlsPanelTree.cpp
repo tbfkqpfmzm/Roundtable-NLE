@@ -387,8 +387,9 @@ void EffectControlsPanel::buildPropertyTree()
         {
             auto* headerLayout = qobject_cast<QHBoxLayout*>(m_opacitySection->layout());
             if (headerLayout) {
-                // Remove the stretch that makeSectionHeader added, add buttons, then re-add stretch
-                auto* stretchItem = headerLayout->takeAt(headerLayout->count() - 1);
+                // Remove the stretch spacer (second-to-last item; the last item is the reset button).
+                // We'll re-insert the stretch between the mask buttons and the reset button.
+                auto* stretchItem = headerLayout->takeAt(headerLayout->count() - 2);
 
                 auto makeMaskBtn = [&](const QString& text, const QString& tip,
                                        uint8_t shapeType) -> QToolButton* {
@@ -407,11 +408,15 @@ void EffectControlsPanel::buildPropertyTree()
                     return btn;
                 };
 
-                headerLayout->addWidget(makeMaskBtn(QStringLiteral("\u25CB"), tr("Create Ellipse Mask"), 0));
-                headerLayout->addWidget(makeMaskBtn(QStringLiteral("\u25A1"), tr("Create Rectangle Mask"), 1));
-                headerLayout->addWidget(makeMaskBtn(QStringLiteral("\u270E"), tr("Create Free Draw Bezier Mask"), 2));
-                headerLayout->addStretch();
-                delete stretchItem;
+                // Insert mask buttons before the reset button (which is now the last item)
+                headerLayout->insertWidget(headerLayout->count() - 1,
+                    makeMaskBtn(QStringLiteral("\u25CB"), tr("Create Ellipse Mask"), 0));
+                headerLayout->insertWidget(headerLayout->count() - 1,
+                    makeMaskBtn(QStringLiteral("\u25A1"), tr("Create Rectangle Mask"), 1));
+                headerLayout->insertWidget(headerLayout->count() - 1,
+                    makeMaskBtn(QStringLiteral("\u270E"), tr("Create Free Draw Bezier Mask"), 2));
+                // Re-insert stretch before the reset button
+                headerLayout->insertItem(headerLayout->count() - 1, stretchItem);
             }
         }
         m_propLayout->addWidget(m_opacitySection);
@@ -618,6 +623,10 @@ void EffectControlsPanel::buildPropertyTree()
             // â”€â”€ Ultra Key gets grouped sub-sections â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             if (fx.effectType() == EffectType::ChromaKey) {
                 buildUltraKeyUI(fx, effectIdx, rowIdx);
+            } else if (fx.effectType() == EffectType::LUT) {
+                buildLUTUI(fx, effectIdx, rowIdx);
+            } else if (fx.effectType() == EffectType::Letterbox) {
+                buildLetterboxUI(fx, effectIdx, rowIdx);
             } else {
                 // Generic effect: flat parameter rows
                 buildGenericEffectUI(fx, effectIdx, rowIdx);
@@ -627,6 +636,12 @@ void EffectControlsPanel::buildPropertyTree()
 
     // Stretch at bottom
     m_propLayout->addStretch();
+
+    // Default collapsed sections: only Motion and Opacity start expanded
+    if (m_sectionCollapsed.find(QStringLiteral("Crop")) == m_sectionCollapsed.end())
+        m_sectionCollapsed[QStringLiteral("Crop")] = true;
+    if (m_sectionCollapsed.find(QStringLiteral("Time Remapping")) == m_sectionCollapsed.end())
+        m_sectionCollapsed[QStringLiteral("Time Remapping")] = true;
 
     // â”€â”€ Wire up collapsible section arrows â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Walk the layout to find which children belong to each section header.
@@ -701,13 +716,20 @@ void EffectControlsPanel::buildPropertyTree()
             // Wire reset button to reset all scrubby spinboxes in this section
             if (sec.resetBtn) {
                 connect(sec.resetBtn, &QToolButton::clicked, this, [this, &sec]() {
-                    for (auto* child : sec.children) {
-                        auto* row = qobject_cast<PropertyRow*>(child);
-                        if (!row) continue;
-                        // Find all ScrubbySpinBox children and reset to default
-                        auto spins = row->findChildren<ScrubbySpinBox*>();
-                        for (auto* spin : spins) {
-                            spin->setValue(spin->minimum() == 0.0 ? 0.0 : spin->value());
+                    // Opacity resets to 100% (fully opaque), not 0
+                    if (sec.title == QStringLiteral("Opacity")) {
+                        if (m_opacitySpin) {
+                            m_opacitySpin->setValue(100.0);
+                        }
+                    } else {
+                        for (auto* child : sec.children) {
+                            auto* row = qobject_cast<PropertyRow*>(child);
+                            if (!row) continue;
+                            // Find all ScrubbySpinBox children and reset to default
+                            auto spins = row->findChildren<ScrubbySpinBox*>();
+                            for (auto* spin : spins) {
+                                spin->setValue(spin->minimum() == 0.0 ? 0.0 : spin->value());
+                            }
                         }
                     }
                     // Apply as a transform change

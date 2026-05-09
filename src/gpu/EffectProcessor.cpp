@@ -1,5 +1,5 @@
-/*
- * EffectProcessor.cpp — GPU compute-shader effects pipeline.
+﻿/*
+ * EffectProcessor.cpp â€” GPU compute-shader effects pipeline.
  *
  * Step 22: Effects System
  *
@@ -31,9 +31,9 @@ namespace fs = std::filesystem;
 
 namespace rt {
 
-// ═══════════════════════════════════════════════════════════════════════════
+// =============================================================================
 //  Construction / Destruction
-// ═══════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 EffectProcessor::EffectProcessor() = default;
 
@@ -42,9 +42,9 @@ EffectProcessor::~EffectProcessor()
     shutdown();
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
+// =============================================================================
 //  Helper: locate SPIR-V shader file
-// ═══════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 static fs::path findShader(const char* name)
 {
@@ -59,9 +59,9 @@ static fs::path findShader(const char* name)
     return {};
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
+// =============================================================================
 //  Lifecycle
-// ═══════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 bool EffectProcessor::init(Device& device,
                            Allocator& allocator,
@@ -134,6 +134,9 @@ void EffectProcessor::shutdown()
         m_syncFence = VK_NULL_HANDLE;
     }
 
+    // LUT 3D texture
+    m_lutTexture3D.destroy();
+
     // Descriptor resources
     if (m_descriptorPool != VK_NULL_HANDLE) {
         vkDestroyDescriptorPool(dev, m_descriptorPool, nullptr);
@@ -141,6 +144,11 @@ void EffectProcessor::shutdown()
         m_descriptorSets[0]   = VK_NULL_HANDLE;
         m_descriptorSets[1]   = VK_NULL_HANDLE;
         m_sourceDescriptorSet = VK_NULL_HANDLE;
+        m_lutDescriptorSet    = VK_NULL_HANDLE;
+    }
+    if (m_lutDescriptorSetLayout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(dev, m_lutDescriptorSetLayout, nullptr);
+        m_lutDescriptorSetLayout = VK_NULL_HANDLE;
     }
     if (m_descriptorSetLayout != VK_NULL_HANDLE) {
         vkDestroyDescriptorSetLayout(dev, m_descriptorSetLayout, nullptr);
@@ -158,6 +166,11 @@ void EffectProcessor::shutdown()
     m_ultraKeyCleanupPipeline  = VK_NULL_HANDLE;
     m_ultraKeyFinalizePipeline = VK_NULL_HANDLE;
     m_transform2dPipeline  = VK_NULL_HANDLE;
+    m_vignettePipeline      = VK_NULL_HANDLE;
+    m_lutPipeline            = VK_NULL_HANDLE;
+    m_letterboxPipeline      = VK_NULL_HANDLE;
+    m_colorGradingPipeline   = VK_NULL_HANDLE;
+    m_otsPipeline            = VK_NULL_HANDLE;
     m_pipelineLayout       = VK_NULL_HANDLE;
 
     // Storage textures + placeholder
@@ -173,9 +186,9 @@ void EffectProcessor::shutdown()
     spdlog::info("EffectProcessor shut down");
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
+// =============================================================================
 //  Processing
-// ═══════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 bool EffectProcessor::process(VkCommandBuffer cmd,
                               const VkDescriptorImageInfo& sourceImage,
@@ -205,6 +218,17 @@ bool EffectProcessor::process(VkCommandBuffer cmd,
         write.pImageInfo      = &srcInfo;
         vkUpdateDescriptorSets(m_device->handle(), 1, &write, 0, nullptr);
         m_lastSourceImageView = sourceImage.imageView;
+
+        // Also update the LUT descriptor set binding 1 to the same source,
+        // so the first LUT effect (if any) can read from the external source.
+        VkWriteDescriptorSet lutWrite{};
+        lutWrite.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        lutWrite.dstSet          = m_lutDescriptorSet;
+        lutWrite.dstBinding      = 1;
+        lutWrite.descriptorCount = 1;
+        lutWrite.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        lutWrite.pImageInfo      = &srcInfo;
+        vkUpdateDescriptorSets(m_device->handle(), 1, &lutWrite, 0, nullptr);
     }
 
     // Timestamp begin
@@ -224,9 +248,19 @@ bool EffectProcessor::process(VkCommandBuffer cmd,
         if (snap.type == EffectType::ChromaKey &&
             m_ultraKeyMattePipeline != VK_NULL_HANDLE)
         {
-            int finalTarget = dispatchUltraKey(cmd, snap.params, sourceIdx, targetIdx);
-            sourceIdx = finalTarget;
-            targetIdx = 1 - finalTarget;
+            // OutputMode=3 (Original) — bypass the key entirely
+            bool isOriginal = (snap.params.size() > 3 &&
+                               static_cast<int>(snap.params[3] + 0.5f) == 3);
+            if (isOriginal) {
+                // Pass through: copy source to target unmodified
+                copyImage(cmd, sourceIdx, targetIdx);
+                sourceIdx = targetIdx;
+                targetIdx = 1 - targetIdx;
+            } else {
+                int finalTarget = dispatchUltraKey(cmd, snap.params, sourceIdx, targetIdx);
+                sourceIdx = finalTarget;
+                targetIdx = 1 - finalTarget;
+            }
         }
         else if (!dispatchEffect(cmd, snap.type, snap.params, sourceIdx, targetIdx)) {
             spdlog::warn("EffectProcessor: failed to dispatch effect type {}",
@@ -294,9 +328,9 @@ bool EffectProcessor::processSync(const VkDescriptorImageInfo& sourceImage,
     return ok;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 //  Resize
-// ═══════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 bool EffectProcessor::resize(uint32_t width, uint32_t height)
 {
@@ -306,7 +340,7 @@ bool EffectProcessor::resize(uint32_t width, uint32_t height)
 
     if (m_initialized) {
         // Wait only on our compute queue rather than draining the entire
-        // device — avoids stalling the graphics queue when processing
+        // device â€” avoids stalling the graphics queue when processing
         // mixed-resolution clips back-to-back.
         vkQueueWaitIdle(m_queue);
         m_storageTextures[0].destroy();
@@ -328,15 +362,96 @@ bool EffectProcessor::resize(uint32_t width, uint32_t height)
             w.pImageInfo      = &outInfo;
             vkUpdateDescriptorSets(m_device->handle(), 1, &w, 0, nullptr);
         }
-        // Invalidate cached source descriptor — storage images changed
+        // Invalidate cached source descriptor â€” storage images changed
         m_lastSourceImageView = VK_NULL_HANDLE;
     }
     return true;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
+// =============================================================================
+//  LUT 3D texture management
+// =============================================================================
+
+bool EffectProcessor::uploadLUT3D(const std::vector<float>& lutData, int lutSize)
+{
+    if (!m_initialized || !m_device) return false;
+    if (lutData.empty() || lutSize < 2) return false;
+
+    // Destroy previous LUT texture if any
+    m_lutTexture3D.destroy();
+
+    // LUT data is size^3 Ã— 3 floats (RGB). We need to convert to RGBA8.
+    const size_t numVoxels = static_cast<size_t>(lutSize) * lutSize * lutSize;
+    const size_t dataSize  = numVoxels * 4; // RGBA8 = 4 bytes per voxel
+    std::vector<uint8_t> rgbaData(dataSize);
+
+    for (size_t i = 0; i < numVoxels; ++i) {
+        rgbaData[i * 4 + 0] = static_cast<uint8_t>(
+            std::clamp(lutData[i * 3 + 0] * 255.0f, 0.0f, 255.0f));
+        rgbaData[i * 4 + 1] = static_cast<uint8_t>(
+            std::clamp(lutData[i * 3 + 1] * 255.0f, 0.0f, 255.0f));
+        rgbaData[i * 4 + 2] = static_cast<uint8_t>(
+            std::clamp(lutData[i * 3 + 2] * 255.0f, 0.0f, 255.0f));
+        rgbaData[i * 4 + 3] = 255; // alpha = opaque
+    }
+
+    TextureConfig cfg;
+    cfg.width       = static_cast<uint32_t>(lutSize);
+    cfg.height      = static_cast<uint32_t>(lutSize);
+    cfg.depth       = static_cast<uint32_t>(lutSize);
+    cfg.format      = VK_FORMAT_R8G8B8A8_UNORM;
+    cfg.usage       = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    cfg.filter      = VK_FILTER_LINEAR;
+    cfg.addressMode = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+
+    if (!m_lutTexture3D.createFromData(
+            m_allocator->handle(), m_device->handle(), cfg,
+            rgbaData.data(), static_cast<VkDeviceSize>(dataSize),
+            *m_cmdPool, m_queue))
+    {
+        spdlog::error("EffectProcessor: Failed to create LUT 3D texture ({}x{}x{})",
+                      lutSize, lutSize, lutSize);
+        return false;
+    }
+
+    // Update the LUT descriptor set binding 2 to point to the new LUT texture
+    VkDescriptorImageInfo lutInfo = m_lutTexture3D.descriptorInfo();
+
+    VkWriteDescriptorSet write{};
+    write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet          = m_lutDescriptorSet;
+    write.dstBinding      = 2;
+    write.descriptorCount = 1;
+    write.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo      = &lutInfo;
+    vkUpdateDescriptorSets(m_device->handle(), 1, &write, 0, nullptr);
+
+    spdlog::info("EffectProcessor: uploaded {}x{}x{} LUT 3D texture", lutSize, lutSize, lutSize);
+    return true;
+}
+
+void EffectProcessor::clearLUT3D()
+{
+    m_lutTexture3D.destroy();
+
+    // Reset LUT descriptor set binding 2 to placeholder
+    if (m_device && m_lutDescriptorSet != VK_NULL_HANDLE) {
+        VkDescriptorImageInfo phInfo = m_placeholderTexture.descriptorInfo();
+
+        VkWriteDescriptorSet write{};
+        write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet          = m_lutDescriptorSet;
+        write.dstBinding      = 2;
+        write.descriptorCount = 1;
+        write.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.pImageInfo      = &phInfo;
+        vkUpdateDescriptorSets(m_device->handle(), 1, &write, 0, nullptr);
+    }
+}
+
+// =============================================================================
 //  Output access
-// ═══════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 VkImage EffectProcessor::outputImage() const noexcept
 {
@@ -379,7 +494,7 @@ bool EffectProcessor::readbackOutput(std::vector<uint8_t>& outPixels)
                         &stagingBuf, &stagingAlloc, nullptr) != VK_SUCCESS)
         return false;
 
-    // Copy image → buffer
+    // Copy image â†’ buffer
     VkCommandBuffer cmd = m_cmdPool->beginSingleTime();
 
     m_storageTextures[m_currentOutput].transitionLayout(
@@ -409,9 +524,9 @@ bool EffectProcessor::readbackOutput(std::vector<uint8_t>& outPixels)
     return true;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
+// =============================================================================
 //  Internal — create ping-pong storage textures
-// ═══════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 bool EffectProcessor::createStorageTextures()
 {
@@ -439,7 +554,7 @@ bool EffectProcessor::createStorageTextures()
         m_cmdPool->endSingleTime(cmd, m_queue);
     }
 
-    // Also create a 1×1 placeholder (for unused sampler slots)
+    // Also create a 1Ã—1 placeholder (for unused sampler slots)
     TextureConfig phCfg;
     phCfg.width  = 1;
     phCfg.height = 1;
@@ -458,33 +573,33 @@ bool EffectProcessor::createStorageTextures()
     return true;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
+// =============================================================================
 //  Internal — create descriptor set layout, pool, and sets
-// ═══════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 bool EffectProcessor::createDescriptorResources()
 {
     VkDevice dev = m_device->handle();
 
-    // Layout matches the effect shaders:
+    // Main descriptor set layout (bindings 0-1, used by most shaders):
     //   binding 0: storage image   (writeonly output)
     //   binding 1: combined sampler (readonly input)
-    VkDescriptorSetLayoutBinding bindings[2]{};
+    VkDescriptorSetLayoutBinding mainBindings[2]{};
 
-    bindings[0].binding         = 0;
-    bindings[0].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    bindings[0].descriptorCount = 1;
-    bindings[0].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
+    mainBindings[0].binding         = 0;
+    mainBindings[0].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    mainBindings[0].descriptorCount = 1;
+    mainBindings[0].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
 
-    bindings[1].binding         = 1;
-    bindings[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    bindings[1].descriptorCount = 1;
-    bindings[1].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
+    mainBindings[1].binding         = 1;
+    mainBindings[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    mainBindings[1].descriptorCount = 1;
+    mainBindings[1].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
 
     VkDescriptorSetLayoutCreateInfo layoutCI{};
     layoutCI.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     layoutCI.bindingCount = 2;
-    layoutCI.pBindings    = bindings;
+    layoutCI.pBindings    = mainBindings;
 
     if (vkCreateDescriptorSetLayout(dev, &layoutCI, nullptr,
                                      &m_descriptorSetLayout) != VK_SUCCESS)
@@ -493,55 +608,120 @@ bool EffectProcessor::createDescriptorResources()
         return false;
     }
 
-    // Pool: need 3 sets (ping-pong pair + source set).
-    //   2 storage images + 3 combined samplers = enough.
+    // LUT-specific descriptor set layout (bindings 0-2):
+    //   binding 0: storage image   (writeonly output)
+    //   binding 1: combined sampler (readonly input)
+    //   binding 2: combined sampler (3D LUT texture)
+    VkDescriptorSetLayoutBinding lutBindings[3]{};
+
+    lutBindings[0].binding         = 0;
+    lutBindings[0].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    lutBindings[0].descriptorCount = 1;
+    lutBindings[0].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    lutBindings[1].binding         = 1;
+    lutBindings[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    lutBindings[1].descriptorCount = 1;
+    lutBindings[1].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    lutBindings[2].binding         = 2;
+    lutBindings[2].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    lutBindings[2].descriptorCount = 1;
+    lutBindings[2].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    VkDescriptorSetLayoutCreateInfo lutLayoutCI{};
+    lutLayoutCI.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    lutLayoutCI.bindingCount = 3;
+    lutLayoutCI.pBindings    = lutBindings;
+
+    if (vkCreateDescriptorSetLayout(dev, &lutLayoutCI, nullptr,
+                                     &m_lutDescriptorSetLayout) != VK_SUCCESS)
+    {
+        spdlog::error("EffectProcessor: Failed to create LUT descriptor set layout");
+        return false;
+    }
+
+    // Pool sizing:
+    //   Fixed sets: ping-pong[0], ping-pong[1], source, LUT = 4 sets.
+    //   Each main set = 1 storage + 1 sampler  (2 descriptors)
+    //   LUT set      = 1 storage + 2 samplers  (3 descriptors)
+    //   Total: 4 storage + 5 samplers across 4 sets.
+    //   We allocate 4× the minimum to leave headroom for future effect
+    //   types that may need their own descriptor set layout, and to absorb
+    //   any pool fragmentation from descriptor updates.
+    constexpr uint32_t kPoolOversize = 4u;
     VkDescriptorPoolSize poolSizes[2]{};
     poolSizes[0].type            = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    poolSizes[0].descriptorCount = 3;
+    poolSizes[0].descriptorCount = 4 * kPoolOversize;
     poolSizes[1].type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[1].descriptorCount = 3;
+    poolSizes[1].descriptorCount = 5 * kPoolOversize;
 
     VkDescriptorPoolCreateInfo poolCI{};
     poolCI.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     poolCI.flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    poolCI.maxSets       = 3;
+    poolCI.maxSets       = 4 * kPoolOversize;
     poolCI.poolSizeCount = 2;
     poolCI.pPoolSizes    = poolSizes;
 
     if (vkCreateDescriptorPool(dev, &poolCI, nullptr,
                                 &m_descriptorPool) != VK_SUCCESS)
     {
-        spdlog::error("EffectProcessor: Failed to create descriptor pool");
+        spdlog::error("EffectProcessor: Failed to create descriptor pool "
+                      "(storage={}, samplers={}, sets={})",
+                      poolSizes[0].descriptorCount,
+                      poolSizes[1].descriptorCount,
+                      poolCI.maxSets);
         return false;
     }
 
-    // Allocate 3 descriptor sets from the same layout
-    VkDescriptorSetLayout layouts[3] = {
+    // Allocate 3 descriptor sets from the main layout + 1 from the LUT layout
+    VkDescriptorSetLayout mainLayouts[3] = {
         m_descriptorSetLayout, m_descriptorSetLayout, m_descriptorSetLayout
     };
     VkDescriptorSetAllocateInfo allocInfo{};
     allocInfo.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     allocInfo.descriptorPool     = m_descriptorPool;
     allocInfo.descriptorSetCount = 3;
-    allocInfo.pSetLayouts        = layouts;
+    allocInfo.pSetLayouts        = mainLayouts;
 
-    VkDescriptorSet sets[3];
+    VkDescriptorSet sets[4];
     if (vkAllocateDescriptorSets(dev, &allocInfo, sets) != VK_SUCCESS) {
-        spdlog::error("EffectProcessor: Failed to allocate descriptor sets");
+        spdlog::error("EffectProcessor: Failed to allocate 3 main descriptor sets "
+                      "(pool maxSets={}, storage={}, samplers={})",
+                      poolCI.maxSets,
+                      poolSizes[0].descriptorCount,
+                      poolSizes[1].descriptorCount);
         return false;
     }
     m_descriptorSets[0]   = sets[0];  // target = storageTexture[0]
     m_descriptorSets[1]   = sets[1];  // target = storageTexture[1]
     m_sourceDescriptorSet = sets[2];  // external source input
 
-    // ── Initialize descriptor sets for the ping-pong pair ───────────────
+    // Allocate LUT descriptor set from the LUT-specific layout
+    VkDescriptorSetAllocateInfo lutAllocInfo{};
+    lutAllocInfo.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    lutAllocInfo.descriptorPool     = m_descriptorPool;
+    lutAllocInfo.descriptorSetCount = 1;
+    lutAllocInfo.pSetLayouts        = &m_lutDescriptorSetLayout;
+
+    if (vkAllocateDescriptorSets(dev, &lutAllocInfo, &sets[3]) != VK_SUCCESS) {
+        spdlog::error("EffectProcessor: Failed to allocate LUT descriptor set "
+                      "(pool maxSets={}, storage={}, samplers={})",
+                      poolCI.maxSets,
+                      poolSizes[0].descriptorCount,
+                      poolSizes[1].descriptorCount);
+        return false;
+    }
+    m_lutDescriptorSet = sets[3];
+
+    // â”€â”€ Initialize descriptor sets for the ping-pong pair â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Each set has:
-    //   binding 0 → storageTexture[i]  (output)
-    //   binding 1 → storageTexture[1-i] (input, from previous ping-pong)
+    //   binding 0 â†’ storageTexture[i]  (output)
+    //   binding 1 â†’ storageTexture[1-i] (input, from previous ping-pong)
     //
     // The source descriptor set (sets[2]) has:
-    //   binding 0 → storageTexture[0] (output for first effect)
-    //   binding 1 → external source (will be updated per-call)
+    //   binding 0 â†’ storageTexture[0] (output for first effect)
+    //   binding 1 â†’ external source (will be updated per-call)
 
     for (int i = 0; i < 2; ++i) {
         VkDescriptorImageInfo outInfo{};
@@ -571,7 +751,7 @@ bool EffectProcessor::createDescriptorResources()
         vkUpdateDescriptorSets(dev, 2, writes, 0, nullptr);
     }
 
-    // Source set: binding 0 → storageTexture[0], binding 1 → placeholder
+    // Source set: binding 0 â†’ storageTexture[0], binding 1 â†’ placeholder
     {
         VkDescriptorImageInfo outInfo{};
         outInfo.imageView   = m_storageTextures[0].imageView();
@@ -597,12 +777,50 @@ bool EffectProcessor::createDescriptorResources()
         vkUpdateDescriptorSets(dev, 2, writes, 0, nullptr);
     }
 
+    // â”€â”€ Initialize LUT descriptor set (bindings 0+1 as ping-pong[0], binding 2 as placeholder) â”€â”€
+    {
+        VkDescriptorImageInfo outInfo{};
+        outInfo.imageView   = m_storageTextures[0].imageView();
+        outInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkDescriptorImageInfo inInfo{};
+        inInfo.sampler     = m_storageTextures[1].sampler();
+        inInfo.imageView   = m_storageTextures[1].imageView();
+        inInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkDescriptorImageInfo phInfo = m_placeholderTexture.descriptorInfo();
+
+        VkWriteDescriptorSet writes[3]{};
+        writes[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[0].dstSet          = m_lutDescriptorSet;
+        writes[0].dstBinding      = 0;
+        writes[0].descriptorCount = 1;
+        writes[0].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        writes[0].pImageInfo      = &outInfo;
+
+        writes[1].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[1].dstSet          = m_lutDescriptorSet;
+        writes[1].dstBinding      = 1;
+        writes[1].descriptorCount = 1;
+        writes[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[1].pImageInfo      = &inInfo;
+
+        writes[2].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[2].dstSet          = m_lutDescriptorSet;
+        writes[2].dstBinding      = 2;
+        writes[2].descriptorCount = 1;
+        writes[2].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[2].pImageInfo      = &phInfo;
+
+        vkUpdateDescriptorSets(dev, 3, writes, 0, nullptr);
+    }
+
     return true;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
+// =============================================================================
 //  Internal — create compute pipelines (one per effect type)
-// ═══════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 bool EffectProcessor::createPipelines()
 {
@@ -624,12 +842,12 @@ bool EffectProcessor::createPipelines()
         return false;
     }
 
-    // Helper lambda — load shader + create pipeline.  Non-fatal if not found
+    // Helper lambda â€” load shader + create pipeline.  Non-fatal if not found
     // (we just leave that pipeline null and skip it at dispatch time).
     auto loadPipeline = [&](const char* spvName) -> VkPipeline {
         fs::path path = findShader(spvName);
         if (path.empty()) {
-            spdlog::warn("EffectProcessor: shader {} not found — skipping", spvName);
+            spdlog::warn("EffectProcessor: shader {} not found â€” skipping", spvName);
             return VK_NULL_HANDLE;
         }
         VkShaderModule mod = m_pipelineManager.loadShader(path);
@@ -658,19 +876,19 @@ bool EffectProcessor::createPipelines()
     m_vignettePipeline    = loadPipeline("vignette.comp.spv");
     m_lutPipeline         = loadPipeline("lut.comp.spv");
     m_letterboxPipeline   = loadPipeline("letterbox.comp.spv");
-    m_lumetriColorPipeline = loadPipeline("lumetri_color.comp.spv");
+    m_colorGradingPipeline = loadPipeline("lumetri_color.comp.spv");
     m_otsPipeline         = loadPipeline("ots.comp.spv");
 
     spdlog::info("EffectProcessor: pipelines created (colorCorrect={}, blur={}, lumetri={})",
                  m_colorCorrectPipeline != VK_NULL_HANDLE,
                  m_blurPipeline != VK_NULL_HANDLE,
-                 m_lumetriColorPipeline != VK_NULL_HANDLE);
+                 m_colorGradingPipeline != VK_NULL_HANDLE);
     return true;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
+// =============================================================================
 //  Internal — dispatch a single effect
-// ═══════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 bool EffectProcessor::dispatchEffect(VkCommandBuffer cmd,
                                      EffectType type,
@@ -681,13 +899,65 @@ bool EffectProcessor::dispatchEffect(VkCommandBuffer cmd,
     if (pipeline == VK_NULL_HANDLE) return false;
 
     // Select descriptor set:
-    //   sourceIdx == -1 → use m_sourceDescriptorSet (external source image)
-    //   sourceIdx ==  0 or 1 → use m_descriptorSets[targetIdx]
+    //   sourceIdx == -1 â†’ use m_sourceDescriptorSet (external source image)
+    //   sourceIdx ==  0 or 1 â†’ use m_descriptorSets[targetIdx]
     //     (descriptorSets[targetIdx] has binding0 = storage[targetIdx],
     //      binding1 = storage[1-targetIdx] which is the source)
+    //
+    // For LUT effects, use the LUT-specific descriptor set which also has
+    // binding 2 pointing to the 3D LUT texture.
     VkDescriptorSet ds;
-    if (sourceIdx == -1) {
-        // First effect: source is external image (already updated in process()).
+    if (type == EffectType::LUT) {
+        // Use LUT descriptor set â€“ update bindings 0+1 for current ping-pong state
+        VkDescriptorImageInfo outInfo{};
+        outInfo.imageView   = m_storageTextures[targetIdx].imageView();
+        outInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkDescriptorImageInfo inInfo{};
+        if (sourceIdx == -1) {
+            // First effect: input from external source (already set in m_sourceDescriptorSet)
+            // For LUT, we need to reference the first storage texture as output and
+            // the source image needs to be handled. Since we can't share the external
+            // image between descriptor sets, we use a workaround: set source to storage[1]
+            // which will be overwritten. Better: update LUT set binding 1 to source.
+            inInfo = m_placeholderTexture.descriptorInfo(); // fallback
+        } else {
+            inInfo.sampler     = m_storageTextures[1 - targetIdx].sampler();
+            inInfo.imageView   = m_storageTextures[1 - targetIdx].imageView();
+            inInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        }
+
+        VkDescriptorImageInfo lutInfo = m_lutTexture3D.image() != VK_NULL_HANDLE
+            ? m_lutTexture3D.descriptorInfo()
+            : m_placeholderTexture.descriptorInfo();
+
+        VkWriteDescriptorSet writes[3]{};
+        writes[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[0].dstSet          = m_lutDescriptorSet;
+        writes[0].dstBinding      = 0;
+        writes[0].descriptorCount = 1;
+        writes[0].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        writes[0].pImageInfo      = &outInfo;
+
+        writes[1].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[1].dstSet          = m_lutDescriptorSet;
+        writes[1].dstBinding      = 1;
+        writes[1].descriptorCount = 1;
+        writes[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[1].pImageInfo      = &inInfo;
+
+        writes[2].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[2].dstSet          = m_lutDescriptorSet;
+        writes[2].dstBinding      = 2;
+        writes[2].descriptorCount = 1;
+        writes[2].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[2].pImageInfo      = &lutInfo;
+
+        vkUpdateDescriptorSets(m_device->handle(), 3, writes, 0, nullptr);
+
+        ds = m_lutDescriptorSet;
+    } else if (sourceIdx == -1) {
+        // First effect (non-LUT): source is external image (already updated in process()).
         // The sourceDescriptorSet has binding0 = storage[0] (output).
         ds = m_sourceDescriptorSet;
     } else {
@@ -712,12 +982,12 @@ bool EffectProcessor::dispatchEffect(VkCommandBuffer cmd,
     vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
                        0, sizeof(pc), &pc);
 
-    // Dispatch: 16×16 workgroups
+    // Dispatch: 16Ã—16 workgroups
     uint32_t gx = (m_config.width  + 15) / 16;
     uint32_t gy = (m_config.height + 15) / 16;
     vkCmdDispatch(cmd, gx, gy, 1);
 
-    // Pipeline barrier: compute write → compute read for next effect
+    // Pipeline barrier: compute write â†’ compute read for next effect
     VkMemoryBarrier barrier{};
     barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
@@ -742,16 +1012,17 @@ VkPipeline EffectProcessor::getPipeline(EffectType type) const
     case EffectType::Vignette:      return m_vignettePipeline;
     case EffectType::LUT:            return m_lutPipeline;
     case EffectType::Letterbox:      return m_letterboxPipeline;
-    case EffectType::LumetriColor:   return m_lumetriColorPipeline;
+    case EffectType::ColorGrading:   return m_colorGradingPipeline;
+    case EffectType::LumetriColor:   return m_colorGradingPipeline;
     case EffectType::OtsLeft:        return m_otsPipeline;
     case EffectType::OtsRight:       return m_otsPipeline;
     default:                       return VK_NULL_HANDLE;
     }
 }
 
-// ═════════════════════════════════════════════════════════════════════════
-//  Ultra Key — 3-pass dispatch
-// ═════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+//  Ultra Key â€” 3-pass dispatch
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 void EffectProcessor::dispatchPass(VkCommandBuffer cmd, VkPipeline pipeline,
                                    VkDescriptorSet ds,
@@ -786,11 +1057,100 @@ void EffectProcessor::dispatchPass(VkCommandBuffer cmd, VkPipeline pipeline,
                          0, 1, &barrier, 0, nullptr, 0, nullptr);
 }
 
+void EffectProcessor::copyImage(VkCommandBuffer cmd, int sourceIdx, int targetIdx)
+{
+    if (targetIdx < 0 || targetIdx > 1)
+        return;
+
+    if (sourceIdx < 0) {
+        // Source is the external image (first effect in chain).
+        // Use dispatchPass with a passthrough: the m_sourceDescriptorSet
+        // reads from the external source (binding 1) and writes to
+        // storage[targetIdx] (binding 0).
+        // We use the color correct pipeline with identity params as a passthrough.
+        std::vector<float> identity(28, 0.0f);
+        identity[0] = 1.0f;  // brightness = 1 (neutral)
+        identity[1] = 1.0f;  // contrast = 1 (neutral)
+        identity[2] = 1.0f;  // saturation = 1 (neutral)
+        dispatchPass(cmd, m_colorCorrectPipeline, m_sourceDescriptorSet, identity);
+    } else if (sourceIdx == targetIdx) {
+        // Same source and target, no copy needed.
+        return;
+    } else {
+        // Storage-to-storage copy
+        VkImage srcImage = m_storageTextures[sourceIdx].image();
+        VkImage dstImage = m_storageTextures[targetIdx].image();
+
+        // Transition source to TRANSFER_SRC
+        VkImageMemoryBarrier srcBarrier{};
+        srcBarrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        srcBarrier.oldLayout                       = VK_IMAGE_LAYOUT_GENERAL;
+        srcBarrier.newLayout                       = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        srcBarrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+        srcBarrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+        srcBarrier.image                           = srcImage;
+        srcBarrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+        srcBarrier.subresourceRange.levelCount     = 1;
+        srcBarrier.subresourceRange.layerCount     = 1;
+        srcBarrier.srcAccessMask                   = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        srcBarrier.dstAccessMask                   = VK_ACCESS_TRANSFER_READ_BIT;
+
+        // Transition destination to TRANSFER_DST
+        VkImageMemoryBarrier dstBarrier{};
+        dstBarrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        dstBarrier.oldLayout                       = VK_IMAGE_LAYOUT_GENERAL;
+        dstBarrier.newLayout                       = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        dstBarrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+        dstBarrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+        dstBarrier.image                           = dstImage;
+        dstBarrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+        dstBarrier.subresourceRange.levelCount     = 1;
+        dstBarrier.subresourceRange.layerCount     = 1;
+        dstBarrier.srcAccessMask                   = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        dstBarrier.dstAccessMask                   = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+        VkImageMemoryBarrier barriers[2] = {srcBarrier, dstBarrier};
+        vkCmdPipelineBarrier(cmd,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, 0, nullptr, 0, nullptr, 2, barriers);
+
+        VkImageCopy copyRegion{};
+        copyRegion.srcSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+        copyRegion.srcSubresource.layerCount     = 1;
+        copyRegion.dstSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+        copyRegion.dstSubresource.layerCount     = 1;
+        copyRegion.extent.width                  = m_config.width;
+        copyRegion.extent.height                 = m_config.height;
+        copyRegion.extent.depth                  = 1;
+
+        vkCmdCopyImage(cmd, srcImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       dstImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
+
+        // Transition both back to GENERAL
+        srcBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        srcBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        srcBarrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        srcBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+
+        dstBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        dstBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        dstBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        dstBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+
+        VkImageMemoryBarrier restore[2] = {srcBarrier, dstBarrier};
+        vkCmdPipelineBarrier(cmd,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             0, 0, nullptr, 0, nullptr, 2, restore);
+    }
+}
+
 int EffectProcessor::dispatchUltraKey(VkCommandBuffer cmd,
                                       const std::vector<float>& params,
                                       int sourceIdx, int targetIdx)
 {
-    // Pass 1: Matte generation  (source → target)
+    // Pass 1: Matte generation  (source â†’ target)
     {
         VkDescriptorSet ds = (sourceIdx == -1) ? m_sourceDescriptorSet
                                                : m_descriptorSets[targetIdx];
@@ -800,7 +1160,7 @@ int EffectProcessor::dispatchUltraKey(VkCommandBuffer cmd,
     int pass1Output = targetIdx;
     int pass2Target = 1 - pass1Output;
 
-    // Pass 2: Matte cleanup  (pass1Output → pass2Target)
+    // Pass 2: Matte cleanup  (pass1Output â†’ pass2Target)
     {
         VkDescriptorSet ds = m_descriptorSets[pass2Target];
         dispatchPass(cmd, m_ultraKeyCleanupPipeline, ds, params);

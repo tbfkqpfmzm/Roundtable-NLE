@@ -33,166 +33,71 @@ namespace rt {
 void ShotComposer::refreshShotList()
 {
     m_shotList->blockSignals(true);
-    m_shotCombo->blockSignals(true);
     m_shotList->clear();
-    m_shotCombo->clear();
     auto names = m_presetManager.presetNames();
     std::sort(names.begin(), names.end());
-
-    // Build set of shot names that are currently set as a default
-    std::set<std::string> defaultShotNames;
-    {
-        // If a character filter is active, only consider the default for that character;
-        // otherwise ("ALL"), consider defaults for every character.
-        QString charFilter;
-        if (m_charFilterList && m_charFilterList->currentRow() > 0) {
-            auto* curItem = m_charFilterList->currentItem();
-            if (curItem)
-                charFilter = curItem->data(Qt::UserRole).toString();
-        }
-        for (const auto& [ch, shotName] : m_characterDefaults) {
-            if (charFilter.isEmpty() ||
-                QString::fromStdString(ch).toLower() == charFilter.toLower())
-                defaultShotNames.insert(shotName);
-        }
-    }
-
-    // Sort default shots to the top
-    std::stable_partition(names.begin(), names.end(),
-        [&](const std::string& n) {
-            return defaultShotNames.count(n) > 0;
-        });
 
     // Get filter criteria
     QString searchFilter;
     QString charFilter;
     if (m_shotSearchEdit)
         searchFilter = m_shotSearchEdit->text().trimmed().toLower();
-    // Use the character filter thumbnail list (row 0 = "ALL")
-    if (m_charFilterList && m_charFilterList->currentRow() > 0) {
-        auto* curItem = m_charFilterList->currentItem();
-        if (curItem)
-            charFilter = curItem->data(Qt::UserRole).toString();
+    charFilter = activeCharFilter();
+
+    // Build set of default shot names
+    std::set<std::string> defaultShotNames;
+    {
+        for (const auto& [ch, shotName] : m_characterDefaults)
+            defaultShotNames.insert(shotName);
     }
 
-    constexpr int kThumbW = 100;
-    constexpr int kThumbH = 56;
+    // Scan all presets once to count per-character shot occurrences
+    // and collect character names per shot for tag display.
+    struct ShotInfo {
+        std::string name;
+        bool isDefault = false;
+        QStringList charTags;
+        int layerCount = 0;
+    };
+    std::vector<ShotInfo> allShotInfos;
+    std::map<std::string, int> charShotCount; // character display name -> shot count
+    int unassignedCount = 0;
 
-    // Collect unique character names across all shots (for the filter combo)
-    QSet<QString> allCharNames;
-
-    int selectRow = -1;
-    int visibleRow = 0;
-    for (size_t i = 0; i < names.size(); ++i) {
-        const auto& n = names[i];
-
-        // Collect characters from this preset for the filter combo
+    for (const auto& n : names) {
         auto preset = m_presetManager.load(n);
-        if (preset) {
-            for (const auto& ch : preset->characters()) {
-                // Use display name for UI
-                std::string dn = m_modelManager
-                    ? m_modelManager->getDisplayName(ch.characterName)
-                    : ch.characterName;
-                allCharNames.insert(QString::fromStdString(dn));
-            }
+        if (!preset) continue;
+
+        ShotInfo si;
+        si.name = n;
+        si.isDefault = defaultShotNames.count(n) > 0;
+        si.layerCount = preset->layerCount();
+
+        // Collect characters from this preset
+        QSet<QString> seenChars;
+        for (const auto& ch : preset->characters()) {
+            std::string dn = m_modelManager
+                ? m_modelManager->getDisplayName(ch.characterName)
+                : ch.characterName;
+            si.charTags << QString::fromStdString(dn);
+            seenChars.insert(QString::fromStdString(dn));
         }
 
-        // Apply name search filter
-        if (!searchFilter.isEmpty()) {
-            QString qn = QString::fromStdString(n).toLower();
-            if (!qn.contains(searchFilter))
-                continue;
+        // Count per-character shot occurrences
+        if (si.charTags.isEmpty()) {
+            ++unassignedCount;
+        } else {
+            for (const auto& tag : seenChars)
+                charShotCount[tag.toStdString()]++;
         }
 
-        // Apply character filter — only show shots that contain the selected character
-        if (!charFilter.isEmpty() && preset) {
-            bool hasChar = false;
-            for (const auto& ch : preset->characters()) {
-                std::string dn = m_modelManager
-                    ? m_modelManager->getDisplayName(ch.characterName)
-                    : ch.characterName;
-                if (QString::fromStdString(dn).compare(charFilter, Qt::CaseInsensitive) == 0) {
-                    hasChar = true;
-                    break;
-                }
-            }
-            if (!hasChar)
-                continue;
-        }
-
-        // Determine if this is a default shot (set via SET DEFAULT button)
-        bool isDefault = defaultShotNames.count(n) > 0;
-
-        QPixmap thumb;
-        // Try to load a persisted thumbnail from disk first
-        QString cachedPath = shotThumbnailPath(n);
-        if (!cachedPath.isEmpty() && QFileInfo::exists(cachedPath)) {
-            thumb.load(cachedPath);
-        }
-        // Fall back to generating one on the fly
-        if (thumb.isNull()) {
-            if (preset)
-                thumb = makeShotThumbnail(*preset, kThumbW, kThumbH);
-            else
-                thumb = QPixmap(kThumbW, kThumbH);
-        }
-
-        // Display text: append gold star for default shots
-        QString displayName = QString::fromStdString(n);
-        if (isDefault)
-            displayName += QStringLiteral("  \u2B50");   // Ã¢Â­Â
-
-        auto* item = new QListWidgetItem(QIcon(thumb), displayName);
-        item->setData(Qt::UserRole, QString::fromStdString(n));  // real name without star
-        item->setSizeHint(QSize(kThumbW + 8, kThumbH + 20));
-        if (isDefault)
-            item->setForeground(QColor(255, 200, 50));  // gold tint for default items
-        m_shotList->addItem(item);
-
-        // Also populate the dropdown combo (use real name for combo)
-        m_shotCombo->addItem(QString::fromStdString(n), QString::fromStdString(n));
-
-        if (!m_currentShot.name().empty() && n == m_currentShot.name())
-            selectRow = visibleRow;
-        ++visibleRow;
+        allShotInfos.push_back(si);
     }
 
-    if (selectRow >= 0) {
-        m_shotList->setCurrentRow(selectRow);
-        m_shotCombo->setCurrentIndex(selectRow);
-    }
-    m_shotList->blockSignals(false);
-    m_shotCombo->blockSignals(false);
+    int totalShots = static_cast<int>(allShotInfos.size());
 
-    // Update the character filter thumbnail column
+    // --- Build character filter chip list (m_charFilterList) ---
     if (m_charFilterList) {
-        // Only show characters that actually exist as either a Spine model
-        // on disk OR a known video character.  Filter out stale preset
-        // references to characters that no longer exist, but keep video
-        // characters (e.g. Wells) that have no Spine folder.
-        QSet<QString> validNames;
-#ifdef ROUNDTABLE_HAS_SPINE
-        if (m_modelManager && m_modelManager->isScanned()) {
-            for (const auto& name : m_modelManager->characterDisplayNames())
-                validNames.insert(QString::fromStdString(name));
-        }
-#endif
-        // Add video characters from the hardcoded lookup table.  Each
-        // entry's charName is the canonical display name.
-        for (const auto& [filename, info] : videoCharacterFiles()) {
-            (void)filename;
-            validNames.insert(QString::fromStdString(info.charName));
-        }
-        // Intersect: keep only names that appear in both the preset-derived
-        // allCharNames AND the validity set.  This drops stale preset chars
-        // while preserving real video characters.
-        QSet<QString> filtered;
-        for (const auto& n : allCharNames)
-            if (validNames.contains(n)) filtered.insert(n);
-        allCharNames = filtered;
-
-        // Preserve current selection
+        // Preserve current selection BEFORE clearing
         QString prevFilter;
         if (auto* cur = m_charFilterList->currentItem())
             prevFilter = cur->data(Qt::UserRole).toString();
@@ -200,38 +105,266 @@ void ShotComposer::refreshShotList()
         m_charFilterList->blockSignals(true);
         m_charFilterList->clear();
 
-        // "ALL" item at top
-        constexpr int kFilterThumbSz = 90;
-        auto* allItem = new QListWidgetItem(QStringLiteral("ALL"));
-        allItem->setData(Qt::UserRole, QString());
-        allItem->setTextAlignment(Qt::AlignHCenter | Qt::AlignBottom);
-        allItem->setSizeHint(QSize(kFilterThumbSz + 8, 32));
-        m_charFilterList->addItem(allItem);
+        int restoreRow = -1;
+        int row = 0;
 
-        QStringList charNames = allCharNames.values();
-        charNames.sort();
-        int restoreRow = 0;
-        for (const auto& cn : charNames) {
-            // Resolve folder name for thumbnail generation (filesystem)
+        // Collect valid character names (downloaded + video + from user shots)
+        QSet<QString> validNames;
+#ifdef ROUNDTABLE_HAS_SPINE
+        if (m_modelManager && m_modelManager->isScanned()) {
+            for (const auto& name : m_modelManager->characterDisplayNames())
+                validNames.insert(QString::fromStdString(name));
+        }
+#endif
+        for (const auto& [filename, info] : videoCharacterFiles()) {
+            (void)filename;
+            validNames.insert(QString::fromStdString(info.charName));
+        }
+        // Also include any character that appears in user shots
+        for (const auto& [cn, count] : charShotCount) {
+            (void)count;
+            validNames.insert(QString::fromStdString(cn));
+        }
+
+        // Apply search filter to character names
+        QString filterSearchText;
+        if (m_filterSearchEdit)
+            filterSearchText = m_filterSearchEdit->text().trimmed().toLower();
+
+        // ALL item
+        {
+            QString label = QString("ALL");
+            auto* item = new QListWidgetItem(label);
+            item->setData(Qt::UserRole, QString()); // empty = ALL
+            item->setData(Qt::UserRole + 1, totalShots);
+            item->setSizeHint(QSize(0, 56));
+            QFont allFont = item->font();
+            allFont.setPixelSize(18);
+            allFont.setBold(true);
+            item->setFont(allFont);
+            item->setForeground(QColor(180, 220, 180));
+            m_charFilterList->addItem(item);
+            if (prevFilter.isEmpty()) restoreRow = row;
+            ++row;
+        }
+
+        // UNASSIGNED item
+        {
+            QString label = QString("UNASSIGNED");
+            auto* item = new QListWidgetItem(label);
+            item->setData(Qt::UserRole, QStringLiteral("__UNASSIGNED__"));
+            item->setData(Qt::UserRole + 1, unassignedCount);
+            item->setSizeHint(QSize(0, 56));
+            QFont uaFont = item->font();
+            uaFont.setPixelSize(18);
+            uaFont.setBold(true);
+            item->setFont(uaFont);
+            item->setForeground(QColor(210, 170, 80));
+            m_charFilterList->addItem(item);
+            if (prevFilter == QStringLiteral("__UNASSIGNED__")) restoreRow = row;
+            ++row;
+        }
+
+        // Separator divider line (unselectable, thin grey like tab dividers)
+        {
+            auto* sep = new QListWidgetItem(QString());
+            sep->setFlags(sep->flags() & ~Qt::ItemIsSelectable);
+            sep->setSizeHint(QSize(0, 8));
+            QColor sepColor(100, 100, 130, 50);
+            sep->setBackground(sepColor);
+            m_charFilterList->addItem(sep);
+            ++row;
+        }
+
+        // Character items
+        QStringList sortedChars = validNames.values();
+        sortedChars.sort();
+        for (const auto& cn : sortedChars) {
+            // Apply search filter
+            if (!filterSearchText.isEmpty() && !cn.toLower().contains(filterSearchText))
+                continue;
+
+            int count = 0;
+            auto it = charShotCount.find(cn.toStdString());
+            if (it != charShotCount.end())
+                count = it->second;
+
+            // Get thumbnail for this character
             std::string folderName = m_modelManager
                 ? m_modelManager->getFolderName(cn.toStdString())
                 : cn.toStdString();
-            QPixmap thumb = makeCharacterThumbnail(folderName, kFilterThumbSz);
+            QPixmap thumb = makeCharacterThumbnail(folderName, 48);
+
             auto* item = new QListWidgetItem(QIcon(thumb), cn);
             item->setData(Qt::UserRole, cn);
-            item->setSizeHint(QSize(kFilterThumbSz + 8, kFilterThumbSz + 22));
-            item->setToolTip(cn);
+            item->setData(Qt::UserRole + 1, count);
+            item->setSizeHint(QSize(0, 60));
+            QFont chFont = item->font();
+            chFont.setPixelSize(16);
+            item->setFont(chFont);
+            item->setToolTip(QString("%1 - %2 shots").arg(cn).arg(count));
             m_charFilterList->addItem(item);
-
-            if (cn == prevFilter)
-                restoreRow = m_charFilterList->count() - 1;
+            if (cn == prevFilter) restoreRow = row;
+            ++row;
         }
 
-        m_charFilterList->setCurrentRow(restoreRow);
+        if (restoreRow >= 0 && restoreRow < m_charFilterList->count())
+            m_charFilterList->setCurrentRow(restoreRow);
         m_charFilterList->blockSignals(false);
     }
 
+    // --- Build shot list (m_shotList) ---
+    constexpr int kThumbW = 320;
+    constexpr int kThumbH = 180;
+
+    // Determine sort mode
+    enum SortMode { SortAZ, SortFavorites, SortCharacter, SortRecent };
+    SortMode sortMode = SortAZ;
+    if (m_shotSortCombo) {
+        int si = m_shotSortCombo->currentIndex();
+        if (si == 1) sortMode = SortFavorites;
+        else if (si == 2) sortMode = SortCharacter;
+        else if (si == 3) sortMode = SortRecent;
+    }
+
+    // Build filtered shot list
+    struct FilteredShot {
+        std::string name;
+        bool isDefault = false;
+        QStringList charTags;
+        int layerCount = 0;
+        int sortKey = 0;
+        QString firstCharTag; // for Character sort mode
+    };
+    std::vector<FilteredShot> filtered;
+
+    for (const auto& si : allShotInfos) {
+        // Apply name search filter
+        if (!searchFilter.isEmpty()) {
+            QString qn = QString::fromStdString(si.name).toLower();
+            if (!qn.contains(searchFilter))
+                continue;
+        }
+
+        // Apply character filter
+        if (!charFilter.isEmpty()) {
+            if (charFilter == QStringLiteral("__UNASSIGNED__")) {
+                if (!si.charTags.isEmpty())
+                    continue;
+            } else {
+                bool hasChar = false;
+                for (const auto& tag : si.charTags) {
+                    if (tag.compare(charFilter, Qt::CaseInsensitive) == 0) {
+                        hasChar = true;
+                        break;
+                    }
+                }
+                if (!hasChar)
+                    continue;
+            }
+        }
+
+        FilteredShot fs;
+        fs.name = si.name;
+        fs.isDefault = si.isDefault;
+        fs.charTags = si.charTags;
+        fs.layerCount = si.layerCount;
+        if (!si.charTags.isEmpty())
+            fs.firstCharTag = si.charTags.first();
+        filtered.push_back(fs);
+    }
+
+    // Sort
+    if (sortMode == SortFavorites) {
+        // Default shots first, then alphabetical
+        std::stable_partition(filtered.begin(), filtered.end(),
+            [](const FilteredShot& fs) { return fs.isDefault; });
+        auto mid = std::stable_partition(filtered.begin(), filtered.end(),
+            [](const FilteredShot& fs) { return fs.isDefault; });
+        std::sort(filtered.begin(), mid,
+            [](const FilteredShot& a, const FilteredShot& b) { return a.name < b.name; });
+        std::sort(mid, filtered.end(),
+            [](const FilteredShot& a, const FilteredShot& b) { return a.name < b.name; });
+    } else if (sortMode == SortCharacter) {
+        std::sort(filtered.begin(), filtered.end(),
+            [](const FilteredShot& a, const FilteredShot& b) {
+                if (a.isDefault != b.isDefault) return a.isDefault;
+                if (a.firstCharTag != b.firstCharTag) return a.firstCharTag < b.firstCharTag;
+                return a.name < b.name;
+            });
+    } else {
+        // SortAZ (default alphabetical)
+        std::sort(filtered.begin(), filtered.end(),
+            [](const FilteredShot& a, const FilteredShot& b) {
+                if (a.isDefault != b.isDefault) return a.isDefault;
+                return a.name < b.name;
+            });
+    }
+
+    int selectRow = -1;
+    int visibleRow = 0;
+
+    QString lastCharGroup; // for SortCharacter mode
+
+    for (const auto& fs : filtered) {
+
+        // For SortCharacter mode, insert character group headers
+        if (sortMode == SortCharacter) {
+            if (visibleRow == 0 || fs.firstCharTag != lastCharGroup) {
+                lastCharGroup = fs.firstCharTag;
+                QString groupLabel = fs.firstCharTag.isEmpty()
+                    ? QStringLiteral("Other")
+                    : fs.firstCharTag;
+                auto* headerItem = new QListWidgetItem(QStringLiteral("\xf0\x9f\x93\x81 ") + groupLabel);
+                headerItem->setFlags(headerItem->flags() & ~Qt::ItemIsSelectable);
+                headerItem->setSizeHint(QSize(0, 24));
+                QFont headerFont;
+                headerFont.setBold(true);
+                headerFont.setPixelSize(11);
+                headerItem->setFont(headerFont);
+                headerItem->setForeground(QColor(180, 180, 180));
+                m_shotList->addItem(headerItem);
+                ++visibleRow;
+            }
+        }
+
+        // Build thumbnail
+        QPixmap thumb;
+        QString cachedPath = shotThumbnailPath(fs.name);
+        if (!cachedPath.isEmpty() && QFileInfo::exists(cachedPath)) {
+            thumb.load(cachedPath);
+        }
+        if (thumb.isNull()) {
+            auto preset = m_presetManager.load(fs.name);
+            if (preset)
+                thumb = makeShotThumbnail(*preset, kThumbW, kThumbH);
+            else
+                thumb = QPixmap(kThumbW, kThumbH);
+        }
+
+        // Build shot item with data roles for custom delegate
+        QString displayName = QString::fromStdString(fs.name);
+
+        auto* item = new QListWidgetItem(QIcon(thumb), displayName);
+        item->setData(Qt::UserRole, QString::fromStdString(fs.name));
+        item->setData(Qt::UserRole + 1, fs.charTags);     // QStringList for tags
+        item->setData(Qt::UserRole + 2, fs.layerCount);    // int layer count
+        item->setData(Qt::UserRole + 3, fs.isDefault);     // bool is default
+        if (fs.isDefault)
+            item->setForeground(QColor(255, 200, 50));
+
+        m_shotList->addItem(item);
+
+        if (!m_currentShot.name().empty() && fs.name == m_currentShot.name())
+            selectRow = visibleRow;
+        ++visibleRow;
+    }
+
+    if (selectRow >= 0)
+        m_shotList->setCurrentRow(selectRow);
+    m_shotList->blockSignals(false);
 }
+
 
 void ShotComposer::refreshLayerList()
 {

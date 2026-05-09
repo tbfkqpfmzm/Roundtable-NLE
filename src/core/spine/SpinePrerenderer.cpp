@@ -16,6 +16,7 @@
 
 #include "media/ProResEncoder.h"
 #include "media/HWAlphaEncoder.h"
+#include "media/ChromaKeyEncoder.h"
 #include "GpuContext.h"
 #include "SpineRenderer.h"
 #include "vulkan/Buffer.h"
@@ -236,19 +237,38 @@ PrerenderResult SpinePrerenderer::renderGPU(const PrerenderJob& job,
 
     // ── 6. Open encoder ────────────────────────────────────────────────
     //
-    // Encoder priority:
-    //   Auto/HEVCPackedAlpha → HEVC (NVENC) first, then ProRes 4444
-    //   ProRes4444           → ProRes 4444 only
+    // Encoder selection:
+    //   GreenScreen / BlueScreen / CustomColor → ChromaKeyEncoder (standard H.264 .mp4)
+    //   HEVCPackedAlpha (legacy)               → HWAlphaEncoder (packed-alpha .mp4)
+    //   ProRes4444                             → ProResAlphaEncoder (native alpha .mov)
 
-    HWAlphaEncoder hevcEncoder;
-    ProResAlphaEncoder proresEncoder;
-    enum class ActiveEncoder { HEVC, ProRes } activeEnc{};
+    bool useChromaKey = (job.format == PrerenderFormat::GreenScreen ||
+                         job.format == PrerenderFormat::BlueScreen ||
+                         job.format == PrerenderFormat::CustomColor);
+
+    ChromaKeyEncoder    chromaEncoder;
+    HWAlphaEncoder      hevcEncoder;
+    ProResAlphaEncoder  proresEncoder;
+    enum class ActiveEncoder { ChromaKey, HEVC, ProRes } activeEnc{};
 
     {
         bool opened = false;
 
-        // Try HEVC if requested or auto
-        if (!opened && job.format != PrerenderFormat::ProRes4444) {
+        // Chroma key formats: render on solid background as normal H.264 .mp4
+        if (!opened && useChromaKey) {
+            auto ckOutputPath = job.outputPath;
+            ckOutputPath.replace_extension(".mp4");
+            if (chromaEncoder.open(ckOutputPath, renderW, renderH, job.fps, job.crf)) {
+                activeEnc = ActiveEncoder::ChromaKey;
+                opened = true;
+                spdlog::info("SpinePrerenderer: using chroma-key H.264 encoder for '{}' [{}]",
+                             job.animationName,
+                             chromaEncoder.isHardwareAccelerated() ? "NVENC" : "CPU");
+            }
+        }
+
+        // Legacy HEVC packed-alpha (for backwards compatibility)
+        if (!opened && (job.format == PrerenderFormat::HEVCPackedAlpha || job.format == PrerenderFormat::Auto)) {
             auto hevcOutputPath = job.outputPath;
             hevcOutputPath.replace_extension(".mp4");
             if (hevcEncoder.open(hevcOutputPath, renderW, renderH, job.fps, job.crf)) {
@@ -260,7 +280,7 @@ PrerenderResult SpinePrerenderer::renderGPU(const PrerenderJob& job,
             }
         }
 
-        // ProRes 4444 fallback (or primary when explicitly requested)
+        // ProRes 4444 (fallback or explicitly requested)
         if (!opened) {
             auto proresOutputPath = job.outputPath;
             proresOutputPath.replace_extension(".mov");
@@ -273,7 +293,7 @@ PrerenderResult SpinePrerenderer::renderGPU(const PrerenderJob& job,
         }
 
         if (!opened) {
-            result.error = "Failed to open any encoder (HEVC + ProRes both failed)";
+            result.error = "Failed to open any encoder (ChromaKey + HEVC + ProRes all failed)";
             spdlog::error("SpinePrerenderer: {}", result.error);
             readbackStaging.destroy();
             spineRenderer.shutdown();
@@ -285,21 +305,24 @@ PrerenderResult SpinePrerenderer::renderGPU(const PrerenderJob& job,
     // Encoder function pointers for unified render loop
     auto encodeFrame = [&](const uint8_t* pixels) -> bool {
         switch (activeEnc) {
-        case ActiveEncoder::HEVC:   return hevcEncoder.writeFrame(pixels);
-        case ActiveEncoder::ProRes: return proresEncoder.writeFrame(pixels);
+        case ActiveEncoder::ChromaKey: return chromaEncoder.writeFrame(pixels);
+        case ActiveEncoder::HEVC:      return hevcEncoder.writeFrame(pixels);
+        case ActiveEncoder::ProRes:    return proresEncoder.writeFrame(pixels);
         }
         return false;
     };
     auto finalizeEncoder = [&]() {
         switch (activeEnc) {
-        case ActiveEncoder::HEVC:   hevcEncoder.finalize(); break;
-        case ActiveEncoder::ProRes: proresEncoder.finalize(); break;
+        case ActiveEncoder::ChromaKey: chromaEncoder.finalize(); break;
+        case ActiveEncoder::HEVC:      hevcEncoder.finalize(); break;
+        case ActiveEncoder::ProRes:    proresEncoder.finalize(); break;
         }
     };
     auto encoderError = [&]() -> std::string {
         switch (activeEnc) {
-        case ActiveEncoder::HEVC:   return hevcEncoder.lastError();
-        case ActiveEncoder::ProRes: return proresEncoder.lastError();
+        case ActiveEncoder::ChromaKey: return chromaEncoder.lastError();
+        case ActiveEncoder::HEVC:      return hevcEncoder.lastError();
+        case ActiveEncoder::ProRes:    return proresEncoder.lastError();
         }
         return {};
     };
@@ -425,7 +448,37 @@ PrerenderResult SpinePrerenderer::renderGPU(const PrerenderJob& job,
                          nz, imageSize, 100.0 * nz / imageSize);
         }
 
-        // Write frame to encoder (NVENC or VP9)
+        // Chroma key: composite RGBA pixels over the solid background colour
+        // before encoding.  This replaces the alpha channel with a flat
+        // background that the user can key out in their editing software.
+        if (useChromaKey) {
+            constexpr float kInv255 = 1.0f / 255.0f;
+            const float bgR = job.chromaKeyR * kInv255;
+            const float bgG = job.chromaKeyG * kInv255;
+            const float bgB = job.chromaKeyB * kInv255;
+            const size_t pixelCount = static_cast<size_t>(renderW) * renderH;
+            uint8_t* px = pixelBuf.data();
+            for (size_t pi = 0; pi < pixelCount; ++pi) {
+                uint8_t* p = px + pi * 4;
+                float a = p[3] * kInv255;
+                if (a >= 1.0f) continue;          // fully opaque — no blending needed
+                if (a <= 0.0f) {
+                    // fully transparent — set to background colour
+                    p[0] = job.chromaKeyR;
+                    p[1] = job.chromaKeyG;
+                    p[2] = job.chromaKeyB;
+                    p[3] = 255;
+                    continue;
+                }
+                float invA = 1.0f - a;
+                p[0] = static_cast<uint8_t>(static_cast<float>(p[0]) * a + bgR * invA * 255.0f + 0.5f);
+                p[1] = static_cast<uint8_t>(static_cast<float>(p[1]) * a + bgG * invA * 255.0f + 0.5f);
+                p[2] = static_cast<uint8_t>(static_cast<float>(p[2]) * a + bgB * invA * 255.0f + 0.5f);
+                p[3] = 255;
+            }
+        }
+
+        // Write frame to encoder
         if (!encodeFrame(pixelBuf.data())) {
             result.error = "Encode failed at frame " + std::to_string(fi)
                          + ": " + encoderError();
@@ -448,6 +501,11 @@ PrerenderResult SpinePrerenderer::renderGPU(const PrerenderJob& job,
     std::filesystem::path actualOutputPath;
     const char* encoderName = "unknown";
     switch (activeEnc) {
+    case ActiveEncoder::ChromaKey:
+        actualOutputPath = job.outputPath;
+        actualOutputPath.replace_extension(".mp4");
+        encoderName = "ChromaKey-H264";
+        break;
     case ActiveEncoder::HEVC:
         actualOutputPath = job.outputPath;
         actualOutputPath.replace_extension(".mp4");
@@ -611,24 +669,52 @@ PrerenderResult SpinePrerenderer::renderCPU(const PrerenderJob& job,
         }
     }
 
-    // ── 5. Open encoder (ProRes 4444) ───────────────────────────────
-    ProResAlphaEncoder proresEncoder;
+    // ── 5. Open encoder ───────────────────────────────────────────────
+    bool cpuUseChromaKey = (job.format == PrerenderFormat::GreenScreen ||
+                            job.format == PrerenderFormat::BlueScreen ||
+                            job.format == PrerenderFormat::CustomColor);
+
+    ChromaKeyEncoder    cpuChromaEncoder;
+    ProResAlphaEncoder  proresEncoder;
+    bool cpuUseProRes = false;
 
     {
-        auto proresOutputPath = job.outputPath;
-        proresOutputPath.replace_extension(".mov");
-        if (!proresEncoder.open(proresOutputPath, renderW, renderH, job.fps, 4)) {
-            result.error = "Failed to open ProRes encoder";
+        bool opened = false;
+
+        // Chroma key formats on CPU
+        if (!opened && cpuUseChromaKey) {
+            auto ckOutputPath = job.outputPath;
+            ckOutputPath.replace_extension(".mp4");
+            if (cpuChromaEncoder.open(ckOutputPath, renderW, renderH, job.fps, job.crf)) {
+                opened = true;
+                spdlog::info("SpinePrerenderer (CPU): using chroma-key H.264 encoder");
+            }
+        }
+
+        // ProRes 4444 fallback
+        if (!opened) {
+            auto proresOutputPath = job.outputPath;
+            proresOutputPath.replace_extension(".mov");
+            if (proresEncoder.open(proresOutputPath, renderW, renderH, job.fps, 4)) {
+                cpuUseProRes = true;
+                opened = true;
+                spdlog::info("SpinePrerenderer (CPU): using ProRes 4444 encoder");
+            }
+        }
+
+        if (!opened) {
+            result.error = "Failed to open any encoder (ChromaKey + ProRes both failed)";
             return result;
         }
-        spdlog::info("SpinePrerenderer (CPU raster): using ProRes 4444 encoder");
     }
 
     auto encodeFrame = [&](const uint8_t* pixels) -> bool {
-        return proresEncoder.writeFrame(pixels);
+        if (cpuUseProRes) return proresEncoder.writeFrame(pixels);
+        return cpuChromaEncoder.writeFrame(pixels);
     };
     auto finalizeEncoder = [&]() {
-        proresEncoder.finalize();
+        if (cpuUseProRes) proresEncoder.finalize();
+        else cpuChromaEncoder.finalize();
     };
 
     // ── 6. Render loop (software rasterizer) ────────────────────────────
@@ -737,6 +823,33 @@ PrerenderResult SpinePrerenderer::renderCPU(const PrerenderJob& job,
             }
         }
 
+        // Chroma key: composite RGBA pixels over the solid background colour
+        if (cpuUseChromaKey) {
+            constexpr float kInv255 = 1.0f / 255.0f;
+            const float bgR = job.chromaKeyR * kInv255;
+            const float bgG = job.chromaKeyG * kInv255;
+            const float bgB = job.chromaKeyB * kInv255;
+            const size_t pixelCount = static_cast<size_t>(renderW) * renderH;
+            uint8_t* px = frameBuf.data();
+            for (size_t pi = 0; pi < pixelCount; ++pi) {
+                uint8_t* p = px + pi * 4;
+                float a = p[3] * kInv255;
+                if (a >= 1.0f) continue;
+                if (a <= 0.0f) {
+                    p[0] = job.chromaKeyR;
+                    p[1] = job.chromaKeyG;
+                    p[2] = job.chromaKeyB;
+                    p[3] = 255;
+                    continue;
+                }
+                float invA = 1.0f - a;
+                p[0] = static_cast<uint8_t>(static_cast<float>(p[0]) * a + bgR * invA * 255.0f + 0.5f);
+                p[1] = static_cast<uint8_t>(static_cast<float>(p[1]) * a + bgG * invA * 255.0f + 0.5f);
+                p[2] = static_cast<uint8_t>(static_cast<float>(p[2]) * a + bgB * invA * 255.0f + 0.5f);
+                p[3] = 255;
+            }
+        }
+
         // Write frame
         if (!encodeFrame(frameBuf.data())) {
             result.error = "Encode failed at frame " + std::to_string(fi);
@@ -748,9 +861,16 @@ PrerenderResult SpinePrerenderer::renderCPU(const PrerenderJob& job,
     finalizeEncoder();
 
     std::filesystem::path actualOutputPathCPU;
-    const char* encoderNameCPU = "ProRes4444";
-    actualOutputPathCPU = job.outputPath;
-    actualOutputPathCPU.replace_extension(".mov");
+    const char* encoderNameCPU = "unknown";
+    if (cpuUseChromaKey) {
+        actualOutputPathCPU = job.outputPath;
+        actualOutputPathCPU.replace_extension(".mp4");
+        encoderNameCPU = "ChromaKey-H264";
+    } else {
+        actualOutputPathCPU = job.outputPath;
+        actualOutputPathCPU.replace_extension(".mov");
+        encoderNameCPU = "ProRes4444";
+    }
     result.outputPath = actualOutputPathCPU;
 
     std::error_code ec;

@@ -279,6 +279,18 @@ public:
     /// Check if a preset with the given name exists.
     [[nodiscard]] bool hasPreset(const std::string& name) const;
 
+    /// Resolve the default shot for a character.
+    ///
+    /// Priority:
+    ///   1. Check `_defaults.json` (set via the "SET DEFAULT" button in ShotComposer)
+    ///      for an explicit character → shot name mapping.
+    ///   2. Fall back to the naming convention `"{characterName} (Default)"`.
+    ///   3. Fall back to case-insensitive match on `"{charactername} (default)"`.
+    ///
+    /// Returns nullopt if no default shot is found.
+    [[nodiscard]] std::optional<ShotPreset> resolveDefaultShot(
+        const std::string& characterName) const;
+
 private:
     /// Generate the file path for a preset name.
     [[nodiscard]] std::filesystem::path pathForPreset(const std::string& name) const;

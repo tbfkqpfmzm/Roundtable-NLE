@@ -350,39 +350,58 @@ void CompositeService::prewarmPlaybackResources(int64_t tick, uint32_t outW, uin
     }
 
     // ── Bounded play-start preroll ───────────────────────────────────
-    // Wait briefly (<= 120ms) for the first upcoming frame of each
-    // active clip to land in the cache. The urgent prefetch above has
-    // workers decoding ahead-of-playhead frames; this just delays the
-    // pipeline start enough that the first compositor request hits a
-    // cache hit instead of a stale last-good-frame fallback.
+    // Briefly wait for the first upcoming frame of each active clip to
+    // land in the cache. The urgent prefetch above has workers decoding
+    // ahead-of-playhead frames; this just delays the pipeline start
+    // enough that the first compositor request hits a cache hit instead
+    // of a stale last-good-frame fallback.
     //
-    // Cap is short on purpose: WASAPI startup absorbs ~50-100ms of it,
-    // so most of this wait is invisible to the user. If decode is
-    // genuinely slow (e.g. cold NVDEC init), we bail at the cap and
-    // accept one stale frame rather than freezing the UI.
+    // CRITICAL: Release m_compositeMutex between poll cycles so the
+    // FrameProducer thread can submit GPU work.  Holding this mutex for
+    // hundreds of ms blocks the entire composite pipeline (including GPU
+    // command submission), which can trigger the Windows GPU watchdog
+    // (TDR) and cause nvoglv64.dll driver crashes — the exact symptom
+    // reported in the playback-preview crash.
     if (!prerollTargets.empty()) {
         using namespace std::chrono;
-        // 700ms cap: long enough to absorb cold-start NVDEC init spikes
-        // (380ms typical at play-start) plus first-frame Half-tier decode
-        // for SpineClip loop frames (urgent prefetch 20-150ms per packed-
-        // alpha frame under load).  WASAPI startup absorbs ~50-100ms of
-        // this in the background, so the user-visible delay is ~600ms
-        // worst case — still well under the "feels like a hang" threshold.
-        const auto deadline = steady_clock::now() + milliseconds(700);
-        size_t ready = 0;
-        while (ready < prerollTargets.size() && steady_clock::now() < deadline) {
-            ready = 0;
+        // 400ms cap: the mutex-releasing poll pattern (unlock → sleep 2ms
+        // → re-lock) keeps the FrameProducer thread alive, so we can afford
+        // more time than the old 200ms without triggering the GPU watchdog
+        // (TDR).  Cold NVDEC init can spike to 380ms on first play-start,
+        // so 200ms was too short — we'd bail early and show a stale frame.
+        // WASAPI startup absorbs ~50-100ms in the background, so the user-
+        // visible delay is ~300ms worst case — still imperceptible.
+        const auto deadline = steady_clock::now() + milliseconds(400);
+        int pollCount = 0;
+        size_t lastReady = 0;
+        bool allWarm = false;
+        do {
+            // Release the mutex so the FrameProducer thread can composite
+            // frames and submit GPU work.  Re-acquire for each poll cycle.
+            lock.unlock();
+            std::this_thread::sleep_for(milliseconds(2));
+            lock.lock();
+
+            lastReady = 0;
             for (const auto& t : prerollTargets) {
                 if (m_mediaPool->isFrameCached(t.handle, t.frame, t.tier))
-                    ++ready;
+                    ++lastReady;
             }
-            if (ready == prerollTargets.size()) break;
-            std::this_thread::sleep_for(milliseconds(5));
-        }
+            if (lastReady == prerollTargets.size()) {
+                allWarm = true;
+                break;
+            }
+            ++pollCount;
+        } while (steady_clock::now() < deadline);
         static std::atomic<int> s_prerollLog{0};
         if (++s_prerollLog <= 10 || s_prerollLog % 30 == 0) {
-            spdlog::info("[PERF] play-start preroll: {}/{} frames warm",
-                         ready, prerollTargets.size());
+            if (allWarm) {
+                spdlog::info("[PERF] play-start preroll: {}/{} frames warm after {} polls",
+                             lastReady, prerollTargets.size(), pollCount);
+            } else {
+                spdlog::warn("[PERF] play-start preroll TIMEOUT: only {}/{} frames warm after {} polls — stale frame may show",
+                             lastReady, prerollTargets.size(), pollCount);
+            }
         }
     }
 }
@@ -566,11 +585,17 @@ try
         if (m_cacheInvalidateRequested.load(std::memory_order_acquire))
             return nullptr;
         std::lock_guard lg(m_lastCompositeMtx);
-        // Clear the inter-queue semaphore handle: no new composite was done,
-        // so the semaphore hasn't been signaled for this frame.  The viewport
-        // must NOT wait on a stale/unsignaled semaphore.
-        if (m_lastGoodComposite)
+        if (m_lastGoodComposite) {
+            // Strip GPU-direct handles: the compositor's output texture may
+            // have been resized or recreated since this frame was composited,
+            // so its gpuImageView/gpuSampler are stale.  Returning a frame
+            // with gpuReady=true would cause the VulkanViewport to sample
+            // from destroyed resources, crashing the GPU driver.
+            m_lastGoodComposite->gpuReady     = false;
+            m_lastGoodComposite->gpuImageView = 0;
+            m_lastGoodComposite->gpuSampler   = 0;
             m_lastGoodComposite->gpuSemaphore = 0;
+        }
         return m_lastGoodComposite;
     }
 
@@ -916,7 +941,10 @@ try
         }
     }
     // GPU failed â€” fall through to CPU path below
-    spdlog::warn("compositeFrame: GPU composite failed, falling back to CPU");
+    // WARNING: CPU compositing is extremely slow and produces unusable results.
+    // This path is a TEMPORARY LAST RESORT only -- it should never activate in
+    // normal operation. If you see this error, fix the GPU compositor instead.
+    spdlog::error("compositeFrame: GPU composite FAILED -- falling back to SLOW CPU path");
 // Multiple layers ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â CPU alpha composite with transforms (bottom to top)
     // Reuse composite buffer to avoid 8MB allocation + zero per frame.
     if (!m_compositeBuffer || m_compositeBuffer->width != outW ||

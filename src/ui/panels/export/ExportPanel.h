@@ -164,6 +164,10 @@ protected:
 
 private:
     void setupUI();
+
+    /// Check for offline media in the timeline. Returns false if the user
+    /// decides to cancel the export when warned about offline clips.
+    bool checkOfflineMedia();
     void populatePresets();
     void populateCodecs();
     void populateContainers();

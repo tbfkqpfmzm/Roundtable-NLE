@@ -242,6 +242,7 @@ void MainWindow::onAutoSave()
         AutoSave::pruneAutoSaves(folder, maxKeep);
 
         spdlog::info("Auto-saved to {}", savePath.string());
+
         statusBar()->showMessage("Auto-saved", 2000);
     }
 }
@@ -267,8 +268,11 @@ void MainWindow::checkCrashRecovery()
                 this, "Recover Auto-Save",
                 QString("An auto-save was found for:\n\n%1\n\n"
                         "Auto-save: %2\n\n"
-                        "This may contain unsaved work from a previous session.\n"
-                        "Would you like to recover it?")
+                        "This auto-save is newer than your last saved version.\n"
+                        "\n"
+                        "Click Yes to restore your unsaved work.\n"
+                        "Click No to load the last manually saved version "
+                        "(changes since then will be lost).")
                     .arg(lastPath)
                     .arg(QString::fromStdString(newestAutoSave.filename().string())),
                 QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);

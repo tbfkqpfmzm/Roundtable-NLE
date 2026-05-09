@@ -1086,13 +1086,27 @@ void TimelineWorkspace::showEvent(QShowEvent* event)
     // hadPendingState is true) and verify:
     //   • All dock widgets are not stuck invisible.
     //   • m_panelMaximized has been properly cleared.
+    //
+    // CRITICAL: The recovery must NEVER call doResetToDefaultDockLayout()
+    // here — that destroys edge columns and resets ALL panel positions to
+    // the programmatic default, destroying the user's custom layout on
+    // every visit to the Timeline page.  Instead we gently show any
+    // invisible docks, preserving their positions.
     QTimer::singleShot(0, this, [this]() {
         // Check 1: If the maximize flag is still set, something went wrong
-        // during restore — clear it and reset to default.
+        // during restore — clear it and repair.
         if (m_panelMaximized) {
             spdlog::warn("showEvent: m_panelMaximized is true after show — "
-                         "resetting to default layout");
-            doResetToDefaultDockLayout();
+                         "clearing maximize flag and showing all docks");
+            m_panelMaximized = false;
+            m_maximizedWidget = nullptr;
+            m_maximizedDock = nullptr;
+            m_dockStateBeforeMaximize.clear();
+            // Show all docks without resetting their layout positions.
+            for (auto it = m_dockWidgets.constBegin();
+                 it != m_dockWidgets.constEnd(); ++it) {
+                it.value()->setVisible(true);
+            }
             return;
         }
 
@@ -1109,9 +1123,36 @@ void TimelineWorkspace::showEvent(QShowEvent* event)
         }
         if (!anyDockVisible && !m_dockWidgets.isEmpty()) {
             spdlog::warn("showEvent: no dock widgets visible after show — "
-                         "timeline appears maximized; resetting to default layout");
-            doResetToDefaultDockLayout();
+                         "showing all docks without resetting layout");
+            // Gently show docks without destroying edge columns or resetting
+            // panel positions.  Simply make each dock visible — Qt's dock
+            // layout system will place them back where restoreState() put them.
+            for (auto it = m_dockWidgets.constBegin();
+                 it != m_dockWidgets.constEnd(); ++it) {
+                it.value()->setVisible(true);
+            }
         }
+
+        // Check 3: Deferred size sanity — 500ms after show, verify no dock
+        // has zero dimensions (which means it's "visible" but collapsed/
+        // unusable).  If found, resize only that dock to its minimum hint
+        // rather than resetting the entire layout.
+        QTimer::singleShot(500, this, [this]() {
+            for (auto it = m_dockWidgets.constBegin();
+                 it != m_dockWidgets.constEnd(); ++it) {
+                auto* dock = it.value();
+                if (dock->isVisible() &&
+                    (dock->width() < 10 || dock->height() < 10)) {
+                    spdlog::warn("showEvent: dock '{}' zero size ({}x{}) "
+                                 "after restore — resizing to minimum",
+                                 it.key().toStdString(),
+                                 dock->width(), dock->height());
+                    QSize minSz = dock->minimumSizeHint()
+                        .expandedTo(QSize(100, 100));
+                    dock->resize(minSz);
+                }
+            }
+        });
     });
 }
 

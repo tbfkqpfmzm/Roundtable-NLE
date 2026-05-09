@@ -25,8 +25,6 @@ RelinkMediaDialog::RelinkMediaDialog(AssetDatabase* assetDb,
     setWindowTitle(tr("Link Media"));
     setMinimumSize(600, 400);
 
-    const auto& tc = Theme::colors();
-
     auto* layout = new QVBoxLayout(this);
 
     auto* infoLabel = new QLabel(

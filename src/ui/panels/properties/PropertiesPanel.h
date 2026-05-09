@@ -79,6 +79,10 @@ public:
     explicit PropertiesPanel(QWidget* parent = nullptr);
     ~PropertiesPanel() override;
 
+protected:
+    bool eventFilter(QObject* obj, QEvent* event) override;
+
+public:
     // ── Clip binding ────────────────────────────────────────────────────
 
     /// Set the clip to display/edit properties for.

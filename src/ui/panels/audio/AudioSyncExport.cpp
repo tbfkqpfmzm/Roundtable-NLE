@@ -196,28 +196,13 @@ int AudioSync::exportToTimeline(Timeline* timeline)
         }
         spdlog::info("AudioSync::exportToTimeline cleared old visual clips from video tracks");
 
-        auto presetNames = m_shotPresetManager->presetNames();
-
         for (auto& group : groups) {
             if (group.character.empty() || group.totalDuration <= 0) continue;
 
-            std::string defaultName = group.character + " (Default)";
-            // Capture the preset name for shot name metadata on created clips
-            auto shotName = defaultName;
-            auto preset = m_shotPresetManager->load(defaultName);
-
-            if (!preset) {
-                std::string lowerChar = group.character;
-                std::transform(lowerChar.begin(), lowerChar.end(), lowerChar.begin(), ::tolower);
-                for (const auto& pn : presetNames) {
-                    std::string lowerPN = pn;
-                    std::transform(lowerPN.begin(), lowerPN.end(), lowerPN.begin(), ::tolower);
-                    if (lowerPN == lowerChar + " (default)") {
-                        preset = m_shotPresetManager->load(pn);
-                        if (preset) { shotName = pn; break; }
-                    }
-                }
-            }
+            std::string shotName;
+            auto preset = m_shotPresetManager->resolveDefaultShot(group.character);
+            if (preset)
+                shotName = preset->name();
 
             if (!preset) {
                 spdlog::debug("  No default shot for '{}', skipping visual clips",

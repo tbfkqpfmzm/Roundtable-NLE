@@ -290,6 +290,14 @@ void ProjectPanel::setupUI()
         m_nameInput->setStyleSheet(inputStyle());
         connect(m_nameInput, &QLineEdit::returnPressed,
                 this, &ProjectPanel::onCreateClicked);
+        connect(m_nameInput, &QLineEdit::textChanged, this, [this](const QString& text) {
+            if (m_summaryNameLabel) {
+                QString display = text.trimmed().isEmpty()
+                    ? QStringLiteral("New Project")
+                    : text.trimmed();
+                m_summaryNameLabel->setText(QStringLiteral("\U0001F4C4  ") + display);
+            }
+        });
         lay->addWidget(m_nameInput);
 
         newPageLayout->addWidget(card);
@@ -746,13 +754,13 @@ void ProjectPanel::setupUI()
         sbLay->setContentsMargins(14, 12, 14, 12);
         sbLay->setSpacing(10);
 
-        // Row 1: Project name
-        auto* nameLabel = new QLabel(QStringLiteral("\U0001F4C4  Summer 2026 Ranking"));
-        nameLabel->setObjectName("NewSummaryName");
-        nameLabel->setStyleSheet(QStringLiteral(
+        // Row 1: Project name (dynamic, updated via textChanged signal)
+        m_summaryNameLabel = new QLabel(QStringLiteral("\U0001F4C4  New Project"));
+        m_summaryNameLabel->setObjectName("NewSummaryName");
+        m_summaryNameLabel->setStyleSheet(QStringLiteral(
             "font-size: 12px; font-weight: 700; color: %1;")
             .arg(Theme::rgb(c.textPrimary)));
-        sbLay->addWidget(nameLabel);
+        sbLay->addWidget(m_summaryNameLabel);
 
         // Row 2: Resolution × FPS
         auto* specsRow = new QHBoxLayout;

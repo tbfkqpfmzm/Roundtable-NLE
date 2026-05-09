@@ -20,6 +20,7 @@
 #include "UpdateChecker.h"
 #include "panels/timeline/TimelineWorkspace.h"
 #include "panels/monitors/ProgramMonitor.h"
+#include "panels/project/ProjectBin.h"
 
 #include <QApplication>
 #include <QDesktopServices>
@@ -68,6 +69,13 @@ void MainWindow::buildFileMenu(QMenuBar* menuBar)
     menu->addAction("Save &As...", this, &MainWindow::onSaveProjectAs);
 
     menu->addAction("Restore from Auto-Save...", this, &MainWindow::onRestoreFromAutoSave);
+
+    menu->addSeparator();
+
+    menu->addAction("Import Media...", this, [this]() {
+        if (auto* bin = projectBin())
+            bin->importFiles();
+    });
 
     menu->addSeparator();
 

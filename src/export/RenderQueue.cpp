@@ -318,7 +318,9 @@ void RenderQueue::processJob(ExportJob& job, Timeline* timeline, Compositor* com
     spdlog::info("RndQ[{}]: Step 2b — encoder init", job.id);
     if (!encoder || !encoder->init(job.config.encoderConfig)) {
         // Fallback: try CPU encoding
-        spdlog::warn("RndQ[{}]: HW encoder failed, falling back to CPU", job.id);
+        // WARNING: CPU encoding is very slow. This is a TEMPORARY LAST RESORT
+        // only Ã¢â‚¬â€ fix the HW encoder path instead.
+        spdlog::error("RndQ[{}]: HW encoder failed Ã¢â‚¬â€ falling back to SLOW CPU encoding", job.id);
         job.config.encoderConfig.hwAccel = HardwareAccel::None;
         encoder = Encoder::create(job.config.encoderConfig.codec, HardwareAccel::None);
         if (!encoder || !encoder->init(job.config.encoderConfig)) {

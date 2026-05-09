@@ -742,6 +742,17 @@ bool ProjectBin::eventFilter(QObject* obj, QEvent* event)
         if (event->type() == QEvent::DragLeave) {
             handleDragLeave();
         }
+        // Double-click on empty space in list view → Import Media
+        if (obj == m_listWidget->viewport() && event->type() == QEvent::MouseButtonDblClick) {
+            auto* me = static_cast<QMouseEvent*>(event);
+            if (me->button() == Qt::LeftButton) {
+                QTreeWidgetItem* item = m_listWidget->itemAt(me->pos());
+                if (!item) {
+                    importFiles();
+                    return true;
+                }
+            }
+        }
     }
 
     // -- Create Sequence button: accept drag-and-drop of media files ------

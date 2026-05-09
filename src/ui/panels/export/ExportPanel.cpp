@@ -33,6 +33,8 @@
 #include "media/PlaybackController.h"
 #include "project/Project.h"
 #include "timeline/Timeline.h"
+#include "timeline/Track.h"
+#include "timeline/Clip.h"
 
 #include "MainWindow.h"
 
@@ -829,6 +831,45 @@ ExportJobConfig ExportPanel::buildJobConfig() const
     return cfg;
 }
 
+bool ExportPanel::checkOfflineMedia()
+{
+    if (!m_timeline) return true;
+
+    std::vector<std::string> offlineClips;
+    for (size_t ti = 0; ti < m_timeline->trackCount(); ++ti) {
+        const auto* trk = m_timeline->track(ti);
+        if (!trk || trk->isDivider()) continue;
+        for (size_t ci = 0; ci < trk->clipCount(); ++ci) {
+            const auto* clip = trk->clip(ci);
+            if (clip && clip->isOffline()) {
+                std::string label = clip->label();
+                if (label.empty())
+                    label = "(unnamed)";
+                offlineClips.push_back(label);
+            }
+        }
+    }
+
+    if (offlineClips.empty())
+        return true;
+
+    // Build a summary message listing the offline clips
+    QString msg = tr("The following media files are offline (missing or unavailable):\n\n");
+    for (size_t i = 0; i < offlineClips.size() && i < 20; ++i) {
+        msg += QStringLiteral("  \u2022 ") + QString::fromStdString(offlineClips[i]) + QStringLiteral("\n");
+    }
+    if (offlineClips.size() > 20) {
+        msg += tr("  ... and %1 more\n").arg(static_cast<int>(offlineClips.size() - 20));
+    }
+    msg += tr("\nThese clips will appear as black/missing in the export.\n"
+              "Do you want to continue anyway?");
+
+    auto result = QMessageBox::question(this, tr("Offline Media Detected"),
+                                         msg, QMessageBox::Yes | QMessageBox::No,
+                                         QMessageBox::No);
+    return (result == QMessageBox::Yes);
+}
+
 void ExportPanel::onStartExport()
 {
     if (m_outputPath->text().isEmpty()) {
@@ -845,6 +886,10 @@ void ExportPanel::onStartExport()
         QMessageBox::warning(this, tr("Export"), tr("No renderer available — cannot export."));
         return;
     }
+
+    // Check for offline media and warn the user
+    if (!checkOfflineMedia())
+        return;
 
     auto config = buildJobConfig();
     uint32_t jobId = m_renderQueue->addJob(config);

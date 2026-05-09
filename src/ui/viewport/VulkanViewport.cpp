@@ -435,9 +435,12 @@ void VulkanViewport::displayFrame(std::shared_ptr<CachedFrame> frame)
             // quad.frag's .bgra swizzle then corrects both paths identically.
             uploadOk = slot.texture->createFromDataBatched(
                 ctx.allocator().handle(), device,
-                TextureConfig{frame->width, frame->height,
-                              VK_FORMAT_R8G8B8A8_UNORM,
-                              VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT},
+                TextureConfig{
+                    .width  = frame->width,
+                    .height = frame->height,
+                    .format = VK_FORMAT_R8G8B8A8_UNORM,
+                    .usage  = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                },
                 frame->pixels.data(), dataSize, cmd, staging);
         } else {
             uploadOk = slot.texture->updateDataBatched(

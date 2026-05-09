@@ -23,12 +23,13 @@ namespace rt {
 // ── Static helpers ──────────────────────────────────────────────────────────
 
 static VkImageView createImageView(VkDevice device, VkImage image, VkFormat format,
-                                    VkImageAspectFlags aspect, uint32_t mipLevels)
+                                    VkImageAspectFlags aspect, uint32_t mipLevels,
+                                    VkImageViewType viewType = VK_IMAGE_VIEW_TYPE_2D)
 {
     VkImageViewCreateInfo viewInfo{};
     viewInfo.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     viewInfo.image                           = image;
-    viewInfo.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.viewType                        = viewType;
     viewInfo.format                          = format;
     viewInfo.subresourceRange.aspectMask     = aspect;
     viewInfo.subresourceRange.baseMipLevel   = 0;
@@ -105,6 +106,8 @@ void Texture::recordUpload(VkCommandBuffer cmd, VkBuffer stagingBuffer,
     // Transition prevLayout → TRANSFER_DST_OPTIMAL
     transitionLayout(cmd, prevLayout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
+    const bool is3D = (m_depth > 1);
+
     VkBufferImageCopy region{};
     region.bufferOffset      = stagingOffset;
     region.bufferRowLength   = 0;
@@ -114,7 +117,7 @@ void Texture::recordUpload(VkCommandBuffer cmd, VkBuffer stagingBuffer,
     region.imageSubresource.baseArrayLayer = 0;
     region.imageSubresource.layerCount     = 1;
     region.imageOffset = {0, 0, 0};
-    region.imageExtent = {m_width, m_height, 1};
+    region.imageExtent = {m_width, m_height, m_depth};
 
     vkCmdCopyBufferToImage(cmd, stagingBuffer, m_image,
                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
@@ -142,6 +145,7 @@ Texture::Texture(Texture&& other) noexcept
     , m_device(other.m_device)
     , m_width(other.m_width)
     , m_height(other.m_height)
+    , m_depth(other.m_depth)
     , m_format(other.m_format)
     , m_currentLayout(other.m_currentLayout)
     , m_mipLevels(other.m_mipLevels)
@@ -154,6 +158,7 @@ Texture::Texture(Texture&& other) noexcept
     other.m_device        = VK_NULL_HANDLE;
     other.m_width         = 0;
     other.m_height        = 0;
+    other.m_depth         = 1;
     other.m_currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
@@ -172,6 +177,7 @@ Texture& Texture::operator=(Texture&& other) noexcept
         m_device        = other.m_device;
         m_width         = other.m_width;
         m_height        = other.m_height;
+        m_depth         = other.m_depth;
         m_format        = other.m_format;
         m_currentLayout = other.m_currentLayout;
         m_mipLevels     = other.m_mipLevels;
@@ -184,6 +190,7 @@ Texture& Texture::operator=(Texture&& other) noexcept
         other.m_device        = VK_NULL_HANDLE;
         other.m_width         = 0;
         other.m_height        = 0;
+        other.m_depth         = 1;
         other.m_currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     }
     return *this;
@@ -197,18 +204,21 @@ bool Texture::create(VmaAllocator allocator, VkDevice device, const TextureConfi
     m_device    = device;
     m_width     = config.width;
     m_height    = config.height;
+    m_depth     = config.depth;
     m_format    = config.format;
     m_mipLevels = config.generateMipmaps
-                      ? static_cast<uint32_t>(std::floor(std::log2(std::max(config.width, config.height)))) + 1
+                      ? static_cast<uint32_t>(std::floor(std::log2(std::max({config.width, config.height, config.depth})))) + 1
                       : config.mipLevels;
+
+    const bool is3D = (m_depth > 1);
 
     // ── Create VkImage via VMA ──────────────────────────────────────────
     VkImageCreateInfo imageInfo{};
     imageInfo.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    imageInfo.imageType     = VK_IMAGE_TYPE_2D;
+    imageInfo.imageType     = is3D ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
     imageInfo.extent.width  = m_width;
     imageInfo.extent.height = m_height;
-    imageInfo.extent.depth  = 1;
+    imageInfo.extent.depth  = m_depth;
     imageInfo.mipLevels     = m_mipLevels;
     imageInfo.arrayLayers   = 1;
     imageInfo.format        = m_format;
@@ -251,7 +261,10 @@ bool Texture::create(VmaAllocator allocator, VkDevice device, const TextureConfi
     }
 
     // ── Create image view ───────────────────────────────────────────────
-    m_imageView = createImageView(m_device, m_image, m_format, aspect, m_mipLevels);
+    {
+        VkImageViewType viewType = is3D ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D;
+        m_imageView = createImageView(m_device, m_image, m_format, aspect, m_mipLevels, viewType);
+    }
     if (m_imageView == VK_NULL_HANDLE)
     {
         spdlog::error("Failed to create image view");

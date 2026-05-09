@@ -17,6 +17,7 @@
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QScrollArea>
+#include <QWheelEvent>
 
 #include <spdlog/spdlog.h>
 #include <chrono>
@@ -102,6 +103,17 @@ void ShotPanel::setupUI()
     showSectionsForType();
 }
 
+bool ShotPanel::eventFilter(QObject* obj, QEvent* event)
+{
+    if (event->type() == QEvent::Wheel) {
+        // Suppress wheel events on combo boxes to prevent accidental
+        // character/outfit/stance/animation changes when scrolling content.
+        if (qobject_cast<QComboBox*>(obj))
+            return true;
+    }
+    return QWidget::eventFilter(obj, event);
+}
+
 void ShotPanel::setupCharacterSection(QWidget* container)
 {
     const auto& m = Theme::metrics();
@@ -114,6 +126,7 @@ void ShotPanel::setupCharacterSection(QWidget* container)
     m_characterCombo = new QComboBox(m_characterSection);
     m_characterCombo->setEditable(false);
     m_characterCombo->setMinimumWidth(150);
+    m_characterCombo->installEventFilter(this);
     connect(m_characterCombo, &QComboBox::currentTextChanged,
             this, [this](const QString&) {
                 if (m_updating) return;
@@ -128,6 +141,7 @@ void ShotPanel::setupCharacterSection(QWidget* container)
     // Outfit dropdown — populated from ModelManager metadata
     m_outfitCombo = new QComboBox(m_characterSection);
     m_outfitCombo->setEditable(false);
+    m_outfitCombo->installEventFilter(this);
     connect(m_outfitCombo, &QComboBox::currentTextChanged,
             this, [this](const QString&) {
                 if (m_updating) return;
@@ -140,6 +154,7 @@ void ShotPanel::setupCharacterSection(QWidget* container)
     // Stance dropdown — populated dynamically based on character/outfit
     m_stanceCombo = new QComboBox(m_characterSection);
     m_stanceCombo->addItem("Default");  // placeholder; repopulated on clip load
+    m_stanceCombo->installEventFilter(this);
     connect(m_stanceCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int) {
                 if (m_updating) return;
@@ -162,6 +177,7 @@ void ShotPanel::setupAnimationSection(QWidget* container)
     // Animation dropdown — populated from loaded skeleton's available animations
     m_animationCombo = new QComboBox(m_animationSection);
     m_animationCombo->setEditable(false);
+    m_animationCombo->installEventFilter(this);
     connect(m_animationCombo, &QComboBox::currentTextChanged,
             this, [this](const QString&) {
                 if (m_updating) return;

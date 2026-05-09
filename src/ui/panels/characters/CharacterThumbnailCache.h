@@ -42,7 +42,16 @@ QPixmap loadCachedCharacterThumbnail(const std::string& charName, int sz);
 /// Returns a null QPixmap if no cached full-body render exists.
 QPixmap loadCachedCharacterFullBody(const std::string& charName);
 
+/// Load the outfit-specific full-body cached render for the given character + outfit combination.
+/// Falls back to the generic full-body render if no outfit-specific one exists.
+QPixmap loadCachedCharacterOutfitFullBody(const std::string& charName,
+                                           const std::string& outfit);
+
 /// Get the file path for the full-body cached render.
 std::string cachedCharacterFullBodyPath(const std::string& charName);
+
+/// Get the file path for an outfit-specific full-body cached render.
+std::string cachedCharacterOutfitFullBodyPath(const std::string& charName,
+                                                const std::string& outfit);
 
 } // namespace rt

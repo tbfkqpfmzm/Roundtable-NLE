@@ -834,16 +834,18 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
                 }
 
                 // CPU fallback if GPU Spine didn't produce a frame
+                // WARNING: CPU Spine rendering is very slow. This is a TEMPORARY
+                // LAST RESORT only Ã¢â‚¬â€ fix the GPU Spine path instead.
                 if (!gpuSpineDone) {
                     frame = renderSpineClip(spineClip, tick, outW, outH);
                     if (frame) {
                         cpuSpineRendered = true;
-                        spdlog::info("[SPINE-RENDER] '{}' CPU raster: {}x{}",
+                        spdlog::warn("[SPINE-RENDER] '{}' GPU unavailable Ã¢â‚¬â€ SLOW CPU raster: {}x{}",
                                      spineClip->characterName(),
                                      frame->width, frame->height);
                     } else {
-                        spdlog::warn("[SPINE-RENDER] '{}' FAILED both GPU and CPU paths",
-                                     spineClip->characterName());
+                        spdlog::error("[SPINE-RENDER] '{}' FAILED both GPU and CPU paths",
+                                      spineClip->characterName());
                     }
                 } else if (gpuSpineZeroCopy) {
                     spdlog::info("[SPINE-RENDER] '{}' GPU zero-copy: {}x{}",

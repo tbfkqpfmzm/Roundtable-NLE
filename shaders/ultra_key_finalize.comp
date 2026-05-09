@@ -172,17 +172,46 @@ void main() {
 
     // ── Step 3: Output Mode ─────────────────────────────────────────────
     int mode = int(OUTPUT_MODE + 0.5);
+    vec4 orig = texture(inputImage, uv);
 
     if (mode == 1) {
-        // Alpha Channel view — white = opaque, black = transparent
+        // Alpha Matte view — white = opaque, black = transparent
         imageStore(outputImage, pixel, vec4(vec3(alpha), 1.0));
     } else if (mode == 2) {
         // Color Channel view — show keyed area highlighted
-        vec4 orig = texture(inputImage, uv);
         vec3 tinted = mix(vec3(1.0, 0.0, 0.5) * 0.5, orig.rgb, alpha);
         imageStore(outputImage, pixel, vec4(tinted, 1.0));
+    } else if (mode == 3) {
+        // Original view — bypass all keying, show source unmodified
+        imageStore(outputImage, pixel, vec4(orig.rgb, 1.0));
+    } else if (mode == 4) {
+        // Removed Color view — show keyed-out pixels in color,
+        // transparent areas as black
+        imageStore(outputImage, pixel, vec4(orig.rgb * (1.0 - alpha), 1.0));
+    } else if (mode == 5) {
+        // Spill Map view — visualize spill suppression as heat map
+        // Brighter areas = more spill suppression applied
+        float spillHeat = 0.0;
+        float spillStr     = SPILL / 100.0;
+        float spillRange   = max(SPILL_RANGE / 100.0, 0.05);
+        vec3 keyColor = vec3(KEY_R, KEY_G, KEY_B);
+        if (spillStr > 0.001) {
+            float spillAmount = 0.0;
+            if (keyColor.g > keyColor.r && keyColor.g > keyColor.b)
+                spillAmount = max(orig.g - max(orig.r, orig.b), 0.0);
+            else if (keyColor.b > keyColor.r && keyColor.b > keyColor.g)
+                spillAmount = max(orig.b - max(orig.r, orig.g), 0.0);
+            else
+                spillAmount = max(orig.r - max(orig.g, orig.b), 0.0);
+            float edgeBoost = smoothstep(1.0, 0.5, alpha);
+            spillHeat = clamp((spillAmount / spillRange) * spillStr + edgeBoost * spillStr * 0.3, 0.0, 1.0);
+        }
+        // Heat map: red = heavy spill, yellow = moderate, black = none
+        vec3 spillVis = mix(vec3(0.0, 0.0, 0.0), vec3(1.0, 0.0, 0.0), spillHeat);
+        spillVis = mix(spillVis, vec3(1.0, 1.0, 0.0), smoothstep(0.5, 1.0, spillHeat));
+        imageStore(outputImage, pixel, vec4(spillVis, 1.0));
     } else {
-        // Composite mode — premultiply alpha for compositing
+        // Composite mode (mode 0) — premultiply alpha for compositing
         color.a = alpha;
         imageStore(outputImage, pixel, color);
     }

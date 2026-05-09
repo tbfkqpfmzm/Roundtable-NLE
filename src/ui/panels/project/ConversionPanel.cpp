@@ -16,6 +16,7 @@
 #include "spine/SpineAnimation.h"
 #endif
 
+#include <QColorDialog>
 #include <QDir>
 #include <QDirIterator>
 #include <QFrame>
@@ -148,8 +149,10 @@ void ConversionPanel::setupUI()
     encoderRow->addWidget(encoderLabel);
 
     m_encoderCombo = new QComboBox;
-    m_encoderCombo->addItem("H.264 Packed-Alpha  (.mp4)", static_cast<int>(SpineCacheFormat::HEVCPackedAlpha));
-    m_encoderCombo->addItem("ProRes 4444  (.mov)", static_cast<int>(SpineCacheFormat::ProRes4444));
+    m_encoderCombo->addItem("Green Screen  (.mp4)",   static_cast<int>(SpineCacheFormat::GreenScreen));
+    m_encoderCombo->addItem("Blue Screen  (.mp4)",    static_cast<int>(SpineCacheFormat::BlueScreen));
+    m_encoderCombo->addItem("Custom Color  (.mp4)",   static_cast<int>(SpineCacheFormat::CustomColor));
+    m_encoderCombo->addItem("ProRes 4444  (.mov)",    static_cast<int>(SpineCacheFormat::ProRes4444));
     m_encoderCombo->setMinimumWidth(320);
     m_encoderCombo->setMinimumHeight(36);
     m_encoderCombo->setStyleSheet(QStringLiteral(
@@ -164,18 +167,67 @@ void ConversionPanel::setupUI()
              Theme::rgb(c.surface0), Theme::rgb(c.textPrimary),
              Theme::rgb(c.accentDim)));
     m_encoderCombo->setToolTip(
-        "H.264 Packed-Alpha: Small files, NVENC-accelerated, all-intra seeking, NVDEC fast-path decode\n"
-        "ProRes 4444: Large files, perfect quality, CPU encode, native alpha");
+        "Green Screen: Character rendered on solid #00FF00 background. Key it out in your editing software.\n"
+        "Blue Screen: Character rendered on solid #0000FF background.\n"
+        "Custom Color: Choose any solid background colour for chroma keying.\n"
+        "ProRes 4444: Native alpha channel, large files, perfect quality, CPU encode.");
     connect(m_encoderCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int index) {
 #ifdef ROUNDTABLE_HAS_SPINE
         if (m_animVideoCache) {
             auto fmt = static_cast<SpineCacheFormat>(m_encoderCombo->itemData(index).toInt());
             m_animVideoCache->setEncoderFormat(fmt);
+            // Show/hide colour swatch for CustomColor
+            if (m_colorSwatchBtn) {
+                bool isCustom = (fmt == SpineCacheFormat::CustomColor);
+                m_colorSwatchBtn->setVisible(isCustom);
+            }
         }
 #endif
     });
     encoderRow->addWidget(m_encoderCombo);
+
+    // ── Chroma key colour swatch / picker ─────────────────────────────
+    // Shows the current background colour. Click to open a colour picker.
+    // Only visible when "Custom Color" is selected in the encoder combo.
+    m_colorSwatchBtn = new QPushButton;
+    m_colorSwatchBtn->setFixedSize(36, 36);
+    m_colorSwatchBtn->setCursor(Qt::PointingHandCursor);
+    m_colorSwatchBtn->setToolTip("Click to change chroma key background colour");
+    // Bright green (#00FF00) default
+    m_colorSwatchBtn->setStyleSheet(QStringLiteral(
+        "QPushButton { background: #00FF00; border: 2px solid %1; border-radius: 6px; }"
+        "QPushButton:hover { border-color: %2; }")
+        .arg(Theme::rgb(c.border), Theme::rgb(c.accent)));
+    // Capture theme colours by value for use in the lambda
+    const auto swatchBorder = Theme::rgb(c.border);
+    const auto swatchAccent = Theme::rgb(c.accent);
+    connect(m_colorSwatchBtn, &QPushButton::clicked, this, [this, swatchBorder, swatchAccent]() {
+        QColor current(m_colorSwatchBtn->property("chromaColor").isValid()
+            ? m_colorSwatchBtn->property("chromaColor").value<QColor>()
+            : QColor(0, 255, 0));
+        QColor chosen = QColorDialog::getColor(current, this,
+            "Choose Chroma Key Background Colour");
+        if (chosen.isValid()) {
+            m_colorSwatchBtn->setProperty("chromaColor", chosen);
+            m_colorSwatchBtn->setStyleSheet(QStringLiteral(
+                "QPushButton { background: %1; border: 2px solid %2; border-radius: 6px; }"
+                "QPushButton:hover { border-color: %3; }")
+                .arg(chosen.name(), swatchBorder, swatchAccent));
+#ifdef ROUNDTABLE_HAS_SPINE
+            if (m_animVideoCache) {
+                m_animVideoCache->setChromaKeyColor(
+                    static_cast<uint8_t>(chosen.red()),
+                    static_cast<uint8_t>(chosen.green()),
+                    static_cast<uint8_t>(chosen.blue()));
+            }
+#endif
+        }
+    });
+    // Initially hidden — shown only when CustomColor is selected
+    m_colorSwatchBtn->setVisible(false);
+    encoderRow->addWidget(m_colorSwatchBtn);
+
     encoderRow->addStretch();
 
     // ── Hide-converted toggle ───────────────────────────────────────────

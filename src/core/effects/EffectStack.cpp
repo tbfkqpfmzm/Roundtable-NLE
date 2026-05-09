@@ -1,5 +1,5 @@
-/*
- * EffectStack.cpp — implements EffectStack + Effect base class.
+﻿/*
+ * EffectStack.cpp â€” implements EffectStack + Effect base class.
  *
  * Step 22: Effects System
  */
@@ -15,18 +15,17 @@
 #include "effects/Vignette.h"
 #include "effects/LUT.h"
 #include "effects/Letterbox.h"
-#include "effects/ColorGrading.h"
 #include "effects/Ots.h"
-#include "effects/LumetriColor.h"
+#include "effects/ColorGrading.h"
 #include "effects/FillChannel.h"
 
 #include <algorithm>
 
 namespace rt {
 
-// ═══════════════════════════════════════════════════════════════════════════
+// =============================================================================
 //  Effect base — static ID counter + implementation
-// ═══════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 uint64_t Effect::s_nextId = 1;
 
@@ -72,7 +71,7 @@ void Effect::addParam(const std::string& name, float defaultValue,
     m_params.push_back(std::move(p));
 }
 
-// ── Factory ─────────────────────────────────────────────────────────────────
+// ---- Factory ----------------------------------------------------------------
 
 std::unique_ptr<Effect> createEffect(EffectType type)
 {
@@ -87,7 +86,7 @@ std::unique_ptr<Effect> createEffect(EffectType type)
     case EffectType::LUT:            return std::make_unique<LUT>();
     case EffectType::Letterbox:      return std::make_unique<Letterbox>();
     case EffectType::ColorGrading:   return std::make_unique<ColorGrading>();
-    case EffectType::LumetriColor:   return std::make_unique<LumetriColor>();
+    case EffectType::LumetriColor:   return std::make_unique<ColorGrading>();
     case EffectType::OtsLeft:        return std::make_unique<Ots>(EffectType::OtsLeft);
     case EffectType::OtsRight:       return std::make_unique<Ots>(EffectType::OtsRight);
     case EffectType::FillLeftWithRight:  return std::make_unique<FillLeftWithRight>();
@@ -96,9 +95,9 @@ std::unique_ptr<Effect> createEffect(EffectType type)
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
+// =============================================================================
 //  EffectStack
-// ═══════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 EffectStack::EffectStack() = default;
 EffectStack::~EffectStack() = default;
@@ -169,14 +168,12 @@ std::vector<EffectStack::EffectSnapshot> EffectStack::evaluate(int64_t time) con
     std::vector<EffectSnapshot> result;
     for (auto& e : m_effects) {
         if (!e->isEnabled()) continue;
-        // LumetriColor has 20 params but GPU needs 16 — use special packing
-        // ColorGrading has 31 params + section flags — use special packing too
-        if (e->effectType() == EffectType::LumetriColor) {
-            auto* lumetri = static_cast<const LumetriColor*>(e.get());
+        // ColorGrading has 20 params but GPU needs 16 â€” use special packing
+        // ColorGrading has 31 params + section flags â€” use special packing too
+        if (e->effectType() == EffectType::ColorGrading) {
+            auto* lumetri = static_cast<const ColorGrading*>(e.get());
             result.push_back({e->effectType(), lumetri->evalGpuParams(time)});
-        } else if (e->effectType() == EffectType::ColorGrading) {
-            auto* grading = static_cast<const ColorGrading*>(e.get());
-            result.push_back({e->effectType(), grading->evalAllParamsWithFlags(time)});
+
         } else {
             result.push_back({e->effectType(), e->evalAllParams(time)});
         }

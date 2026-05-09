@@ -624,6 +624,8 @@ void ProjectBin::setupUI()
     m_grid = new ThumbnailGrid(this);
     connect(m_grid, &ThumbnailGrid::itemDoubleClicked,
             this, &ProjectBin::onItemDoubleClicked);
+    connect(m_grid, &ThumbnailGrid::emptySpaceDoubleClicked,
+            this, &ProjectBin::importFiles);
     connect(m_grid, &ThumbnailGrid::itemCountChanged,
             this, [this](int count) {
                 m_statusLabel->setText(QString("%1 items").arg(count));

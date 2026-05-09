@@ -169,7 +169,7 @@ public:
     // Library panel
     [[nodiscard]] QTabWidget*   libraryTabs()        const noexcept { return m_libraryTabs; }
     [[nodiscard]] QListWidget*   shotList()            const noexcept { return m_shotList; }
-    [[nodiscard]] QComboBox*     shotCombo()           const noexcept { return m_shotCombo; }
+    [[nodiscard]] QComboBox*     shotCombo()           const noexcept { return m_shotSortCombo; }
     [[nodiscard]] QListWidget*  characterLibrary()    const noexcept { return m_characterLibrary; }
     [[nodiscard]] QListWidget*  backgroundLibrary()   const noexcept { return m_backgroundLibrary; }
     [[nodiscard]] QListWidget*  videoLibrary()        const noexcept { return m_videoLibrary; }
@@ -312,11 +312,20 @@ private:
     void saveDefaults() const;
     void loadDefaults();
 
+    /// Return the active character filter value from the filter list.
+    /// Returns empty string for "ALL", "__UNASSIGNED__" for unassigned,
+    /// or the character display name for a specific character filter.
+    [[nodiscard]] QString activeCharFilter() const;
+
     // ── State ───────────────────────────────────────────────────────────
     ShotPreset         m_currentShot;
     ShotPresetManager  m_presetManager;
     std::map<std::string, std::string> m_characterDefaults; ///< character name → default shot name
     ModelManager*      m_modelManager = nullptr;
+
+    /// Tracks the shot name from the most recent successful save.
+    /// Used to detect renames and clean up orphaned preset files on disk.
+    std::string        m_lastSavedName;
     const AnimationVideoCache* m_animVideoCache = nullptr;
     int                m_selectedLayer = -1;
     bool               m_updating = false;  ///< Prevent recursive signals
@@ -357,11 +366,12 @@ private:
     // ── Library panel ───────────────────────────────────────────────────
     QWidget*      m_shotsColumn        = nullptr;   ///< Standalone shots sidebar column
     QWidget*      m_charFilterColumn   = nullptr;   ///< Character thumbnail filter column
-    QListWidget*  m_charFilterList     = nullptr;   ///< Character thumbnail filter list
+    QListWidget*  m_charFilterList     = nullptr;   ///< Character thumbnail filter chip list
     QTabWidget*   m_libraryTabs       = nullptr;
     QListWidget*  m_shotList           = nullptr;   ///< Shot picker thumbnail strip
-    QComboBox*    m_shotCombo          = nullptr;   ///< Shot picker dropdown (below thumbnails)
+    QComboBox*    m_shotSortCombo      = nullptr;   ///< Sort dropdown (A-Z, Recent, Character, Favorites)
     QLineEdit*    m_shotSearchEdit     = nullptr;   ///< Filter shots by name
+    QLineEdit*    m_filterSearchEdit   = nullptr;   ///< Character filter search bar
     QListWidget*  m_characterLibrary  = nullptr;
     QListWidget*  m_backgroundLibrary = nullptr;
     QListWidget*  m_videoLibrary      = nullptr;

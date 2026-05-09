@@ -25,6 +25,9 @@
 #include "VideoUploader.h"
 #include "EffectProcessor.h"
 
+// Effects
+#include "effects/LUT.h"
+
 namespace rt {
 
 FrameRenderer::FrameRenderer() = default;
@@ -278,6 +281,24 @@ int FrameRenderer::evaluateLayers(const Timeline& timeline, int64_t tick, int de
             {
                 int64_t localTick2 = tick - clip->timelineIn();
                 auto snapshots = clip->effects().evaluate(localTick2);
+
+                // Check for LUT effect and upload its 3D texture if needed
+                for (const auto& snap : snapshots) {
+                    if (snap.type == EffectType::LUT) {
+                        // Find the LUT effect in the clip's effect stack
+                        for (size_t ei = 0; ei < clip->effects().effectCount(); ++ei) {
+                            auto& fx = clip->effects().effect(ei);
+                            if (fx.effectType() == EffectType::LUT && fx.isEnabled()) {
+                                auto* lutFx = static_cast<LUT*>(&fx);
+                                if (lutFx->hasLUT())
+                                    m_effectProcessor->uploadLUT3D(lutFx->lutData(), lutFx->lutSize());
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                }
+
                 if (!snapshots.empty()) {
                     if (m_effectProcessor->processSync(layerTexInfo, snapshots))
                         layerTexInfo = m_effectProcessor->outputDescriptorInfo();

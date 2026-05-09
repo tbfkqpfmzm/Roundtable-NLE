@@ -16,6 +16,8 @@
 
 #include "media/FrameCache.h"
 
+#include "effects/LUT.h"
+
 #include <spdlog/spdlog.h>
 
 #include <chrono>
@@ -40,6 +42,25 @@ std::shared_ptr<CachedFrame> CompositeService::tryCompositeOnGpu(
     // Try GPU compositing first.  Fall through to CPU on failure.
     if (m_gpuCompositeState == 0) {
         m_gpuCompositeState = GpuContext::get().isInitialized() ? 1 : -1;
+    }
+
+    // ── GPU backoff check ──────────────────────────────────────────────
+    // If a previous GPU submit failed, skip GPU this time if we're still
+    // in the cooldown window.  The backoff doubles each failure (100ms →
+    // 10s max) so we don't hammer a broken driver while still recovering
+    // automatically as soon as it's healthy again.  No permanent disable.
+    if (m_gpuCompositeState == 1) {
+        using namespace std::chrono;
+        if (m_gpuBackoffAttempts > 0 &&
+            steady_clock::now() < m_gpuBackoffUntil) {
+            // Still in cooldown — skip GPU this frame, serve stale frame
+            return nullptr;
+        }
+        if (m_gpuBackoffAttempts > 0) {
+            // Cooldown expired — retry GPU fresh
+            spdlog::info("[COMPOSITE] GPU backoff expired after {} attempts, retrying",
+                         m_gpuBackoffAttempts);
+        }
     }
 
     if (m_gpuCompositeState == 1) {
@@ -444,6 +465,23 @@ std::shared_ptr<CachedFrame> CompositeService::tryCompositeOnGpu(
                         if (fx && fx->isInitialized()) {
                             ++effectLayerCount;
                             effectPassCount += static_cast<int>(layer.effects.size());
+
+                            // Upload LUT 3D texture if a LUT effect is present
+                            for (const auto& snap : layer.effects) {
+                                if (snap.type == EffectType::LUT && layer.clipPtr) {
+                                    for (size_t ei = 0; ei < layer.clipPtr->effects().effectCount(); ++ei) {
+                                        auto& clipFx = layer.clipPtr->effects().effect(ei);
+                                        if (clipFx.effectType() == EffectType::LUT && clipFx.isEnabled()) {
+                                            auto* lutFx = static_cast<LUT*>(&clipFx);
+                                            if (lutFx->hasLUT())
+                                                fx->uploadLUT3D(lutFx->lutData(), lutFx->lutSize());
+                                            break;
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+
                             // Use gpuLayers descriptor ├â┬ó├óΓÇÜ┬¼├óΓé¼┬¥ works for pool,
                             // cache-owned, and cache-hit textures alike.
                             VkDescriptorImageInfo srcInfo = gpuLayers[li].textureInfo;
@@ -711,16 +749,41 @@ std::shared_ptr<CachedFrame> CompositeService::tryCompositeOnGpu(
             // graphics queue (VulkanViewport) can wait on it before reading
             // the compositor's output texture — prevents scrub→play freeze.
             slot.endRecording();
+            bool gpuSubmitOk = false;
             {
                 std::lock_guard qLock(ctx.computeQueueMutex());
                 VkSemaphore compSem = m_compositeSemaphore;
                 if (compSem != VK_NULL_HANDLE) {
-                    slot.submit(ctx.computeQueue(), compSem);
+                    gpuSubmitOk = slot.submit(ctx.computeQueue(), compSem);
                 } else {
-                    slot.submit(ctx.computeQueue());
+                    gpuSubmitOk = slot.submit(ctx.computeQueue());
                 }
             }
-            slot.waitForCompletion();
+            if (gpuSubmitOk) {
+                gpuSubmitOk = slot.waitForCompletion();
+            }
+            if (!gpuSubmitOk) {
+                // GPU submission failed (e.g. VK_ERROR_DEVICE_LOST).
+                // Enter exponential backoff cooldown (100ms → 10s max) so we
+                // don't hammer a broken driver.  After the cooldown expires,
+                // the next tryCompositeOnGpu call retries automatically.
+                // NEVER permanently disable GPU compositing.
+                int backoffMs = kGpuBackoffInitialMs * (1 << m_gpuBackoffAttempts);
+                if (backoffMs > kGpuBackoffMaxMs) backoffMs = kGpuBackoffMaxMs;
+                m_gpuBackoffUntil = std::chrono::steady_clock::now()
+                                  + std::chrono::milliseconds(backoffMs);
+                ++m_gpuBackoffAttempts;
+                spdlog::error("[COMPOSITE] GPU submit/wait failed (attempt {}) — "
+                              "backoff {}ms, will retry at {}",
+                              m_gpuBackoffAttempts, backoffMs,
+                              m_gpuBackoffAttempts >= 5 ? "10s cap" : "next interval");
+                compOk = false;
+                readbackOk = false;
+            } else {
+                // GPU success — reset backoff so we respond instantly next time
+                m_gpuBackoffAttempts = 0;
+                m_gpuBackoffUntil = {};
+            }
             for (auto& sc : stagingCleanups)
                 sc.destroy();
             stagingCleanups.clear();

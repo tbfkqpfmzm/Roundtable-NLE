@@ -214,6 +214,8 @@ int ShotComposer::addVideoLayer(const std::string& filename)
     bg.scale     = 1.0f;
 
     int idx = m_currentShot.addBackground(bg);
+    if (!m_shotNameEdit->isEnabled())
+        m_shotNameEdit->setEnabled(true);
     refreshLayerList();
 
     int layerIdx = m_currentShot.findLayerIndex({LayerType::Background, idx});
