@@ -33,6 +33,94 @@
 
 namespace rt {
 
+// ── Filter icon generators ──────────────────────────────────────────────
+
+QPixmap makeAllFilterIcon(int sz)
+{
+    const int w = sz;
+    const int h = sz;
+    QPixmap pix(w, h);
+    pix.fill(Qt::transparent);
+    QPainter p(&pix);
+    p.setRenderHint(QPainter::Antialiasing);
+
+    // Green rounded background
+    QColor green(48, 164, 74);
+    p.setBrush(green);
+    p.setPen(Qt::NoPen);
+    p.drawRoundedRect(0, 0, w, h, 6, 6);
+
+    // Big check mark in upper portion
+    QPen checkPen(QColor(255, 255, 255), 5);
+    checkPen.setCapStyle(Qt::RoundCap);
+    checkPen.setJoinStyle(Qt::RoundJoin);
+    p.setPen(checkPen);
+    QPainterPath checkPath;
+    checkPath.moveTo(w * 0.30f, h * 0.46f);
+    checkPath.lineTo(w * 0.46f, h * 0.62f);
+    checkPath.lineTo(w * 0.72f, h * 0.32f);
+    p.drawPath(checkPath);
+
+    // "ALL" label at bottom 1/4
+    QFont f = p.font();
+    f.setPixelSize(13);
+    f.setBold(true);
+    p.setFont(f);
+    p.setPen(QColor(255, 255, 255));
+    QRectF labelRect(0, h * 0.68f, w, h * 0.32f);
+    p.drawText(labelRect, Qt::AlignCenter, QStringLiteral("ALL"));
+    p.end();
+    return pix;
+}
+
+QPixmap makeUnassignedFilterIcon(int sz)
+{
+    const int w = sz;
+    const int h = sz;
+    QPixmap pix(w, h);
+    pix.fill(Qt::transparent);
+    QPainter p(&pix);
+    p.setRenderHint(QPainter::Antialiasing);
+
+    // Orange rounded background
+    QColor orange(210, 130, 30);
+    p.setBrush(orange);
+    p.setPen(Qt::NoPen);
+    p.drawRoundedRect(0, 0, w, h, 6, 6);
+
+    // Big empty-set symbol in upper portion
+    QPen symbolPen(QColor(255, 255, 255), 3);
+    p.setPen(symbolPen);
+    QFont f = p.font();
+    f.setPixelSize(34);
+    p.setFont(f);
+    QRectF symbolRect(0, 0, w, h * 0.70f);
+    p.drawText(symbolRect, Qt::AlignCenter, QStringLiteral("\u2205"));
+
+    // "UNASSIGNED" label at bottom 1/4
+    f.setPixelSize(9);
+    f.setBold(true);
+    p.setFont(f);
+    p.setPen(QColor(255, 255, 255));
+    QRectF labelRect(2, h * 0.68f, w - 4, h * 0.32f);
+    p.drawText(labelRect, Qt::AlignCenter, QStringLiteral("UNASSIGNED"));
+    p.end();
+    return pix;
+}
+
+QPixmap makeFilterDividerIcon(int width)
+{
+    QPixmap pix(width, 8);
+    pix.fill(Qt::transparent);
+    QPainter dp(&pix);
+    dp.setRenderHint(QPainter::Antialiasing);
+    QPen linePen(Theme::colors().border, 1);
+    dp.setPen(linePen);
+    dp.drawLine(6, 4, width - 6, 4);
+    dp.end();
+    return pix;
+}
+
 
 QPixmap ShotComposer::makeCharacterThumbnail(const std::string& charName, int sz)
 {
@@ -182,6 +270,20 @@ QPixmap ShotComposer::makeCharacterThumbnail(const std::string& charName, int sz
 
             int contentW = contentMaxX - contentMinX + 1;
             int contentH = contentMaxY - contentMinY + 1;
+
+            // For tall/thin characters not in the manual adjustment table
+            // (e.g. Drake), apply Kilo-like defaults: tighter vertical zoom
+            // to focus on the head/face, wider horizontal zoom to give
+            // breathing room, keep crop anchored at top.
+            if (contentW > 0 &&
+                static_cast<float>(contentH) / static_cast<float>(contentW) > 2.2f) {
+                bool hasManualAdj = kThumbCropAdj.find(charName) != kThumbCropAdj.end();
+                if (!hasManualAdj) {
+                    cropAdj.zoomH = 0.7f;   // tighter vertically → headshot
+                    cropAdj.zoomW = 1.5f;   // wider horizontally → breathing room
+                }
+            }
+
             int contentCX = contentMinX + contentW / 2;
 
             int cropH = static_cast<int>(contentH * 0.55f * cropAdj.zoomH);
@@ -569,9 +671,19 @@ QPixmap ShotComposer::makeCharacterThumbnail(const std::string& charName, int sz
     {
         QPixmap cached = loadCachedCharacterThumbnail(charName, sz);
         if (!cached.isNull()) {
-            m_charThumbCache[cacheKey] = cached;
+            // Apply rounded corners so the thumbnail doesn't spill out of the curved button
+            QPixmap rounded(sz, sz);
+            rounded.fill(Qt::transparent);
+            QPainter rp(&rounded);
+            rp.setRenderHint(QPainter::Antialiasing);
+            QPainterPath clipPath;
+            clipPath.addRoundedRect(0, 0, sz, sz, 6, 6);
+            rp.setClipPath(clipPath);
+            rp.drawPixmap(0, 0, cached);
+            rp.end();
+            m_charThumbCache[cacheKey] = rounded;
             spdlog::debug("makeCharacterThumbnail: loaded cached thumb for '{}'", charName);
-            return cached;
+            return rounded;
         }
     }
 
@@ -720,19 +832,28 @@ QPixmap ShotComposer::makeShotThumbnail(const ShotPreset& shot, int thumbW, int 
                 }
             }
 
-            // If the requested outfit isn't cached yet, try "default" as fallback
+            // If still not found, scan the cache directory for ANY animation
+            // video available for this character+outfit and try each one.
             if (!frame || !frame->ensurePixels()) {
-                frame = const_cast<AnimationVideoCache*>(m_animVideoCache)
-                            ->getFrame(ch->characterName, "default", animToUse, 0);
-                if (!frame || !frame->ensurePixels()) {
-                    for (const auto& animName : idleNames) {
+                namespace fs = std::filesystem;
+                fs::path outfitDir = fs::path("assets/cache/animations")
+                    / ch->characterName / outfitKey;
+                if (fs::exists(outfitDir) && fs::is_directory(outfitDir)) {
+                    static const std::string validExts[] = {".mp4", ".mov", ".webm"};
+                    for (const auto& entry : fs::directory_iterator(outfitDir)) {
+                        if (!entry.is_regular_file()) continue;
+                        auto ext = entry.path().extension().string();
+                        bool validExt = false;
+                        for (const auto& ve : validExts) {
+                            if (ext == ve) { validExt = true; break; }
+                        }
+                        if (!validExt) continue;
+                        std::string animName = entry.path().stem().string();
                         frame = const_cast<AnimationVideoCache*>(m_animVideoCache)
-                                    ->getFrame(ch->characterName, "default", animName, 0);
+                                    ->getFrame(ch->characterName, outfitKey, animName, 0);
                         if (frame && frame->ensurePixels()) break;
                     }
                 }
-                if (frame && frame->ensurePixels())
-                    outfitKey = "default"; // remember which outfit actually matched
             }
 
             if (frame && frame->ensurePixels() && frame->width > 0 && frame->height > 0) {
@@ -853,9 +974,10 @@ QPixmap ShotComposer::makeShotThumbnail(const ShotPreset& shot, int thumbW, int 
             }
         }
 #endif
-        // Ã¢â€â‚¬Ã¢â€â‚¬ Fallback: use full-body cached render Ã¢â€â€™
+        // Fallback: use outfit-specific full-body cached render, then generic
         if (!charRendered) {
-            QPixmap fullBody = loadCachedCharacterFullBody(ch->characterName);
+            QPixmap fullBody = loadCachedCharacterOutfitFullBody(
+                ch->characterName, ch->outfit);
             if (!fullBody.isNull()) {
                 // Fit character to ~85% of thumb height, then apply shot scale
                 float fitScale = static_cast<float>(thumbH) /
@@ -967,9 +1089,25 @@ void ShotComposer::saveShotThumbnail(const ShotPreset& shot)
     // Ensure thumbnails directory exists
     QDir().mkpath(QFileInfo(path).absolutePath());
 
-    constexpr int kThumbW = 100;
-    constexpr int kThumbH = 56;
-    QPixmap thumb = makeShotThumbnail(shot, kThumbW, kThumbH);
+    constexpr int kThumbW = 320;
+    constexpr int kThumbH = 180;
+    QPixmap thumb;
+
+    // Prefer capturing the preview widget — it shows exactly what the
+    // user sees, with the correct outfit, stance, and animation applied.
+    if (m_spinePreview && !m_spinePreview->isHidden()) {
+        QPixmap preview = m_spinePreview->grab();
+        if (!preview.isNull()) {
+            // Scale to thumbnail size maintaining aspect ratio
+            thumb = preview.scaled(kThumbW, kThumbH,
+                Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        }
+    }
+
+    // Fall back to generating from cache frames if preview unavailable
+    if (thumb.isNull())
+        thumb = makeShotThumbnail(shot, kThumbW, kThumbH);
+
     if (!thumb.isNull())
         thumb.save(path, "PNG");
 }
