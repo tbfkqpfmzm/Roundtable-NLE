@@ -382,20 +382,6 @@ function Step8-Done {
     }, "Normal")
 }
 
-# ── Helper: wait for user input using WPF message pump ──────────────
-function Wait-ForInput {
-    Add-Log "Waiting for you to confirm in the dialog above..." -Color Orange
-    while ($script:WaitingForInput -and -not $script:Cancelled) {
-        # Pump WPF messages without blocking the UI thread
-        $frame = New-Object System.Windows.Threading.DispatcherFrame
-        $timer = New-Object System.Windows.Threading.DispatcherTimer
-        $timer.Interval = [TimeSpan]::FromMilliseconds(50)
-        $timer.Add_Tick({ $frame.Continue = $false; $timer.Stop() })
-        $timer.Start()
-        [System.Windows.Threading.Dispatcher]::PushFrame($frame)
-    }
-}
-
 $stepFunctions = @(
     ${function:Step1-CheckPrerequisites},
     ${function:Step2-DetermineVersion},
@@ -874,100 +860,88 @@ $window.Add_Loaded({
     Update-StepUI
 })
 
-# ── Run step ──────────────────────────────────────────────────────────────
+# ── Pipeline state machine (event-driven, no UI blocking) ─────────────
+$script:PipelineActive = $false
+$script:PipelineMax    = 8
+$script:PipelineMode   = "step"  # "step", "push", "publish"
+
+function Step-Pipeline {
+    if (-not $script:PipelineActive -or $script:Cancelled) {
+        Stop-Pipeline; return
+    }
+
+    # If waiting for input, don't do anything — user needs to click confirm
+    if ($script:WaitingForInput) {
+        if (-not $script:_waitMsgShown) {
+            Add-Log "Waiting for you to confirm in the dialog above..." -Color Orange
+            $script:_waitMsgShown = $true
+        }
+        return
+    }
+    $script:_waitMsgShown = $false
+
+    # Find next incomplete step
+    $idx = -1
+    for ($i = 0; $i -lt $script:PipelineMax; $i++) {
+        if ($script:StepStatuses[$i] -eq "ok") { continue }
+        if ($script:PushModeOnly -and $i -ge 4) { continue }
+        $idx = $i
+        break
+    }
+
+    if ($idx -lt 0) {
+        Add-Log "All steps completed." -Color Green
+        Stop-Pipeline; return
+    }
+
+    # Run the step
+    $null = Invoke-Step -ScriptBlock $stepFunctions[$idx] -StepName $stepLabels[$idx] -StepIndex $idx
+
+    if ($script:Cancelled) { Stop-Pipeline; return }
+
+    # If step needs input, pipeline pauses (timer keeps ticking but Step-Pipeline
+    # returns immediately due to WaitingForInput check above). User confirms →
+    # WaitingForInput cleared → next timer tick runs next step.
+}
+
+function Start-Pipeline {
+    param([int]$MaxSteps, [string]$Mode)
+    $script:PipelineActive = $true
+    $script:PipelineMax    = $MaxSteps
+    $script:PipelineMode   = $Mode
+    $script:Cancelled      = $false
+    $syncHash.BtnRunStep.IsEnabled = $false
+    $syncHash.BtnPushAll.IsEnabled = $false
+    $syncHash.BtnPublishAll.IsEnabled = $false
+    Add-Log "Pipeline started ($Mode mode)..." -Color Cyan
+}
+
+function Stop-Pipeline {
+    $script:PipelineActive = $false
+    $syncHash.BtnRunStep.IsEnabled = $true
+    $syncHash.BtnPushAll.IsEnabled = $true
+    $syncHash.BtnPublishAll.IsEnabled = $true
+}
+
+# ── Pipeline timer (ticks every 100ms, drives pipeline forward) ──────────
+$pipelineTimer = New-Object System.Windows.Threading.DispatcherTimer
+$pipelineTimer.Interval = [TimeSpan]::FromMilliseconds(100)
+$pipelineTimer.Add_Tick({ Step-Pipeline })
+$pipelineTimer.Start()
+
+# ── Run Current Step ──────────────────────────────────────────────────────
 $syncHash.BtnRunStep.Add_Click({
-    $syncHash.BtnRunStep.IsEnabled = $false
-    $syncHash.BtnPushAll.IsEnabled = $false
-    $syncHash.BtnPublishAll.IsEnabled = $false
-    $script:Cancelled = $false
-    try {
-        # Keep running steps until we hit one that's done, or user cancels
-        while (-not $script:Cancelled) {
-            # Find next incomplete step
-            $idx = -1
-            for ($i = 0; $i -lt $script:StepStatuses.Count; $i++) {
-                if ($script:StepStatuses[$i] -eq "ok") { continue }
-                if ($script:PushModeOnly -and $i -ge 4) { continue }
-                $idx = $i
-                break
-            }
-            if ($idx -lt 0) { Add-Log "All steps completed." -Color Green; break }
-
-            $ok = Invoke-Step -ScriptBlock $stepFunctions[$idx] -StepName $stepLabels[$idx] -StepIndex $idx
-            if (-not $ok) { break }
-
-            # If step needs input, wait for user to confirm
-            if ($script:WaitingForInput) {
-                Wait-ForInput
-                if ($script:Cancelled) { break }
-                # Re-run the same step (now input is ready)
-                continue
-            }
-            # Step completed, loop to run next step
-        }
-    } catch {
-        if (-not $script:Cancelled) { Add-Log "Step error: $_" -Color Red }
-    } finally {
-        $syncHash.BtnRunStep.IsEnabled = $true
-        $syncHash.BtnPushAll.IsEnabled = $true
-        $syncHash.BtnPublishAll.IsEnabled = $true
-    }
+    Start-Pipeline -MaxSteps $stepFunctions.Count -Mode "step"
 })
 
-# ── Run all (Push) ────────────────────────────────────────────────────────
+# ── Run All (Push, steps 1-4) ────────────────────────────────────────────
 $syncHash.BtnPushAll.Add_Click({
-    $syncHash.BtnRunStep.IsEnabled = $false
-    $syncHash.BtnPushAll.IsEnabled = $false
-    $syncHash.BtnPublishAll.IsEnabled = $false
-    $script:Cancelled = $false
-    try {
-        for ($i = 0; $i -lt 4; $i++) {
-            if (Test-Cancelled) { break }
-            if ($script:StepStatuses[$i] -eq "ok") { continue }
-
-            $ok = Invoke-Step -ScriptBlock $stepFunctions[$i] -StepName $stepLabels[$i] -StepIndex $i
-            if (-not $ok) { break }
-
-            # If step needs input, wait for user to confirm, then retry this step
-            if ($script:WaitingForInput) {
-                Wait-ForInput
-                if ($script:Cancelled) { break }
-                $i--  # retry this step now that input is ready
-            }
-        }
-    } finally {
-        $syncHash.BtnRunStep.IsEnabled = $true
-        $syncHash.BtnPushAll.IsEnabled = $true
-        $syncHash.BtnPublishAll.IsEnabled = $true
-    }
+    Start-Pipeline -MaxSteps 4 -Mode "push"
 })
 
-# ── Run all (Publish) ─────────────────────────────────────────────────────
+# ── Run All (Publish, steps 1-8) ─────────────────────────────────────────
 $syncHash.BtnPublishAll.Add_Click({
-    $syncHash.BtnRunStep.IsEnabled = $false
-    $syncHash.BtnPushAll.IsEnabled = $false
-    $syncHash.BtnPublishAll.IsEnabled = $false
-    $script:Cancelled = $false
-    try {
-        for ($i = 0; $i -lt $stepFunctions.Count; $i++) {
-            if (Test-Cancelled) { break }
-            if ($script:StepStatuses[$i] -eq "ok") { continue }
-
-            $ok = Invoke-Step -ScriptBlock $stepFunctions[$i] -StepName $stepLabels[$i] -StepIndex $i
-            if (-not $ok) { break }
-
-            # If step needs input (e.g. version confirm, commit), wait for user
-            if ($script:WaitingForInput) {
-                Wait-ForInput
-                if ($script:Cancelled) { break }
-                $i--  # retry this step now that input is ready
-            }
-        }
-    } finally {
-        $syncHash.BtnRunStep.IsEnabled = $true
-        $syncHash.BtnPushAll.IsEnabled = $true
-        $syncHash.BtnPublishAll.IsEnabled = $true
-    }
+    Start-Pipeline -MaxSteps $stepFunctions.Count -Mode "publish"
 })
 
 # ── Cancel ────────────────────────────────────────────────────────────────
