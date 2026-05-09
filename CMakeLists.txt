@@ -8,7 +8,7 @@ endif()
 # by all targets unless explicitly overridden.
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL" CACHE STRING "MSVC runtime" FORCE)
 
-# Read version from src/version.h (written by publish.bat at release time).
+# Read version from src/version.h (written by publish-gui.ps1 at release time).
 # This is checked into git so every tag has an immutable version.
 file(STRINGS "${CMAKE_SOURCE_DIR}/src/version.h" _version_line
      REGEX "#define ROUNDTABLE_VERSION")

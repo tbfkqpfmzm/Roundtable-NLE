@@ -372,8 +372,51 @@ void ShotComposer::refreshLayerList()
     m_layerList->blockSignals(true);
     m_layerList->clear();
     const auto& order = m_currentShot.layerOrder();
+    // Build a quick map: layer index → group depth (how many groups contain it)
+    std::vector<int> groupDepth(order.size(), 0);
+    for (const auto& grp : m_layerGroups) {
+        if (!grp.expanded) continue;
+        for (int i = grp.firstChild; i >= 0 && i <= grp.lastChild && i < static_cast<int>(order.size()); ++i)
+            groupDepth[static_cast<size_t>(i)]++;
+    }
     for (size_t li = 0; li < order.size(); ++li) {
         const auto& ref = order[li];
+
+        // ── Insert group folder headers before the first child ─────────
+        for (const auto& grp : m_layerGroups) {
+            if (grp.firstChild == static_cast<int>(li) && grp.firstChild >= 0) {
+                auto* folderItem = new QListWidgetItem(m_layerList);
+                folderItem->setSizeHint(QSize(0, 32));
+                folderItem->setFlags(folderItem->flags() & ~Qt::ItemIsDragEnabled);
+                folderItem->setFlags(folderItem->flags() & ~Qt::ItemIsSelectable);
+
+                auto* folderWidget = new QWidget;
+                folderWidget->setStyleSheet("background: transparent;");
+                auto* folderLayout = new QHBoxLayout(folderWidget);
+                folderLayout->setContentsMargins(m.spacingXs, 0, m.spacingMd, 0);
+                folderLayout->setSpacing(3);
+
+                auto* expandLabel = new QLabel(
+                    grp.expanded ? QStringLiteral("\u25BC") : QStringLiteral("\u25B6"));
+                expandLabel->setFixedWidth(14);
+                expandLabel->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 10px; }")
+                    .arg(Theme::hex(Theme::colors().textSecondary)));
+                folderLayout->addWidget(expandLabel);
+
+                auto* folderIcon = new QLabel(QStringLiteral("\xF0\x9F\x93\x81"));
+                folderIcon->setFixedWidth(18);
+                folderIcon->setStyleSheet("QLabel { font-size: 14px; }");
+                folderLayout->addWidget(folderIcon);
+
+                auto* folderName = new QLabel(QString::fromStdString(grp.name));
+                folderName->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 12px; font-weight: 600; }")
+                    .arg(Theme::hex(Theme::colors().textSecondary)));
+                folderLayout->addWidget(folderName, 1);
+
+                m_layerList->setItemWidget(folderItem, folderWidget);
+            }
+        }
+
         QString label;
         QString typeIcon;
         bool isVisible = true;
@@ -410,6 +453,8 @@ void ShotComposer::refreshLayerList()
             }
         }
 
+        int depth = (li < groupDepth.size()) ? groupDepth[li] : 0;
+
         // Ã¢â€â‚¬Ã¢â€â‚¬ Photoshop-style layer row Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
         auto* item = new QListWidgetItem(m_layerList);
         item->setSizeHint(QSize(0, 44));
@@ -418,7 +463,9 @@ void ShotComposer::refreshLayerList()
         auto* rowWidget = new QWidget;
         rowWidget->setStyleSheet("background: transparent;");
         auto* rowLayout = new QHBoxLayout(rowWidget);
-        rowLayout->setContentsMargins(m.spacingSm, m.spacingXs, m.spacingMd, m.spacingXs);
+        // Indent based on group depth
+        int indentPx = depth * 20;
+        rowLayout->setContentsMargins(m.spacingSm + indentPx, m.spacingXs, m.spacingMd, m.spacingXs);
         rowLayout->setSpacing(0);
 
         // Eye toggle button

@@ -1,4 +1,4 @@
-# ROUNDTABLE NLE v0.50
+# ROUNDTABLE NLE v0.12
 
 **GPU-accelerated non-linear video editor — built for Spine animation workflows.**
 
@@ -22,8 +22,6 @@ The easiest way to get ROUNDTABLE is to download a pre-built installer from the 
 ```powershell
 # After installation, launch from the Start Menu or desktop shortcut
 ```
-
-> The installer is built via `publish.bat` (or `publish_release.ps1`), which tags the release, builds the binary, compiles the Inno Setup installer, and uploads it to GitHub Releases. This is the primary distribution method.
 
 ---
 
@@ -70,20 +68,21 @@ ctest --output-on-failure
 
 ### 🎬 Editing
 - Multi-track timeline with drag-and-drop, ripple/insert editing, and snapping
-- Clip types: Video, Audio, Spine Animation, Title, Graphic (multi-layer), Image, Image Sequence, Adjustment Layer
+- Clip types: Video, Audio, Spine Animation, Title, Graphic (multi-layer), Image, Image Sequence, Adjustment Layer, Color Matte
 - Full undo/redo via command pattern with compound operations
 - Customizable keyboard shortcuts, JKL shuttle with pitch-preserved audio
 - Program Monitor with transform overlay, safe areas, and zoom controls
 - Source Monitor, Properties Panel, History Panel
+- Revamped New Sequence dialog with improved presets and workflow
 
 ### 🦴 Spine Animation (Native)
 - Integrated spine-cpp runtime for real-time Spine character rendering — no pre-rendering needed
 - Shot Composer for multi-character scene layout with reusable presets
-- Character Browser with network-based asset discovery
+- Character Browser with network-based asset discovery, hide/rename entries, and context menu management
 - Animation caching and prerendering pipeline for smooth playback
 
 ### 🎨 Effects & Color
-- **Video effects:** Color Correct, Blur, Sharpen, Glow, Chroma Key (Ultra Key), Transform 2D, Vignette, LUT, Letterbox, Lumetri Color
+- **Video effects:** Color Correct, Blur, Sharpen, Glow, Chroma Key (Ultra Key — overhauled with improved spill suppression and edge refinement), Transform 2D, Vignette, LUT, Letterbox, Lumetri Color (replaced legacy Color Grading), Color Matte
 - **Audio effects:** Fill Left with Right, Fill Right with Left (applied during playback and export)
 - **Transitions:** 35+ types — dissolves, wipes, pushes, slides, zooms, iris patterns, and more
 - Essential Graphics panel for multi-layer graphic clip editing
@@ -95,11 +94,13 @@ ctest --output-on-failure
 - SoundTouch time-stretching for pitch-preserved speed changes
 - Audio-driven A/V sync — the audio callback is the master clock
 - Waveform caching with compact binary disk format
+- AudioSync: context menus, auto-match improvements, script session management
 
 ### 🤖 AI Script Sync
 - GPU-accelerated speech-to-text via whisper.cpp (models from Tiny to Large V3)
 - Script parser supporting plain text, HTML/Google Docs, and JSON formats
 - Fuzzy script-to-audio matching with sequential bias and timecode awareness
+- Raw content persistence for reliable multi-session workflows
 - Automatically aligns transcribed dialogue to your script — ideal for talk shows, interviews, and voiceover work
 
 ### 📦 Export

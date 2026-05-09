@@ -263,11 +263,14 @@ void CharacterShotPanel::setupUI()
     });
 
     // When a character is downloaded/added, also refresh COMPOSE characters
+    // and rebuild the character filter list so newly downloaded characters
+    // appear immediately in the COMPOSE sidebar filter.
     connect(m_characterBrowser, &CharacterBrowser::downloadRequested,
             this, [this](const QString&) {
         if (m_shotComposer) {
             m_shotComposer->clearCharacterThumbCache();
             m_shotComposer->refreshCharacterLibrary();
+            m_shotComposer->refreshShotList();
         }
     });
 

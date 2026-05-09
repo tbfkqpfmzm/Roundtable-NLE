@@ -114,7 +114,7 @@ QPixmap makeFilterDividerIcon(int width)
     pix.fill(Qt::transparent);
     QPainter dp(&pix);
     dp.setRenderHint(QPainter::Antialiasing);
-    QPen linePen(Theme::colors().border, 1);
+    QPen linePen(Theme::colors().borderLight, 1);
     dp.setPen(linePen);
     dp.drawLine(6, 4, width - 6, 4);
     dp.end();

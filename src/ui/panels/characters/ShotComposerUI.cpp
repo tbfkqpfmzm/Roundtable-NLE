@@ -219,7 +219,8 @@ QWidget* ShotComposer::createShotsColumn()
     m_shotList->setMovement(QListView::Static);
     m_shotList->setResizeMode(QListView::Adjust);
     m_shotList->setIconSize(QSize(80, 45));
-    m_shotList->setSpacing(2);
+    m_shotList->setSpacing(4);
+    m_shotList->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     m_shotList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_shotList->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     m_shotList->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -256,8 +257,8 @@ QWidget* ShotComposer::createShotsColumn()
 
             bool isDefault = index.data(Qt::UserRole + 3).toBool();
 
-            // Content rect: 10px gap at top, divided evenly around divider line
-            QRect contentR = r.adjusted(0, 10, 0, 0);
+            // Content rect: 14px gap at top — divider sits higher, more room below
+            QRect contentR = r.adjusted(0, 14, 0, 0);
 
             // Background (drawn on content rect only)
             QColor bgColor;
@@ -274,9 +275,9 @@ QWidget* ShotComposer::createShotsColumn()
             painter->setPen(Qt::NoPen);
             painter->drawRoundedRect(QRectF(contentR).adjusted(1, 1, -1, -1), 5, 5);
 
-            // Divider line centered in the 10px gap — 5px above, 5px below
+            // Divider sits closer to top of gap — more padding below (3px above, 11px below)
             if (index.row() > 0) {
-                int lineY = r.top() + 5;
+                int lineY = r.top() + 3;
                 painter->setPen(QPen(QColor(190, 190, 220, 150), 1));
                 painter->drawLine(r.left() + 8, lineY, r.right() - 8, lineY);
             }
@@ -357,7 +358,7 @@ QWidget* ShotComposer::createShotsColumn()
         {
             Q_UNUSED(option);
             Q_UNUSED(index);
-            // Height: 3px divider gap + thumbnail (16:9) + name (24px) + subtitle (20px) + padding
+            // Height: 14px top gap + thumbnail (16:9) + name (24px) + subtitle (20px) + padding
             return QSize(0, 210);
         }
     };
@@ -1134,7 +1135,7 @@ QWidget* ShotComposer::createLeftPanel()
         }
 
         // ── Right-click on an existing item ─────────────────────────────
-        const QString oldPath = item->data(Qt::UserRole).toString();
+        const QString oldPath = item->data(Qt::UserRole + 1).toString();
         if (oldPath.isEmpty()) return;
         QAction* relinkAct = menu.addAction(tr("Re-link…"));
         QAction* showAct   = menu.addAction(tr("Show in Explorer"));

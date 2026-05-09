@@ -137,8 +137,9 @@ void ShotComposer::refreshBackgroundLibrary()
             }
         }
         auto* item = new QListWidgetItem(QIcon(thumb), entry.baseName());
-        // Store absolute path for relink/context-menu actions.
-        item->setData(Qt::UserRole, entry.absoluteFilePath());
+        // Store absolute path in UserRole+1 so UserRole stays empty,
+        // allowing DragAssetList::mimeData() to correctly identify this as a background.
+        item->setData(Qt::UserRole + 1, entry.absoluteFilePath());
         m_backgroundLibrary->addItem(item);
     }
 

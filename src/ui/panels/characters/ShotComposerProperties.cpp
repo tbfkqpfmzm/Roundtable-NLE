@@ -176,11 +176,16 @@ QWidget* ShotComposer::createPropertiesPanel()
         QAction* actCopyLayer     = menu.addAction("Copy Layer (Ctrl+C)");
         QAction* actPasteLayer    = menu.addAction("Paste Layer (Ctrl+V)");
         menu.addSeparator();
+        QAction* actGroup   = menu.addAction("Group Layers (Ctrl+G)");
+        QAction* actUngroup = menu.addAction("Ungroup (Ctrl+Shift+G)");
+        menu.addSeparator();
         QAction* actCopyTransform = menu.addAction("Copy Transform (Ctrl+Shift+C)");
         QAction* actPasteTransform= menu.addAction("Paste Transform (Ctrl+Shift+V)");
         menu.addSeparator();
         QAction* actDelete        = menu.addAction(QStringLiteral("\xF0\x9F\x97\x91 Delete (Del)"));
 
+        int selCount = m_layerList->selectionModel()->selectedRows().size();
+        actGroup->setEnabled(selCount >= 1);
         actPasteLayer->setEnabled(!m_layerClipboard.empty());
         actPasteTransform->setEnabled(m_transformClipboard.has_value());
 
@@ -189,6 +194,8 @@ QWidget* ShotComposer::createPropertiesPanel()
 
         if (chosen == actCopyLayer)          copySelectedLayer();
         else if (chosen == actPasteLayer)    pasteLayer();
+        else if (chosen == actGroup)         groupSelectedLayers();
+        else if (chosen == actUngroup)       ungroupSelectedGroup();
         else if (chosen == actCopyTransform) copyTransform();
         else if (chosen == actPasteTransform)pasteTransform();
         else if (chosen == actDelete) {
@@ -227,6 +234,9 @@ QWidget* ShotComposer::createPropertiesPanel()
 
     m_addBgBtn = makeLayerBtn(QStringLiteral("\xF0\x9F\x96\xBC"), "Add selected background");
     layerBtns->addWidget(m_addBgBtn);
+
+    m_addGroupBtn = makeLayerBtn(QStringLiteral("\xF0\x9F\x93\x81"), "Create layer group (Ctrl+G)");
+    layerBtns->addWidget(m_addGroupBtn);
 
     layerBtns->addStretch();
 
@@ -961,6 +971,14 @@ QWidget* ShotComposer::createPropertiesPanel()
 
     connect(m_layerUpBtn,   &QPushButton::clicked, this, &ShotComposer::moveSelectedLayerUp);
     connect(m_layerDownBtn, &QPushButton::clicked, this, &ShotComposer::moveSelectedLayerDown);
+    connect(m_addGroupBtn,  &QPushButton::clicked, this, &ShotComposer::groupSelectedLayers);
+
+    // ── Keyboard shortcuts ──────────────────────────────────────────────
+    auto* grpShortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_G), this);
+    connect(grpShortcut, &QShortcut::activated, this, &ShotComposer::groupSelectedLayers);
+
+    auto* ungrpShortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_G), this);
+    connect(ungrpShortcut, &QShortcut::activated, this, &ShotComposer::ungroupSelectedGroup);
 
     return rightSplitter;
 }

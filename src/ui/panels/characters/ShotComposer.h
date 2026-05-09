@@ -151,6 +151,25 @@ public:
     void moveSelectedLayerToFront();
     void moveSelectedLayerToBack();
 
+    // ── Group operations ────────────────────────────────────────────────
+
+    /// Group the selected layers into a new folder.
+    void groupSelectedLayers();
+
+    /// Ungroup the currently selected group layer.
+    void ungroupSelectedGroup();
+
+    /// Add an empty group at the end of the layer list.
+    void addEmptyGroup();
+
+    /// UI-only layer group for organizing layers in the compose panel.
+    struct LayerGroupInfo {
+        std::string name;
+        bool expanded = true;
+        int  firstChild = -1;  ///< First layer index in m_layerOrder
+        int  lastChild  = -1;  ///< Last layer index in m_layerOrder
+    };
+
     /// Push current state onto the undo stack (clears redo stack).
     void pushUndoState();
 
@@ -186,6 +205,7 @@ public:
     [[nodiscard]] QPushButton*  addCharBtn()          const noexcept { return m_addCharBtn; }
     [[nodiscard]] QPushButton*  addBgBtn()            const noexcept { return m_addBgBtn; }
     [[nodiscard]] QPushButton*  removeLayerBtn()      const noexcept { return m_removeLayerBtn; }
+    [[nodiscard]] QPushButton*  addGroupBtn()         const noexcept { return m_addGroupBtn; }
     [[nodiscard]] QPushButton*  layerUpBtn()          const noexcept { return m_layerUpBtn; }
     [[nodiscard]] QPushButton*  layerDownBtn()        const noexcept { return m_layerDownBtn; }
 
@@ -359,8 +379,13 @@ private:
     std::optional<ShotPreset> m_shotClipboard;
 
     // ── Undo / Redo stacks ──────────────────────────────────────────────
-    std::deque<ShotPreset> m_undoStack;
-    std::deque<ShotPreset> m_redoStack;
+    /// Bundles a shot preset snapshot with its layer groups for undo/redo.
+    struct UndoState {
+        ShotPreset preset;
+        std::vector<LayerGroupInfo> groups;
+    };
+    std::deque<UndoState> m_undoStack;
+    std::deque<UndoState> m_redoStack;
     static constexpr int MAX_UNDO = 50;    bool               m_undoPropertyPushed = false;  ///< Coalesced undo for property edits
     QTimer*            m_undoCoalesceTimer  = nullptr; ///< Resets m_undoPropertyPushed
     // ── Library panel ───────────────────────────────────────────────────
@@ -383,6 +408,9 @@ private:
     QPushButton*  m_saveShotBtn       = nullptr;
     QPushButton*  m_deleteShotBtn     = nullptr;
 
+    // ── Layer groups (UI-only) ──────────────────────────────────────────
+    std::vector<LayerGroupInfo> m_layerGroups;
+
     // ── Preview ─────────────────────────────────────────────────────────
     QWidget*              m_previewArea   = nullptr;
     SpinePreviewWidget*   m_spinePreview  = nullptr;
@@ -402,6 +430,7 @@ private:
     QPushButton*  m_addCharBtn        = nullptr;
     QPushButton*  m_addBgBtn          = nullptr;
     QPushButton*  m_removeLayerBtn    = nullptr;
+    QPushButton*  m_addGroupBtn       = nullptr;
     QPushButton*  m_layerUpBtn        = nullptr;
     QPushButton*  m_layerDownBtn      = nullptr;
 
