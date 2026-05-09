@@ -5,7 +5,7 @@
 #>
 
 # ── Load WPF assemblies ───────────────────────────────────────────────────
-Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml, System.Windows.Forms
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml
 
 $ScriptDir = Split-Path -Parent $PSCommandPath
 
@@ -382,12 +382,17 @@ function Step8-Done {
     }, "Normal")
 }
 
-# ── Helper: wait for user input while keeping UI alive ─────────────────
+# ── Helper: wait for user input using WPF message pump ──────────────
 function Wait-ForInput {
     Add-Log "Waiting for you to confirm in the dialog above..." -Color Orange
     while ($script:WaitingForInput -and -not $script:Cancelled) {
-        [System.Windows.Forms.Application]::DoEvents()
-        Start-Sleep -Milliseconds 50
+        # Pump WPF messages without blocking the UI thread
+        $frame = New-Object System.Windows.Threading.DispatcherFrame
+        $timer = New-Object System.Windows.Threading.DispatcherTimer
+        $timer.Interval = [TimeSpan]::FromMilliseconds(50)
+        $timer.Add_Tick({ $frame.Continue = $false; $timer.Stop() })
+        $timer.Start()
+        [System.Windows.Threading.Dispatcher]::PushFrame($frame)
     }
 }
 
