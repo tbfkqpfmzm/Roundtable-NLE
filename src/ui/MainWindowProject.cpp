@@ -214,6 +214,30 @@ void MainWindow::refreshProjectsList()
         QDir sub(subDir.absoluteFilePath());
         entries.append(sub.entryInfoList(filters, QDir::Files, QDir::Time));
     }
+
+    // Also include recent projects that live outside the default projects
+    // directory (e.g. projects created on external drives).
+    QSettings settings("ROUNDTABLE", "NLE");
+    QStringList recent = settings.value("RecentFiles").toStringList();
+    {
+        QSet<QString> seen;
+        for (const auto& fi : entries)
+            seen.insert(QFileInfo(fi.absoluteFilePath()).absoluteFilePath().toLower());
+
+        const QString projDirPrefix = QDir::toNativeSeparators(projDir).toLower();
+        for (const auto& rp : recent) {
+            QFileInfo rfi(rp);
+            QString normPath = rfi.absoluteFilePath().toLower();
+            if (seen.contains(normPath)) continue;
+            if (rfi.exists() && rfi.fileName().endsWith(".rtp", Qt::CaseInsensitive)) {
+                if (normPath.startsWith(projDirPrefix))
+                    continue;
+                entries.append(rfi);
+                seen.insert(normPath);
+            }
+        }
+    }
+
     // Sort by modification time (newest first)
     std::sort(entries.begin(), entries.end(),
               [](const QFileInfo& a, const QFileInfo& b) {
@@ -252,8 +276,6 @@ void MainWindow::refreshProjectsList()
     m_projectPanel->setProjects(projects);
 
     // Also feed recent projects
-    QSettings settings("ROUNDTABLE", "NLE");
-    QStringList recent = settings.value("RecentFiles").toStringList();
     m_projectPanel->setRecentProjects(recent);
 
     spdlog::info("Refreshed projects list: {} projects found", entries.size());
@@ -300,6 +322,11 @@ void MainWindow::setCurrentProject(std::unique_ptr<Project> project)
         }
         if (m_playbackController)
             m_playbackController->setTimeline(nullptr);
+        // Also disconnect the export panel — otherwise when it is later
+        // wired to the new project's timeline, ExportPanel::setTimeline
+        // will call removeObserver on the already-destroyed old timeline.
+        if (m_exportPanel)
+            m_exportPanel->setTimeline(nullptr);
         m_timeline = nullptr;
     }
 
@@ -524,6 +551,7 @@ void MainWindow::onCreateProjectFromPanel(const QString& name, uint32_t resW, ui
     if (serializer.save(*project, path)) {
         spdlog::info("Project saved to: {}", path.string());
         setCurrentProject(std::move(project));
+        addToRecentFiles(QString::fromStdString(path.string()));
         refreshProjectsList();
         statusBar()->showMessage(
             QString("Project '%1' created").arg(name), 3000);
@@ -563,10 +591,17 @@ void MainWindow::onOpenProjectFromPanel(const QString& name)
         }
     }
 
-    QString projDir = projectsDirectory();
+    // Use the precise file path from the project panel when available,
+    // falling back to the standard projects-directory convention.  This
+    // ensures projects saved to custom locations or discovered via the
+    // recent-files list are opened at their actual on-disk location.
+    QString filePath;
+    if (m_projectPanel)
+        filePath = m_projectPanel->projectFilePath(name);
+    if (filePath.isEmpty())
+        filePath = projectsDirectory() + "/" + name + "/" + name + ".rtp";
 
-    std::filesystem::path path =
-        (projDir + "/" + name + "/" + name + ".rtp").toStdWString();
+    std::filesystem::path path = filePath.toStdWString();
 
     spdlog::info("OPEN: calling serializer.load for {}", path.string());
     ProjectSerializer serializer;
@@ -593,16 +628,9 @@ void MainWindow::onOpenProjectFromPanel(const QString& name)
         if (!restoreWorkspace("project/" + name))
             restoreWorkspace("last_session");
 
-        // Restore the last active page for this project (default: Audio).
-        // Clamp to valid content pages — never restore to Projects (0),
-        // which can be stale from a prior open-from-panel.
-        QSettings settings("ROUNDTABLE", "NLE");
-        int savedPage = settings.value("Project/" + name + "/activePage",
-                                       static_cast<int>(Page::Audio)).toInt();
-        if (savedPage <= static_cast<int>(Page::Projects) ||
-            savedPage > static_cast<int>(Page::Export))
-            savedPage = static_cast<int>(Page::Audio);
-        setCurrentPage(static_cast<Page>(savedPage));
+        // Stay on the current tab (Projects) instead of restoring the
+        // last active page for this project.
+        setCurrentPage(Page::Projects);
 
         spdlog::info("OPEN: restoring audio sync state");
         // Restore audio sync state for this project
@@ -628,6 +656,8 @@ void MainWindow::onOpenProjectFromPanel(const QString& name)
         auto dt3 = std::chrono::duration_cast<std::chrono::milliseconds>(t3 - t0).count();
         spdlog::info("=== OPEN PROJECT COMPLETE: {} total ms ===", dt3);
 
+        addToRecentFiles(QString::fromStdString(path.string()));
+
         statusBar()->showMessage(
             QString("Opened '%1'").arg(name), 3000);
         hideBusyIndicator();
@@ -641,7 +671,7 @@ void MainWindow::onOpenProjectFromPanel(const QString& name)
     }
 }
 
-void MainWindow::onDeleteProjectFromPanel(const QString& name)
+void MainWindow::onDeleteProjectFromPanel(const QString& name, const QString& filePath)
 {
     auto reply = QMessageBox::question(this, "Delete Project",
         QString("Delete project '%1'? This cannot be undone.").arg(name),
@@ -649,12 +679,90 @@ void MainWindow::onDeleteProjectFromPanel(const QString& name)
 
     if (reply != QMessageBox::Yes) return;
 
-    QString projDir = projectsDirectory();
-    QString projectFolder = projDir + "/" + name;
+    // If the deleted project is the currently open project, close it first
+    // so subsequent operations (create, open) don't think it's still open.
+    // Important: clean up all references BEFORE destroying the project,
+    // otherwise dangling pointers in subsystems cause use-after-free crashes.
+    if (m_currentProject) {
+        QString currentName = QString::fromStdString(m_currentProject->name());
+        if (currentName == name) {
+            // 1. Stop audio playback / transport
+            if (m_playbackController && m_playbackController->isPlaying())
+                m_playbackController->stop();
+
+            // 2. Stop the async composite pipeline (FrameProducer thread)
+            if (m_timelineWorkspace) {
+                if (auto* pm = m_timelineWorkspace->programMonitor()) {
+                    pm->stopPolling();
+                    if (auto* pl = pm->pipeline())
+                        pl->stop();
+                }
+            }
+            if (m_timelineWorkspace) {
+                if (auto* sm = m_timelineWorkspace->sourceMonitor()) {
+                    if (auto* ctrl = sm->controller()) {
+                        if (ctrl->isPlaying()) ctrl->stop();
+                    }
+                }
+            }
+
+            // 3. Disconnect old timeline from all consumers so no subsystem
+            //    accesses destroyed project data.
+            if (m_timelineWorkspace) {
+                if (auto* pm = m_timelineWorkspace->programMonitor())
+                    pm->setCompositeCallback(nullptr);
+                m_timelineWorkspace->setTimeline(nullptr);
+            }
+            if (m_playbackController)
+                m_playbackController->setTimeline(nullptr);
+            m_timeline = nullptr;
+
+            // 4. Release all media from the old project and clear the frame cache
+            if (m_mediaPool)
+                m_mediaPool->closeAll();
+
+            // 5. Reset per-project panels
+            if (m_audioSync)
+                m_audioSync->resetForNewProject();
+
+            // 6. Clear undo/redo history
+            if (m_commandStack)
+                m_commandStack->clear();
+
+            // 7. Clear export panel references
+            if (m_exportPanel) {
+                m_exportPanel->setTimeline(nullptr);
+                m_exportPanel->setProject(nullptr);
+            }
+
+            // 8. Update UI state
+            if (m_projectPanel)
+                m_projectPanel->setCurrentProjectName({});
+            if (auto* bin = projectBin())
+                bin->setProjectName({});
+            setWindowTitle(QString("ROUNDTABLE NLE %1").arg(ROUNDTABLE_VERSION));
+
+            // 9. Now safe to destroy the old project
+            m_lastSavedAudioSyncBlob = {};
+            m_currentProject.reset();
+        }
+    }
+
+    // Determine the project folder:
+    // - If filePath is known (external drive project), use its parent folder.
+    // - Otherwise fall back to projectsDirectory/name.
+    QString projectFolder;
+    if (!filePath.isEmpty()) {
+        projectFolder = QFileInfo(filePath).absolutePath();
+    } else {
+        projectFolder = projectsDirectory() + "/" + name;
+    }
+
     bool deleted = QDir(projectFolder).removeRecursively();
 
     if (deleted) {
-        spdlog::info("Deleted project: {}", name.toStdString());
+        spdlog::info("Deleted project: {} (folder: {})",
+                     name.toStdString(), projectFolder.toStdString());
         refreshProjectsList();
         statusBar()->showMessage(
             QString("Project '%1' deleted").arg(name), 3000);
@@ -837,15 +945,9 @@ void MainWindow::onOpenRecentProjectFromPanel(const QString& filePath)
         setCurrentProject(std::move(project));
         addToRecentFiles(filePath);
 
-        // Restore the last active page for this project (default: Audio)
-        QSettings settings("ROUNDTABLE", "NLE");
-        QString name = QFileInfo(filePath).baseName();
-        int savedPage = settings.value("Project/" + name + "/activePage",
-                                       static_cast<int>(Page::Audio)).toInt();
-        if (savedPage <= static_cast<int>(Page::Projects) ||
-            savedPage > static_cast<int>(Page::Export))
-            savedPage = static_cast<int>(Page::Audio);
-        setCurrentPage(static_cast<Page>(savedPage));
+        // Stay on the current tab (Projects) instead of restoring the
+        // last active page for this project.
+        setCurrentPage(Page::Projects);
 
         // Restore audio sync state — prefer blob embedded in .rtp over QSettings
         if (m_audioSync) {
@@ -853,7 +955,7 @@ void MainWindow::onOpenRecentProjectFromPanel(const QString& filePath)
             if (!blob.empty())
                 m_audioSync->deserializeFromBlob(blob);
             else
-                m_audioSync->restoreProjectState(name);
+                m_audioSync->restoreProjectState(loadedName);
         }
 
         statusBar()->showMessage("Opened: " + QFileInfo(filePath).fileName(), 3000);
@@ -1005,7 +1107,8 @@ void MainWindow::onOpenProject()
         if (!restoreWorkspace("project/" + loadedName))
             restoreWorkspace("last_session");
         addToRecentFiles(path);
-        setCurrentPage(Page::Timeline);
+        // Stay on the current tab (Projects) instead of switching to Timeline
+        setCurrentPage(Page::Projects);
 
         // Restore audio sync state
         if (m_audioSync) {

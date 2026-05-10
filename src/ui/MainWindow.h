@@ -214,7 +214,7 @@ private slots:
     void onCreateProjectFromPanel(const QString& name, uint32_t resW, uint32_t resH,
                                   double fps, const QString& saveDir);
     void onOpenProjectFromPanel(const QString& name);
-    void onDeleteProjectFromPanel(const QString& name);
+    void onDeleteProjectFromPanel(const QString& name, const QString& filePath);
     void onRenameProjectFromPanel(const QString& oldName, const QString& newName);
     void onDuplicateProjectFromPanel(const QString& name);
     void onRevealProjectInExplorer(const QString& name);

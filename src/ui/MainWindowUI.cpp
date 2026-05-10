@@ -399,8 +399,8 @@ void MainWindow::setupPageTabs()
     connect(m_navGroup, &QButtonGroup::idClicked,
             this, &MainWindow::onPageTabChanged);
 
-    // Select the first button by default
-    m_navButtons[0]->setChecked(true);
+    // Select the first button by default — show the Projects page on startup
+    setCurrentPage(Page::Projects);
 
     setCentralWidget(centralContainer);
 }
@@ -755,6 +755,40 @@ void MainWindow::buildPanels()
     // ── Wire auto-created project from sequence creation ────────────────
     connect(m_timelineWorkspace, &TimelineWorkspace::autoProjectCreated,
             this, [this](Project* project) {
+        // Disconnect old timeline from all consumers BEFORE destroying
+        // the old project, otherwise dangling-pointer access will crash.
+        if (m_timelineWorkspace)
+            m_timelineWorkspace->setTimeline(nullptr);
+        if (m_playbackController)
+            m_playbackController->setTimeline(nullptr);
+        if (m_exportPanel)
+            m_exportPanel->setTimeline(nullptr);
+        m_timeline = nullptr;
+
+        // Save the auto-created project to disk so it survives swaps and
+        // can be reopened from the PROJECTS page later.  Without this, an
+        // auto-created project (from Project Bin "New Sequence" with no
+        // project open) is only kept in memory — if the user switches to
+        // another project, the auto-created one is gone forever.
+        {
+            QString projName = QString::fromStdString(project->name());
+            QString projDir = projectsDirectory();
+            QString projectFolder = projDir + "/" + projName;
+            QDir().mkpath(projectFolder);
+            std::filesystem::path savePath =
+                (projectFolder + "/" + projName + ".rtp").toStdWString();
+            project->setFilePath(savePath);
+            ProjectSerializer serializer;
+            if (serializer.save(*project, savePath)) {
+                spdlog::info("Auto-created project saved to: {}",
+                             savePath.string());
+                addToRecentFiles(QString::fromStdString(savePath.string()));
+            } else {
+                spdlog::warn("Failed to save auto-created project '{}'",
+                             projName.toStdString());
+            }
+        }
+
         // MainWindow takes ownership of the auto-created project
         m_currentProject.reset(project);
         m_lastSavedAudioSyncBlob = {};
@@ -1192,15 +1226,20 @@ void MainWindow::applyDefaultLayout()
             spdlog::info("applyDefaultLayout: loading bundled layout from {}",
                          bundledLayout.toStdString());
             restoreWorkspaceFromFile(bundledLayout);
-            return; // restoreWorkspaceFromFile already calls setCurrentPage
+            // Always start on the PROJECTS page regardless of saved state
+            setCurrentPage(Page::Projects);
+        } else {
+            // No saved or bundled layout — reset the timeline workspace to its
+            // programmatic default dock arrangement so panels aren't scattered.
+            if (m_timelineWorkspace)
+                m_timelineWorkspace->resetToDefaultDockLayout();
+            // Always start on the PROJECTS tab
+            setCurrentPage(Page::Projects);
         }
-        // No saved or bundled layout — reset the timeline workspace to its
-        // programmatic default dock arrangement so panels aren't scattered.
-        if (m_timelineWorkspace)
-            m_timelineWorkspace->resetToDefaultDockLayout();
+    } else {
+        // Geometry was restored from saved session — always start on Projects
+        setCurrentPage(Page::Projects);
     }
-
-    setCurrentPage(static_cast<Page>(savedPage));
 
     // Defer sidebar collapse until after the window is shown and laid out.
     // toggleNavRail() measures button positions (m_navButtons[1]->y() -

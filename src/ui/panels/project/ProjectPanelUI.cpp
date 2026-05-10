@@ -35,6 +35,8 @@
 #include <QScrollBar>
 #include <QSettings>
 #include <QSpinBox>
+#include <QStyle>
+#include <QPainter>
 #include <QStackedWidget>
 #include <QTableWidget>
 #include <QTreeView>
@@ -42,6 +44,35 @@
 #include <QVBoxLayout>
 
 namespace rt {
+
+// ── Helper: draw a simple folder icon pixmap ──────────────────────────────
+QIcon createFolderIcon()
+{
+    // Use warm/neutral tones that work regardless of theme
+    static const QColor kTab(190, 160, 80);
+    static const QColor kBody(210, 190, 110);
+
+    QPixmap pix(24, 20);
+    pix.fill(Qt::transparent);
+    {
+        QPainter p(&pix);
+        p.setRenderHint(QPainter::Antialiasing, false);
+
+        // Folder tab (small rectangle at top-left)
+        p.setPen(Qt::NoPen);
+        p.setBrush(kTab);
+        p.drawRect(4, 3, 7, 4);
+
+        // Folder body (main rectangle)
+        p.setBrush(kBody);
+        p.drawRect(1, 6, 22, 13);
+
+        // Subtle highlight line on top edge of body
+        p.setPen(QColor(230, 215, 150));
+        p.drawLine(1, 6, 22, 6);
+    }
+    return QIcon(pix);
+}
 
 // =============================================================================
 // UI Setup
@@ -327,8 +358,9 @@ void ProjectPanel::setupUI()
         m_locationInput->setStyleSheet(inputStyle());
         folderRow->addWidget(m_locationInput, 1);
 
-        m_locationBrowseBtn = new QPushButton(QString::fromUtf8("\xF0\x9F\x93\x81  Browse..."));
-        m_locationBrowseBtn->setMinimumHeight(30);
+        m_locationBrowseBtn = new QPushButton;
+        m_locationBrowseBtn->setIcon(createFolderIcon());
+        m_locationBrowseBtn->setFixedSize(36, 30);
         m_locationBrowseBtn->setCursor(Qt::PointingHandCursor);
         m_locationBrowseBtn->setToolTip("Browse for save location folder");
         m_locationBrowseBtn->setStyleSheet(QStringLiteral(
@@ -347,8 +379,10 @@ void ProjectPanel::setupUI()
                 this, "Choose Save Location",
                 m_locationInput->text().isEmpty() ? m_projectsDir
                                                   : m_locationInput->text());
-            if (!dir.isEmpty())
+            if (!dir.isEmpty()) {
                 m_locationInput->setText(dir);
+                addRecentSaveLocation(dir);
+            }
         });
         folderRow->addWidget(m_locationBrowseBtn);
         lay->addLayout(folderRow);
@@ -365,7 +399,8 @@ void ProjectPanel::setupUI()
             .arg(Theme::rgb(c.textPrimary)));
         rpLay->addWidget(recentLbl);
         // Quick-select button for the default projects folder
-        auto* rpSample = new QPushButton(QString::fromUtf8("\xF0\x9F\x93\x81  Projects"));
+        auto* rpSample = new QPushButton(" Projects");
+        rpSample->setIcon(createFolderIcon());
         rpSample->setObjectName("NewRecentSample");
         rpSample->setCursor(Qt::PointingHandCursor);
         rpSample->setStyleSheet(QStringLiteral(
@@ -1378,7 +1413,14 @@ void ProjectPanel::setupUI()
         "\U0001F5D1  Delete", c.dangerBg, c.dangerText, c.dangerText);
     connect(m_deleteActionBtn, &QPushButton::clicked, this, [this]() {
         QString name = selectedProjectName();
-        if (!name.isEmpty()) emit deleteProject(name);
+        if (!name.isEmpty()) {
+            // Look up the file path from the project info
+            QString fpath;
+            for (const auto& p : m_allProjects) {
+                if (p.name == name) { fpath = p.filePath; break; }
+            }
+            emit deleteProject(name, fpath);
+        }
     });
     actionBarLayout->addWidget(m_deleteActionBtn);
 

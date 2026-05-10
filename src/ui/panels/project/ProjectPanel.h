@@ -29,6 +29,7 @@
 #include <QDateTime>
 #include <QVector>
 #include <QStringList>
+#include <QIcon>
 
 class QLabel;
 class QLineEdit;
@@ -49,6 +50,9 @@ class QGridLayout;
 class QScrollArea;
 
 namespace rt {
+
+/// Paint a small folder icon pixmap (22×18) matching the current theme.
+QIcon createFolderIcon();
 
 /// Project template presets (resolution + fps) — kept for backward compat.
 enum class ProjectTemplate : int
@@ -94,6 +98,10 @@ public:
     void setRecentProjects(const QStringList& paths);
     void setProjectsDirectory(const QString& dir);
 
+    /// Look up the full file path for a project by name.
+    /// Returns an empty string if the project is not in the current list.
+    [[nodiscard]] QString projectFilePath(const QString& name) const;
+
     // ── Custom-template accessors (read when tmpl == Custom) ────────────
 
     [[nodiscard]] uint32_t customResWidth()  const;
@@ -125,7 +133,7 @@ signals:
     void createProject(const QString& name, uint32_t resW, uint32_t resH,
                        double fps, const QString& saveDir);
     void openProject(const QString& name);
-    void deleteProject(const QString& name);
+    void deleteProject(const QString& name, const QString& filePath);
     void renameProject(const QString& oldName, const QString& newName);
     void duplicateProject(const QString& name);
     void openFromFile();
@@ -167,10 +175,13 @@ private:
     void applyNewPanelResponsiveLayout();
     void populateOpenList();
     QString thumbnailPathForProject(const QString& projectName) const;
+    void rebuildRecentPathButtons();
+    void addRecentSaveLocation(const QString& path);
 
     // ── Data ────────────────────────────────────────────────────────────
     QVector<ProjectInfo> m_allProjects;
     QStringList          m_recentPaths;
+    QStringList          m_recentSaveLocations;
     QString              m_currentProjectName;
     QString              m_searchFilter;
     QString              m_projectsDir;

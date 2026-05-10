@@ -40,6 +40,7 @@
 #include <QSettings>
 #include <QSpinBox>
 #include <QStackedWidget>
+#include <QStyle>
 #include <QTableWidget>
 #include <QTreeView>
 #include <QVBoxLayout>
@@ -173,6 +174,11 @@ ProjectPanel::ProjectPanel(QWidget* parent)
 {
     setupUI();
     setFocusPolicy(Qt::StrongFocus);
+
+    // Load recent save locations from persistent settings
+    QSettings settings("ROUNDTABLE", "NLE");
+    m_recentSaveLocations = settings.value("ProjectPanel/RecentSaveLocations").toStringList();
+    rebuildRecentPathButtons();
 }
 
 ProjectPanel::~ProjectPanel()
@@ -209,6 +215,120 @@ void ProjectPanel::setCurrentProjectName(const QString& name)
 void ProjectPanel::setRecentProjects(const QStringList& paths)
 {
     m_recentPaths = paths;
+}
+
+void ProjectPanel::addRecentSaveLocation(const QString& path)
+{
+    if (path.isEmpty()) return;
+    // Remove duplicates (case-insensitive on Windows)
+    QString normPath = QDir::toNativeSeparators(path).toLower();
+    for (int i = m_recentSaveLocations.size() - 1; i >= 0; --i) {
+        if (QDir::toNativeSeparators(m_recentSaveLocations[i]).toLower() == normPath)
+            m_recentSaveLocations.removeAt(i);
+    }
+    m_recentSaveLocations.prepend(path);
+    // Keep max 8 recent locations
+    while (m_recentSaveLocations.size() > 8)
+        m_recentSaveLocations.removeLast();
+
+    // Persist to settings
+    QSettings settings("ROUNDTABLE", "NLE");
+    settings.setValue("ProjectPanel/RecentSaveLocations", m_recentSaveLocations);
+
+    rebuildRecentPathButtons();
+}
+
+void ProjectPanel::rebuildRecentPathButtons()
+{
+    if (!m_recentPathsWidget) return;
+
+    // Destroy all existing child widgets — we'll rebuild from scratch
+    auto* rpLay = qobject_cast<QHBoxLayout*>(m_recentPathsWidget->layout());
+    if (!rpLay) return;
+
+    // Clear the layout completely
+    while (QLayoutItem* item = rpLay->takeAt(0)) {
+        if (item->widget())
+            item->widget()->deleteLater();
+        delete item;
+    }
+
+    const auto& c = Theme::colors();
+
+    // ── "Recent:" label ──
+    auto* recentLbl = new QLabel("Recent:");
+    recentLbl->setObjectName("NewRecentLbl");
+    recentLbl->setStyleSheet(QStringLiteral(
+        "font-size: 9px; font-weight: 600; color: %1; letter-spacing: 0.4px;")
+        .arg(Theme::rgb(c.textPrimary)));
+    rpLay->addWidget(recentLbl);
+
+    // ── Default "Projects" folder button (always first) ──
+    auto* projectsBtn = new QPushButton(" Projects");
+    projectsBtn->setIcon(createFolderIcon());
+    projectsBtn->setObjectName("NewRecentSample");
+    projectsBtn->setCursor(Qt::PointingHandCursor);
+    projectsBtn->setStyleSheet(QStringLiteral(
+        "QPushButton { background: %1; border: 1px solid %2;"
+        "  color: %3; font-size: 10px; padding: 2px 7px; }"
+        "QPushButton:hover { background: %4; color: %5; }")
+        .arg(Theme::rgb(c.surface1))
+        .arg(Theme::rgb(c.border))
+        .arg(Theme::rgb(c.textTertiary))
+        .arg(Theme::rgb(c.surface2))
+        .arg(Theme::rgb(c.textPrimary)));
+    connect(projectsBtn, &QPushButton::clicked, this, [this]() {
+        m_locationInput->setText(m_projectsDir);
+        addRecentSaveLocation(m_projectsDir);
+    });
+    rpLay->addWidget(projectsBtn);
+
+    // ── Recent save location buttons (up to 4) ──
+    int shown = 0;
+    for (const auto& loc : m_recentSaveLocations) {
+        if (shown >= 4) break;
+        // Skip the projects dir (already shown as the "Projects" button)
+        if (QDir::toNativeSeparators(loc).toLower()
+            == QDir::toNativeSeparators(m_projectsDir).toLower())
+            continue;
+
+        QFileInfo fi(loc);
+        QString label = fi.isRoot() ? loc : fi.fileName();
+        if (label.length() > 22)
+            label = label.left(19) + "...";
+
+        auto* btn = new QPushButton(label);
+        btn->setCursor(Qt::PointingHandCursor);
+        btn->setToolTip(loc);
+        btn->setStyleSheet(QStringLiteral(
+            "QPushButton { background: %1; border: 1px solid %2;"
+            "  color: %3; font-size: 10px; padding: 2px 7px; }"
+            "QPushButton:hover { background: %4; color: %5; }")
+            .arg(Theme::rgb(c.surface1))
+            .arg(Theme::rgb(c.border))
+            .arg(Theme::rgb(c.textTertiary))
+            .arg(Theme::rgb(c.surface2))
+            .arg(Theme::rgb(c.textPrimary)));
+
+        connect(btn, &QPushButton::clicked, this, [this, loc]() {
+            m_locationInput->setText(loc);
+        });
+
+        rpLay->addWidget(btn);
+        ++shown;
+    }
+
+    // ── Stretch so items stay left-aligned ──
+    rpLay->addStretch();
+}
+
+QString ProjectPanel::projectFilePath(const QString& name) const
+{
+    for (const auto& p : m_allProjects) {
+        if (p.name == name)
+            return p.filePath;
+    }
+    return {};
 }
 
 void ProjectPanel::setProjectsDirectory(const QString& dir)
@@ -348,7 +468,8 @@ void ProjectPanel::rebuildTable()
         if (info.isCurrent)
             display += QStringLiteral("  \u25CF CURRENT");
         auto* nameItem = new QTableWidgetItem(QStringLiteral("   ") + display);
-        nameItem->setData(Qt::UserRole, info.name);  // clean name
+        nameItem->setData(Qt::UserRole, info.name);      // clean name
+        nameItem->setData(Qt::UserRole + 1, info.filePath); // full path
         QFont nameFont(t.fontFamily, 26,
                        info.isCurrent ? t.weightBold : t.weightSemiBold);
         nameItem->setFont(nameFont);
@@ -989,6 +1110,10 @@ void ProjectPanel::onCreateClicked()
     uint32_t resH = customResHeight();
     double fps = customFps();
 
+    // Record the save location as a recent path
+    if (!saveDir.isEmpty())
+        addRecentSaveLocation(saveDir);
+
     emit createProject(name, resW, resH, fps, saveDir);
     m_nameInput->clear();
     hideSidePanel();
@@ -1048,6 +1173,26 @@ void ProjectPanel::populateOpenList()
         QDir sub(subDir.absoluteFilePath());
         files.append(sub.entryInfoList(filters, QDir::Files, QDir::Time));
     }
+
+    // Also include recent projects that live outside the default projects
+    // directory (e.g. projects created on external drives).
+    QSet<QString> seen;
+    for (const auto& fi : files)
+        seen.insert(QFileInfo(fi.absoluteFilePath()).absoluteFilePath().toLower());
+
+    const QString projDirPrefix = QDir::toNativeSeparators(m_projectsDir).toLower();
+    for (const auto& rp : m_recentPaths) {
+        QFileInfo rfi(rp);
+        QString normPath = rfi.absoluteFilePath().toLower();
+        if (seen.contains(normPath)) continue;
+        if (rfi.exists() && rfi.fileName().endsWith(".rtp", Qt::CaseInsensitive)) {
+            if (normPath.startsWith(projDirPrefix))
+                continue;
+            files.append(rfi);
+            seen.insert(normPath);
+        }
+    }
+
     std::sort(files.begin(), files.end(),
               [](const QFileInfo& a, const QFileInfo& b) {
                   return a.lastModified() > b.lastModified();
@@ -1151,7 +1296,8 @@ void ProjectPanel::showContextMenu(const QPoint& pos)
     auto* nameItem = m_projectTable->item(row, 1);
     if (!nameItem) return;
 
-    QString name = nameItem->data(Qt::UserRole).toString();
+    QString name   = nameItem->data(Qt::UserRole).toString();
+    QString fpath = nameItem->data(Qt::UserRole + 1).toString();
 
     QMenu menu(this);
     menu.addAction("Open", this,
@@ -1184,7 +1330,7 @@ void ProjectPanel::showContextMenu(const QPoint& pos)
     });
     menu.addSeparator();
     menu.addAction("Delete", this,
-                   [this, name]() { emit deleteProject(name); });
+                   [this, name, fpath]() { emit deleteProject(name, fpath); });
 
     menu.exec(m_projectTable->viewport()->mapToGlobal(pos));
 }
@@ -1272,7 +1418,12 @@ void ProjectPanel::keyPressEvent(QKeyEvent* event)
         if (m_projectTable->hasFocus()) {
             QString name = selectedProjectName();
             if (!name.isEmpty()) {
-                emit deleteProject(name);
+                // Look up the file path from the project info
+                QString fpath;
+                for (const auto& p : m_allProjects) {
+                    if (p.name == name) { fpath = p.filePath; break; }
+                }
+                emit deleteProject(name, fpath);
                 event->accept();
                 return;
             }

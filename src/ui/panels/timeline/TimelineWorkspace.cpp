@@ -653,7 +653,9 @@ void TimelineWorkspace::setTimeline(Timeline* timeline) {
 
     // Forward to TimelinePanel so its track widgets and ensureDefaultTracks
     // operate on the correct timeline (e.g. after project open).
-    if (m_timelinePanel && timeline)
+    // Also forward nullptr to clear the dangling reference when a project
+    // is deleted while open, preventing use-after-free crashes.
+    if (m_timelinePanel)
         m_timelinePanel->setTimeline(timeline);
 
     // Forward to PropertiesPanel so shot switching can find group clips.
