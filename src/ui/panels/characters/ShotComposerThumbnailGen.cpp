@@ -1095,8 +1095,20 @@ void ShotComposer::saveShotThumbnail(const ShotPreset& shot)
 
     // Prefer capturing the preview widget — it shows exactly what the
     // user sees, with the correct outfit, stance, and animation applied.
+    // Temporarily reset to default zoom so the thumbnail always fits perfectly,
+    // then restore the user's current zoom without any visual flicker.
     if (m_spinePreview && !m_spinePreview->isHidden()) {
+        float savedZoom = m_spinePreview->viewZoom();
+        float savedPanX = m_spinePreview->viewPanX();
+        float savedPanY = m_spinePreview->viewPanY();
+
+        m_spinePreview->resetViewport();
+        m_spinePreview->repaint();
         QPixmap preview = m_spinePreview->grab();
+
+        m_spinePreview->setCameraTransform(savedZoom, savedPanX, savedPanY);
+        m_spinePreview->repaint();
+
         if (!preview.isNull()) {
             // Scale to thumbnail size maintaining aspect ratio
             thumb = preview.scaled(kThumbW, kThumbH,

@@ -106,6 +106,13 @@ public:
     /// This sets the viewport zoom/pan programmatically (same as mouse wheel/drag).
     void setCameraTransform(float zoom, float panX = 0.0f, float panY = 0.0f);
 
+    /// Get the current viewport zoom level.
+    [[nodiscard]] float viewZoom() const noexcept { return m_viewZoom; }
+    /// Get the current viewport horizontal pan offset (in pixels).
+    [[nodiscard]] float viewPanX() const noexcept { return m_viewPanX; }
+    /// Get the current viewport vertical pan offset (in pixels).
+    [[nodiscard]] float viewPanY() const noexcept { return m_viewPanY; }
+
     /// Reset viewport zoom/pan to 1:1 default.
     void resetViewport();
 

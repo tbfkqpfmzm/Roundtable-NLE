@@ -914,6 +914,16 @@ QWidget* ShotComposer::createPropertiesPanel()
     if (m_charFilterList) m_charFilterList->installEventFilter(this);
     if (m_shotNameEdit) m_shotNameEdit->installEventFilter(this);
 
+    // Install eventFilter on ALL children of topSection so Ctrl+S works
+    // no matter which property widget has keyboard focus.
+    {
+        const auto children = topSection->findChildren<QWidget*>(QString(), Qt::FindChildrenRecursively);
+        for (auto* w : children) {
+            if (w->focusPolicy() != Qt::NoFocus)
+                w->installEventFilter(this);
+        }
+    }
+
     auto* duplicateShortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_D), this);
     duplicateShortcut->setContext(Qt::WidgetWithChildrenShortcut);
     connect(duplicateShortcut, &QShortcut::activated, this, &ShotComposer::duplicateCurrentShot);

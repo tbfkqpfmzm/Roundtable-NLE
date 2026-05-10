@@ -405,6 +405,7 @@ QWidget* ShotComposer::createShotsColumn()
         m_defaultCharCombo->setEnabled(false);
         m_defaultCharCombo->clear();
         m_setDefaultBtn->setEnabled(false);
+        updatePreview();
         refreshShotList();
         refreshLayerList();
         clearLayerProperties();
@@ -487,6 +488,7 @@ QWidget* ShotComposer::createShotsColumn()
                 m_defaultCharCombo->setEnabled(false);
                 m_defaultCharCombo->clear();
                 m_setDefaultBtn->setEnabled(false);
+                updatePreview();
             }
             refreshShotList();
             refreshLayerList();
@@ -633,7 +635,7 @@ QWidget* ShotComposer::createCharFilterColumn()
 
     // Search bar
     m_filterSearchEdit = new QLineEdit;
-    m_filterSearchEdit->setPlaceholderText(QStringLiteral("ð Filter characters..."));
+    m_filterSearchEdit->setPlaceholderText(QStringLiteral("Filter characters..."));
     m_filterSearchEdit->setClearButtonEnabled(true);
     m_filterSearchEdit->setStyleSheet(QStringLiteral(
         "QLineEdit { background: %1; color: %2; border: 1px solid %3;"

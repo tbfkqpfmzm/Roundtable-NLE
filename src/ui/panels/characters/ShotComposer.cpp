@@ -434,40 +434,6 @@ void ShotComposer::newShot(const QString& name)
     m_selectedLayer = -1;
     m_lastSavedName = name.toStdString();
 
-    // If a specific character filter is active, auto-add that character
-    QString filterVal = activeCharFilter();
-    if (!filterVal.isEmpty() && filterVal != QStringLiteral("__UNASSIGNED__")) {
-        // Convert display name → folder name (e.g. "Drake" → "Drake (c101)")
-        std::string folderName = m_modelManager
-            ? m_modelManager->getFolderName(filterVal.toStdString())
-            : filterVal.toStdString();
-
-        CharacterState ch;
-        ch.characterName = folderName;
-        ch.outfit    = "default";
-        ch.animation = "idle";
-        ch.isTalking = true;
-        ch.posX      = 0.5f;
-        ch.posY      = 0.75f;
-        ch.scale     = 1.0f;
-
-        // Check for video character (e.g. "Wells")
-        {
-            QString qFolder  = QString::fromStdString(folderName).toLower();
-            QString qDisplay = filterVal.toLower();
-            for (const auto& [fn, info] : videoCharacterFiles()) {
-                if (QString::fromStdString(fn).toLower() == qFolder ||
-                    QString::fromStdString(info.charName).toLower() == qDisplay) {
-                    ch.videoMutePath = info.mutePath;
-                    ch.videoTalkPath = info.talkPath;
-                    break;
-                }
-            }
-        }
-
-        m_currentShot.addCharacter(ch);
-    }
-
     // Save the new shot immediately so it appears in the preset list
     m_presetManager.save(m_currentShot);
 

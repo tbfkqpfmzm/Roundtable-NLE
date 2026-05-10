@@ -688,15 +688,31 @@ std::optional<ShotPreset> ShotPresetManager::load(const std::string& name) const
 
 bool ShotPresetManager::remove(const std::string& name)
 {
+    // Always delete files from disk first, regardless of cache state —
+    // this covers orphaned thumbnails that may linger after earlier operations.
+    {
+        std::error_code ec;
+        auto path = pathForPreset(name);
+        std::filesystem::remove(path, ec);
+
+        auto thumbDir = m_directory / "thumbnails";
+        std::string sanitized;
+        sanitized.reserve(name.size());
+        for (char c : name) {
+            if (c == '/' || c == '\\' || c == ':' || c == '*' ||
+                c == '?' || c == '"' || c == '<' || c == '>' || c == '|')
+                sanitized += '_';
+            else
+                sanitized += c;
+        }
+        std::filesystem::remove(thumbDir / (sanitized + ".png"), ec);
+    }
+
+    // Remove from in-memory cache if present
     auto it = std::find_if(m_presets.begin(), m_presets.end(),
                            [&](const auto& pair) { return pair.first == name; });
     if (it == m_presets.end())
         return false;
-
-    // Delete file
-    auto path = pathForPreset(name);
-    std::error_code ec;
-    std::filesystem::remove(path, ec);
 
     m_presets.erase(it);
     return true;
