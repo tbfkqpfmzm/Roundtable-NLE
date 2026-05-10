@@ -118,7 +118,12 @@ void ShotComposer::refreshShotList()
 #endif
         for (const auto& [filename, info] : videoCharacterFiles()) {
             (void)filename;
-            validNames.insert(QString::fromStdString(info.charName));
+            // Only include video characters whose media actually exists on
+            // disk — the installer version may not ship these assets.
+            if (QFileInfo::exists(QString::fromStdString(info.mutePath)) ||
+                QFileInfo::exists(QString::fromStdString(info.talkPath))) {
+                validNames.insert(QString::fromStdString(info.charName));
+            }
         }
         // Also include any character that appears in user shots
         for (const auto& [cn, count] : charShotCount) {
