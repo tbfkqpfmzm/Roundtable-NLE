@@ -1,4 +1,4 @@
-# ROUNDTABLE NLE v0.12
+# ROUNDTABLE NLE v0.13
 
 **GPU-accelerated non-linear video editor — built for Spine animation workflows.**
 
