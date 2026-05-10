@@ -116,7 +116,18 @@ if (-not (Test-Path "build\CMakeCache.txt")) {
 $qt6Line = Select-String -Path "build\CMakeCache.txt" -Pattern "Qt6_DIR:PATH=Qt6_DIR-NOTFOUND" -Quiet
 if ($qt6Line) {
     Write-Host "Qt6 not found in cache, reconfiguring..." -ForegroundColor Yellow
-    & $cmakeExe -B build -DCMAKE_PREFIX_PATH="$projectDir\third_party\qt\6.8.3\msvc2022_64\lib\cmake"
+    & $cmakeExe -B build -DCMAKE_PREFIX_PATH="$projectDir\third_party\qt\6.8.3\msvc2022_64\lib\cmake" -DROUNDTABLE_DEV_BUILD=ON
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Reconfiguration failed." -ForegroundColor Red
+        exit 1
+    }
+}
+
+# Ensure ROUNDTABLE_DEV_BUILD is set (reconfigure if missing from cache)
+$devBuildLine = Select-String -Path "build\CMakeCache.txt" -Pattern "ROUNDTABLE_DEV_BUILD" -Quiet
+if (-not $devBuildLine) {
+    Write-Host "ROUNDTABLE_DEV_BUILD not in cache, reconfiguring..." -ForegroundColor Yellow
+    & $cmakeExe -B build -DCMAKE_PREFIX_PATH="$projectDir\third_party\qt\6.8.3\msvc2022_64\lib\cmake" -DROUNDTABLE_DEV_BUILD=ON
     if ($LASTEXITCODE -ne 0) {
         Write-Host "Reconfiguration failed." -ForegroundColor Red
         exit 1

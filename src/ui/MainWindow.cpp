@@ -51,6 +51,8 @@
 #include "spine/ShotPreset.h"
 #include "SrtIO.h"
 
+#include "Settings.h"
+
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
@@ -184,14 +186,14 @@ void MainWindow::closeEvent(QCloseEvent* event)
         m_audioSync->saveProjectState(
             QString::fromStdString(m_currentProject->name()));
 
-        QSettings settings("ROUNDTABLE", "NLE");
+        auto settings = rt::appSettings();
         settings.setValue("Project/" + QString::fromStdString(m_currentProject->name()) + "/activePage",
                           static_cast<int>(currentPage()));
     }
 
     // F12: Remember last project for auto-open on next launch
     {
-        QSettings settings("ROUNDTABLE", "NLE");
+        auto settings = rt::appSettings();
         if (m_currentProject && !m_currentProject->filePath().empty())
             settings.setValue("LastProjectPath",
                               QString::fromStdString(m_currentProject->filePath().string()));

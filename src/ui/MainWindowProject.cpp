@@ -57,6 +57,8 @@
 #include "spine/ShotPreset.h"
 #include "SrtIO.h"
 
+#include "Settings.h"
+
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
@@ -101,7 +103,7 @@ namespace rt {
 QString MainWindow::projectsDirectory() const
 {
     // F14: Check for user-configured projects directory
-    QSettings settings("ROUNDTABLE", "NLE");
+    auto settings = rt::appSettings();
     QString customDir = settings.value("ProjectsDirectory").toString();
     if (!customDir.isEmpty() && QDir(customDir).exists())
         return customDir;
@@ -217,7 +219,7 @@ void MainWindow::refreshProjectsList()
 
     // Also include recent projects that live outside the default projects
     // directory (e.g. projects created on external drives).
-    QSettings settings("ROUNDTABLE", "NLE");
+    auto settings = rt::appSettings();
     QStringList recent = settings.value("RecentFiles").toStringList();
     {
         QSet<QString> seen;
@@ -585,7 +587,7 @@ void MainWindow::onOpenProjectFromPanel(const QString& name)
         // would cause the next open to stay on the Projects tab.
         Page curPage = currentPage();
         if (curPage != Page::Projects) {
-            QSettings settings("ROUNDTABLE", "NLE");
+            auto settings = rt::appSettings();
             settings.setValue("Project/" + QString::fromStdString(m_currentProject->name()) + "/activePage",
                               static_cast<int>(curPage));
         }
@@ -1068,7 +1070,7 @@ void MainWindow::onExportSrt()
 void MainWindow::onProjectsDirChanged(const QString& newDir)
 {
     spdlog::info("Projects directory changed to: {}", newDir.toStdString());
-    QSettings settings("ROUNDTABLE", "NLE");
+    auto settings = rt::appSettings();
     settings.setValue("ProjectsDirectory", newDir);
     refreshProjectsList();
     statusBar()->showMessage(
@@ -1196,7 +1198,7 @@ void MainWindow::onSaveProject()
             m_audioSync->saveProjectState(QString::fromStdString(m_currentProject->name()));
 
         // Save active page per project
-        QSettings settings("ROUNDTABLE", "NLE");
+        auto settings = rt::appSettings();
         settings.setValue("Project/" + QString::fromStdString(m_currentProject->name()) + "/activePage",
                           static_cast<int>(currentPage()));
 
@@ -1280,7 +1282,7 @@ void MainWindow::onSaveProjectAs()
         setCurrentProject(std::move(m_currentProject)); // refresh title
 
         // Save active page per project (use the new name from path)
-        QSettings settings("ROUNDTABLE", "NLE");
+        auto settings = rt::appSettings();
         settings.setValue("Project/" + QFileInfo(path).baseName() + "/activePage",
                           static_cast<int>(currentPage()));
 

@@ -11,6 +11,8 @@
 #include <QKeyEvent>
 #include <QSettings>
 
+#include "Settings.h"
+
 #include <algorithm>
 #include <set>
 
@@ -209,7 +211,7 @@ QString ShortcutManager::keyToString(int key, Qt::KeyboardModifiers mods)
 
 void ShortcutManager::saveToSettings() const
 {
-    QSettings s("ROUNDTABLE", "NLE");
+    auto s = rt::appSettings();
     s.beginGroup("Shortcuts");
     s.remove("");  // clear group first
     for (auto& [id, act] : m_actions) {
@@ -221,7 +223,7 @@ void ShortcutManager::saveToSettings() const
 
 void ShortcutManager::loadFromSettings()
 {
-    QSettings s("ROUNDTABLE", "NLE");
+    auto s = rt::appSettings();
     s.beginGroup("Shortcuts");
     for (const auto& key : s.childKeys()) {
         auto it = m_actions.find(key);

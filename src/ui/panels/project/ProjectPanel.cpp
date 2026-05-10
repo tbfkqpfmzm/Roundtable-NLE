@@ -45,6 +45,8 @@
 #include <QTreeView>
 #include <QVBoxLayout>
 
+#include "Settings.h"
+
 #include <algorithm>
 
 #include <spdlog/spdlog.h>
@@ -176,7 +178,7 @@ ProjectPanel::ProjectPanel(QWidget* parent)
     setFocusPolicy(Qt::StrongFocus);
 
     // Load recent save locations from persistent settings
-    QSettings settings("ROUNDTABLE", "NLE");
+    auto settings = rt::appSettings();
     m_recentSaveLocations = settings.value("ProjectPanel/RecentSaveLocations").toStringList();
     rebuildRecentPathButtons();
 }
@@ -184,7 +186,7 @@ ProjectPanel::ProjectPanel(QWidget* parent)
 ProjectPanel::~ProjectPanel()
 {
     // Persist table header layout (column widths, order, hidden state)
-    QSettings settings("ROUNDTABLE", "NLE");
+    auto settings = rt::appSettings();
     if (m_projectTable) {
         settings.setValue("ProjectPanel/HeaderState",
                           m_projectTable->horizontalHeader()->saveState());
@@ -232,7 +234,7 @@ void ProjectPanel::addRecentSaveLocation(const QString& path)
         m_recentSaveLocations.removeLast();
 
     // Persist to settings
-    QSettings settings("ROUNDTABLE", "NLE");
+    auto settings = rt::appSettings();
     settings.setValue("ProjectPanel/RecentSaveLocations", m_recentSaveLocations);
 
     rebuildRecentPathButtons();

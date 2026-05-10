@@ -21,6 +21,8 @@
 #include <QRegularExpression>
 #include <QSettings>
 
+#include "Settings.h"
+
 namespace rt {
 
 void AudioSync::onLoadScriptClicked()
@@ -184,7 +186,7 @@ void AudioSync::fetchScriptFromUrl(const QString& url)
 
 void AudioSync::onImportAudioClicked()
 {
-    QSettings settings("ROUNDTABLE", "NLE");
+    auto settings = rt::appSettings();
     QString lastDir = settings.value("AudioSync/lastImportDir", QString()).toString();
 
     if (lastDir.isEmpty() && !m_lastImportDir.isEmpty())

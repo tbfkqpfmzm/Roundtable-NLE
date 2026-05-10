@@ -20,6 +20,8 @@
 #include <QSpinBox>
 #include <QVBoxLayout>
 
+#include "Settings.h"
+
 namespace rt {
 
 AppPreferencesDialog::AppPreferencesDialog(QWidget* parent,
@@ -162,7 +164,7 @@ int AppPreferencesDialog::hardwareDecodeMode() const
 
 void AppPreferencesDialog::loadSettings()
 {
-    QSettings s("ROUNDTABLE", "NLE");
+    auto s = rt::appSettings();
     m_themeCombo->setCurrentIndex(s.value("ThemePreset", 0).toInt());
     m_autosaveSpin->setValue(s.value("AutosaveInterval", 5).toInt());
     m_scrollbarWidthSpin->setValue(s.value("ScrollbarWidth", 16).toInt());
@@ -192,7 +194,7 @@ void AppPreferencesDialog::loadSettings()
 
 void AppPreferencesDialog::saveSettings()
 {
-    QSettings s("ROUNDTABLE", "NLE");
+    auto s = rt::appSettings();
     s.setValue("ThemePreset", m_themeCombo->currentIndex());
     s.setValue("AutosaveInterval", m_autosaveSpin->value());
     s.setValue("ScrollbarWidth", m_scrollbarWidthSpin->value());

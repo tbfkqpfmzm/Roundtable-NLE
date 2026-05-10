@@ -88,6 +88,8 @@
 #include <QPushButton>
 #include <QTabBar>
 
+#include "Settings.h"
+
 #include <map>
 #include <set>
 
@@ -113,7 +115,7 @@ MainWindow::MainWindow(QWidget* parent)
     // Auto-save with configurable interval from preferences
     m_autoSaveTimer = new QTimer(this);
     {
-        QSettings s("ROUNDTABLE", "NLE");
+        auto s = rt::appSettings();
         int minutes = s.value("AutosaveInterval", 5).toInt();
         m_autoSaveTimer->setInterval(minutes * 60 * 1000);
     }

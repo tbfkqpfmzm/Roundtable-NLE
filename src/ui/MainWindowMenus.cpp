@@ -28,6 +28,7 @@
 #include <QInputDialog>
 #include <QMenuBar>
 #include <QMessageBox>
+#include "Settings.h"
 #include <QSettings>
 #include <QStatusBar>
 #include <QTimer>
@@ -212,7 +213,7 @@ void MainWindow::buildEditMenu(QMenuBar* menuBar)
             // Apply audio device change
             if (m_audioEngine) {
                 int devIdx = dlg.audioDeviceIndex();
-                QSettings s("ROUNDTABLE", "NLE");
+                auto s = rt::appSettings();
                 s.setValue("AudioDeviceIndex", devIdx);
             }
         }
@@ -395,7 +396,7 @@ void MainWindow::buildWindowMenu(QMenuBar* menuBar)
                 QLineEdit::Normal, QString(), &ok);
             if (!ok || name.isEmpty()) return;
 
-            QSettings settings("ROUNDTABLE", "NLE");
+            auto settings = rt::appSettings();
             settings.beginGroup("WorkspacePresets/" + name);
             m_timelineWorkspace->saveDockLayout(settings);
             settings.endGroup();
@@ -404,7 +405,7 @@ void MainWindow::buildWindowMenu(QMenuBar* menuBar)
 
         // List saved custom presets
         {
-            QSettings settings("ROUNDTABLE", "NLE");
+            auto settings = rt::appSettings();
             settings.beginGroup("WorkspacePresets");
             QStringList presets = settings.childGroups();
             settings.endGroup();
@@ -414,7 +415,7 @@ void MainWindow::buildWindowMenu(QMenuBar* menuBar)
                 for (const QString& preset : presets) {
                     QMenu* presetMenu = wsMenu->addMenu(preset);
                     presetMenu->addAction("Load", this, [this, preset]() {
-                        QSettings s("ROUNDTABLE", "NLE");
+                        auto s = rt::appSettings();
                         s.beginGroup("WorkspacePresets/" + preset);
                         m_timelineWorkspace->restoreDockLayout(s);
                         s.endGroup();
@@ -422,7 +423,7 @@ void MainWindow::buildWindowMenu(QMenuBar* menuBar)
                             "Workspace '" + preset + "' loaded", 3000);
                     });
                     presetMenu->addAction("Save current", this, [this, preset]() {
-                        QSettings s("ROUNDTABLE", "NLE");
+                        auto s = rt::appSettings();
                         s.beginGroup("WorkspacePresets/" + preset);
                         m_timelineWorkspace->saveDockLayout(s);
                         s.endGroup();
@@ -430,7 +431,7 @@ void MainWindow::buildWindowMenu(QMenuBar* menuBar)
                             "Workspace '" + preset + "' updated", 3000);
                     });
                     presetMenu->addAction("Delete", this, [this, preset]() {
-                        QSettings s("ROUNDTABLE", "NLE");
+                        auto s = rt::appSettings();
                         s.remove("WorkspacePresets/" + preset);
                         statusBar()->showMessage(
                             "Workspace '" + preset + "' deleted", 3000);

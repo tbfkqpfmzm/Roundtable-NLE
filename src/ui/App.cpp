@@ -28,6 +28,7 @@
 
 #include "QtHelpers.h"
 
+#include "Settings.h"
 #include <QSettings>
 #include <spdlog/spdlog.h>
 
@@ -119,7 +120,7 @@ bool App::init()
 
     // ── Apply theme (load user preference, default: PremiereDark) ────
     {
-        QSettings themeSettings("ROUNDTABLE", "NLE");
+        auto themeSettings = rt::appSettings();
         int presetIdx = themeSettings.value("ThemePreset", 0).toInt();
         auto preset = static_cast<ThemePreset>(
             std::clamp(presetIdx, 0, 0));
@@ -128,7 +129,7 @@ bool App::init()
 
     // ── Hardware decode preference ──────────────────────────────────────
     {
-        QSettings s("ROUNDTABLE", "NLE");
+        auto s = rt::appSettings();
         int mode = s.value("HardwareDecodeMode", 0).toInt();
         setForceSoftwareDecode(mode == 1);
         spdlog::info("App: hardware decode mode = {} ({})",

@@ -32,6 +32,8 @@
 #include <QRegularExpression>
 #include <QSettings>
 
+#include "Settings.h"
+
 namespace rt {
 
 void AudioSync::onLoadScriptClicked()
@@ -351,7 +353,7 @@ void AudioSync::fetchScriptFromUrl(const QString& url)
 void AudioSync::onImportAudioClicked()
 {
     // Restore last used directory from QSettings
-    QSettings settings("ROUNDTABLE", "NLE");
+    auto settings = rt::appSettings();
     QString lastDir = settings.value("AudioSync/lastImportDir", QString()).toString();
 
     // Fall back to member variable if QSettings is empty

@@ -368,7 +368,8 @@ $cmakeArgs = @(
     "-G", "Visual Studio 17 2022",
     "-A", "x64",
     "-DCMAKE_PREFIX_PATH:PATH=$qtCmakeDir/../..",
-    "-DCMAKE_BUILD_TYPE=Release"
+    "-DCMAKE_BUILD_TYPE=Release",
+    "-DROUNDTABLE_DEV_BUILD=ON"
 )
 
 # Add glslc path if available

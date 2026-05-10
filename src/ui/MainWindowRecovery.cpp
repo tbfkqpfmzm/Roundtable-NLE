@@ -77,6 +77,8 @@
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include "Settings.h"
+
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -237,7 +239,7 @@ void MainWindow::onAutoSave()
     ProjectSerializer serializer;
     if (serializer.save(*m_currentProject, savePath)) {
         // Prune old auto-saves (keep max 20)
-        QSettings s("ROUNDTABLE", "NLE");
+        auto s = rt::appSettings();
         size_t maxKeep = static_cast<size_t>(s.value("MaxAutoSaves", 20).toInt());
         AutoSave::pruneAutoSaves(folder, maxKeep);
 
@@ -253,7 +255,7 @@ void MainWindow::onAutoSave()
 
 void MainWindow::checkCrashRecovery()
 {
-    QSettings settings("ROUNDTABLE", "NLE");
+    auto settings = rt::appSettings();
     QString lastPath = settings.value("LastProjectPath").toString();
     if (lastPath.isEmpty()) return;
 
@@ -303,7 +305,7 @@ void MainWindow::checkCrashRecovery()
 
 void MainWindow::addToRecentFiles(const QString& filePath)
 {
-    QSettings settings("ROUNDTABLE", "NLE");
+    auto settings = rt::appSettings();
     QStringList recent = settings.value("RecentFiles").toStringList();
 
     recent.removeAll(filePath);
@@ -322,7 +324,7 @@ void MainWindow::updateRecentFilesMenu()
     if (!m_recentProjectsMenu) return;
     m_recentProjectsMenu->clear();
 
-    QSettings settings("ROUNDTABLE", "NLE");
+    auto settings = rt::appSettings();
     QStringList recent = settings.value("RecentFiles").toStringList();
 
     if (recent.isEmpty()) {
@@ -350,7 +352,7 @@ void MainWindow::updateRecentFilesMenu()
 
     m_recentProjectsMenu->addSeparator();
     m_recentProjectsMenu->addAction("Clear Recent", this, [this]() {
-        QSettings s("ROUNDTABLE", "NLE");
+        auto s = rt::appSettings();
         s.remove("RecentFiles");
         updateRecentFilesMenu();
     });

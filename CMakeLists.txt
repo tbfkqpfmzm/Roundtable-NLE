@@ -92,6 +92,11 @@ endif()
 # No vcpkg, no Vulkan SDK, no CUDA Toolkit install needed.
 add_subdirectory(third_party)
 
+# ─── Dev-build isolation ────────────────────────────────────────────────────
+# When ON, QSettings uses ("ROUNDTABLE", "NLE-Dev") so dev builds don't
+# contaminate the installed version's settings (RecentFiles, workspaces, etc.).
+option(ROUNDTABLE_DEV_BUILD "Isolate dev build settings from installed version" OFF)
+
 # ─── Global definitions ─────────────────────────────────────────────────────
 add_compile_definitions(
     ROUNDTABLE_VERSION="${PROJECT_VERSION}"
@@ -99,6 +104,7 @@ add_compile_definitions(
                               # Without this, vulkan.h declares direct prototypes that link
                               # to volk's pointer variables instead of calling through them.
     $<$<CONFIG:Debug>:ROUNDTABLE_DEBUG>
+    $<$<BOOL:${ROUNDTABLE_DEV_BUILD}>:ROUNDTABLE_DEV_BUILD>
     $<$<BOOL:${CUDAToolkit_FOUND}>:ROUNDTABLE_HAS_CUDA>
     $<$<BOOL:${FFMPEG_FOUND}>:ROUNDTABLE_HAS_FFMPEG>
 )

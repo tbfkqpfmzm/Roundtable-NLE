@@ -43,6 +43,8 @@
 #include <QUrl>
 #include <QVBoxLayout>
 
+#include "Settings.h"
+
 namespace rt {
 
 // ── Helper: draw a simple folder icon pixmap ──────────────────────────────
@@ -895,7 +897,7 @@ void ProjectPanel::setupUI()
 
     // Determine initial root directory
     if (m_projectsDir.isEmpty()) {
-        QSettings settings("ROUNDTABLE", "NLE");
+        auto settings = rt::appSettings();
         QString customDir = settings.value("ProjectsDirectory").toString();
         if (!customDir.isEmpty() && QDir(customDir).exists()) {
             m_projectsDir = customDir;
@@ -1276,7 +1278,7 @@ void ProjectPanel::setupUI()
 
     // Restore saved header layout from previous session
     {
-        QSettings settings("ROUNDTABLE", "NLE");
+        auto settings = rt::appSettings();
         QByteArray savedState = settings.value("ProjectPanel/HeaderState").toByteArray();
         if (!savedState.isEmpty())
             hh->restoreState(savedState);

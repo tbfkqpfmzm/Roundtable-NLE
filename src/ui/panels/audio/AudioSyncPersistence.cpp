@@ -12,6 +12,8 @@
 #include <QFile>
 #include <QSettings>
 
+#include "Settings.h"
+
 #include "ai/ScriptMatcher.h"     // For Script (complete type needed by ScriptSession dtor)
 #include "project/ClipSerialization.h"
 
@@ -113,7 +115,7 @@ void AudioSync::saveProjectState(const QString& projectName)
 {
     if (projectName.isEmpty()) return;
 
-    QSettings settings("ROUNDTABLE", "NLE");
+    auto settings = rt::appSettings();
     QString prefix = "Project/" + projectName + "/AudioSync/";
 
     // Save active session key
@@ -206,7 +208,7 @@ void AudioSync::restoreProjectState(const QString& projectName)
 
     m_restoring = true;  // Suppress redundant UI rebuilds inside loadScript
 
-    QSettings settings("ROUNDTABLE", "NLE");
+    auto settings = rt::appSettings();
     QString prefix = "Project/" + projectName + "/AudioSync/";
 
     // ── Check for multi-session format ──────────────────────────────────
@@ -469,7 +471,7 @@ void AudioSync::restoreAudioPaths(const QString& projectName)
 {
     if (projectName.isEmpty() || !m_audioPaths.empty()) return;
 
-    QSettings settings("ROUNDTABLE", "NLE");
+    auto settings = rt::appSettings();
     QString prefix = "Project/" + projectName + "/AudioSync/";
 
     QStringList audioPaths = settings.value(prefix + "audioPaths").toStringList();
