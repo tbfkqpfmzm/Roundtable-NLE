@@ -19,6 +19,7 @@
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QFrame>
 #include <QGroupBox>
@@ -191,6 +192,11 @@ void CharacterBrowser::discoverVideoCharacters()
             QJsonObject ch = cv.toObject();
             QString mutePath = ch.value(QStringLiteral("videoMutePath")).toString();
             if (mutePath.isEmpty()) continue;
+            // Only include this video character if the referenced video file
+            // actually exists on disk — otherwise it won't work in the
+            // exported/installer version where video assets may be absent.
+            if (!QFileInfo::exists(mutePath))
+                continue;
             QString charName = ch.value(QStringLiteral("characterName")).toString();
             if (!charName.isEmpty())
                 m_videoCharNames.insert(charName);
