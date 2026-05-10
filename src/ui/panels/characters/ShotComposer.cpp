@@ -31,7 +31,6 @@ extern "C" {
 #include <QGridLayout>
 #include <QHeaderView>
 #include <QInputDialog>
-#include <QMessageBox>
 #include <QMimeData>
 #include <QPainterPath>
 #include <QPixmap>
@@ -633,58 +632,6 @@ bool ShotComposer::saveCurrentShot()
 {
     if (m_currentShot.name().empty())
         return false;
-
-    const std::string& name = m_currentShot.name();
-    const auto& chars = m_currentShot.characters();
-
-    // ── Detect name/content mismatch ────────────────────────────────────
-    // If the shot name looks like "CharacterName (Default)" but that
-    // character is no longer in the shot, the user likely modified an old
-    // default shot in-place.  Warn them and offer to auto-rename.
-    {
-        auto defaultPos = name.find(" (Default)");
-        if (defaultPos != std::string::npos) {
-            std::string expectedChar = name.substr(0, defaultPos);
-            bool found = false;
-            for (const auto& ch : chars) {
-                if (ch.characterName == expectedChar) {
-                    found = true;
-                    break;
-                }
-                // Also check display name — e.g. characterName "Drake (c101)"
-                // has display name "Drake", so shot "Drake (Default)" matches.
-                if (m_modelManager) {
-                    const std::string disp = m_modelManager->getDisplayName(ch.characterName);
-                    if (disp == expectedChar) {
-                        found = true;
-                        break;
-                    }
-                }
-            }
-            if (!found && !chars.empty()) {
-                // Suggest a name based on the first character in the shot
-                std::string suggestion = chars[0].characterName + " (Default)";
-                if (name != suggestion) {
-                    auto reply = QMessageBox::question(
-                        this, "Shot Name Mismatch",
-                        QString("This shot is named \"%1\" but no longer contains "
-                                "the character \"%2\".\n\n"
-                                "Rename to \"%3\"?")
-                            .arg(QString::fromStdString(name))
-                            .arg(QString::fromStdString(expectedChar))
-                            .arg(QString::fromStdString(suggestion)),
-                        QMessageBox::Yes | QMessageBox::No);
-                    if (reply == QMessageBox::Yes) {
-                        m_updating = true;
-                        m_shotNameEdit->setText(QString::fromStdString(suggestion));
-                        m_updating = false;
-                        m_currentShot.setName(suggestion);
-                        // Fall through — save with the new name
-                    }
-                }
-            }
-        }
-    }
 
     // ── Clean up orphaned file on rename ────────────────────────────────
     // If the shot was previously saved under a different name, delete the
