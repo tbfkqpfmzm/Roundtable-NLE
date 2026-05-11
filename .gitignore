@@ -166,6 +166,7 @@ assets/audio_folder.txt
 
 # Thumbnail caches (generated)
 assets/presets/shots/thumbnails/
+**/.thumbnails/
 
 # Backup copies
 *.original
