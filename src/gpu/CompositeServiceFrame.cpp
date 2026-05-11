@@ -573,9 +573,47 @@ try
 {
     if (!m_timeline) return nullptr;
 
+    // Suppress GPU compositing when a modal dialog is active (QDialog::exec
+    // nested event loop).  Paint events still fire for widgets behind the
+    // dialog, and invoking the Vulkan compositor from a paint event cascade
+    // triggers deep driver call stacks that overflow the NVIDIA driver stack
+    // (STACK_OVERFLOW in nvoglv64.dll).  Return the last good cached frame
+    // instead, keeping the display valid without touching the GPU.
+    if (s_modalDialogActive.load(std::memory_order_acquire)) {
+        std::lock_guard lg(m_lastCompositeMtx);
+        if (m_lastGoodComposite) {
+            m_lastGoodComposite->gpuReady     = false;
+            m_lastGoodComposite->gpuImageView = 0;
+            m_lastGoodComposite->gpuSampler   = 0;
+            m_lastGoodComposite->gpuSemaphore = 0;
+        }
+        return m_lastGoodComposite;
+    }
+
     // Thread-safety + re-entrancy guard Ã¢â‚¬â€ if compositeFrame is already
-    // running (on this thread via signal re-entrancy, or on the async
-    // render thread), return immediately to avoid cascading work.
+    // running, return immediately.  Two mechanisms:
+    //   1. Same-thread re-entrancy: thread_local depth counter catches
+    //      signal re-entrancy / paint-event recursion on the GUI thread.
+    //      Without this, a recursive composite call chain can exhaust the
+    //      call stack (1 MB) and cause STACK_OVERFLOW in ntdll.dll.
+    //   2. Cross-thread contention: mutex try_lock catches the async
+    //      render thread colliding with the UI thread.
+    auto& depth = compositeDepth();
+    if (depth > 0) {
+        std::lock_guard lg(m_lastCompositeMtx);
+        if (m_lastGoodComposite) {
+            m_lastGoodComposite->gpuReady     = false;
+            m_lastGoodComposite->gpuImageView = 0;
+            m_lastGoodComposite->gpuSampler   = 0;
+            m_lastGoodComposite->gpuSemaphore = 0;
+        }
+        return m_lastGoodComposite;
+    }
+    ++depth;
+    struct DepthGuard {
+        ~DepthGuard() { --compositeDepth(); }
+    } depthGuard;
+
     std::unique_lock lock(m_compositeMutex, std::try_to_lock);
     if (!lock.owns_lock()) {
         // If the composite cache was just invalidated, don't return the

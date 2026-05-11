@@ -15,6 +15,9 @@
 #include "dialogs/KeyboardShortcutsDialog.h"
 #include "dialogs/AppPreferencesDialog.h"
 
+// Composite service (for modal-dialog compositor suppression)
+#include "CompositeService.h"
+
 // Pages / panels
 #include "panels/audio/AudioSync.h"
 #include "panels/characters/CharacterBrowser.h"
@@ -508,6 +511,14 @@ void MainWindow::buildPanels()
     // ── Export to Timeline: wire AudioSync → Timeline population ────────
     connect(m_audioSync, &AudioSync::exportRequested, this, [this]() {
         if (!m_audioSync || !m_currentProject) return;
+
+        // Suppress GPU compositing during modal dialogs to prevent NVIDIA
+        // driver stack overflow from paint events during QDialog::exec.
+        struct ModalGuard {
+            ~ModalGuard() { CompositeService::setModalDialogActive(false); }
+        };
+        CompositeService::setModalDialogActive(true);
+        ModalGuard modalGuard;
 
         // ── Warn about missing default shots ───────────────────────────
         {

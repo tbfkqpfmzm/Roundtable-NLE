@@ -413,10 +413,17 @@ void TimelinePanel::rebuildTracks()
     // paint/signal events could be delivered to disabled/disconnected
     // widgets and trigger re-entrant calls into the partially torn-down
     // timeline, causing use-after-free crashes.
+    // Hide old widgets BEFORE scheduling deletion.  deleteLater() defers
+    // destruction to the next event-loop iteration, but paint events can
+    // still fire in the meantime.  If the Track object's storage was
+    // reallocated (e.g. tracks added/removed from the timeline), the old
+    // widget's m_track raw pointer is dangling — accessing it in a paint
+    // event causes ACCESS_VIOLATION.  Hiding the widget prevents paint.
     for (size_t i = 0; i < m_trackHeaders.size(); ++i) {
         auto* header = m_trackHeaders[i];
         if (header) {
-            spdlog::info("[LIFECYCLE] About to delete TrackHeader {} at {} (type={})", (void*)header, i, header ? header->metaObject()->className() : "null");
+            header->hide();
+            spdlog::info("[LIFECYCLE] Hidden TrackHeader {} at {}", (void*)header, i);
         }
     }
     for (size_t i = 0; i < m_trackHeaders.size(); ++i) {
@@ -432,7 +439,8 @@ void TimelinePanel::rebuildTracks()
     for (size_t i = 0; i < m_trackWidgets.size(); ++i) {
         auto* widget = m_trackWidgets[i];
         if (widget) {
-            spdlog::info("[LIFECYCLE] About to delete TrackWidget {} at {} (type={})", (void*)widget, i, widget ? widget->metaObject()->className() : "null");
+            widget->hide();
+            spdlog::info("[LIFECYCLE] Hidden TrackWidget {} at {}", (void*)widget, i);
         }
     }
     for (size_t i = 0; i < m_trackWidgets.size(); ++i) {

@@ -59,6 +59,35 @@ public:
     CompositeService();
     ~CompositeService();
 
+    /// Suppress all GPU compositing while a modal dialog is active.
+    /// Set by the UI layer before showing modal dialogs (QDialog::exec).
+    /// During modal dialogs, paint events still fire for widgets behind
+    /// the dialog, and invoking the Vulkan compositor from a paint event
+    /// cascade can overflow the NVIDIA driver stack (stack overflow in
+    /// nvoglv64.dll).  The compositor returns the last good cached frame
+    /// when suppressed, avoiding crashes while keeping the display valid.
+    static void setModalDialogActive(bool active) noexcept {
+        s_modalDialogActive.store(active, std::memory_order_release);
+    }
+    [[nodiscard]] static bool isModalDialogActive() noexcept {
+        return s_modalDialogActive.load(std::memory_order_acquire);
+    }
+
+    /// Thread-local re-entrancy counter for compositeFrame().
+    /// Unlike the mutex try_lock, this detects recursive calls on the
+    /// SAME thread (e.g. signal re-entrancy during GPU compositing).
+    /// When non-zero on entry, compositeFrame returns the last good frame
+    /// immediately, preventing deep recursive compositing that would
+    /// exhaust the call stack and cause a STACK_OVERFLOW crash.
+    static int& compositeDepth() noexcept {
+        static thread_local int s_depth = 0;
+        return s_depth;
+    }
+
+private:
+    static std::atomic<bool> s_modalDialogActive;
+
+public:
     // Non-copyable
     CompositeService(const CompositeService&) = delete;
     CompositeService& operator=(const CompositeService&) = delete;

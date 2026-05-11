@@ -57,8 +57,19 @@ int main(int argc, char* argv[])
     _CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 #endif
 
-    // Crash handler
-    rt::CrashHandler::install();
+    // Crash handler — write crash dumps to LOCALAPPDATA so they survive
+    // when running from a read-only install directory (e.g. Program Files).
+    {
+        std::filesystem::path crashDir = "crash_logs";  // fallback
+#ifdef _WIN32
+        wchar_t appData[MAX_PATH];
+        DWORD len = GetEnvironmentVariableW(L"LOCALAPPDATA", appData, MAX_PATH);
+        if (len > 0 && len < MAX_PATH) {
+            crashDir = std::filesystem::path(appData) / "ROUNDTABLE" / "crash_logs";
+        }
+#endif
+        rt::CrashHandler::install(crashDir);
+    }
 
     // Logging: console + perf_log.txt (in LOCALAPPDATA when deployed,
     // or project root when running from build tree)

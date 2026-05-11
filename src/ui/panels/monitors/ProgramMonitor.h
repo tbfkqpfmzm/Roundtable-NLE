@@ -317,6 +317,21 @@ private:
     std::unique_ptr<PlaybackScheduler> m_pipeline;
     void initPipeline();
 
+    // ── Coalesced cross-thread present ────────────────────────────────
+    // The presenter thread (background) queues presentFrame calls on the
+    // GUI thread via QMetaObject::invokeMethod.  Without coalescing, if
+    // the GUI thread is busy (scrubbing), every presenter frame piles up
+    // in the Qt event queue — each holding a shared_ptr<CachedFrame> with
+    // pixel data — causing unbounded memory growth and eventual OOM crash.
+    //
+    // Solution: store the latest frame from the presenter thread and
+    // queue at most ONE invokeMethod at a time.  When processed, it picks
+    // up the latest frame and clears the flag.
+    std::mutex                              m_queuedPresentMtx;
+    std::shared_ptr<CachedFrame>            m_queuedPresentFrame;
+    std::atomic<bool>                       m_queuedPresentPending{false};
+    void flushQueuedPresent();
+
     /// Most recently presented frame, regardless of whether it came from
     /// the direct UI path or the async producer/presenter pipeline.
     std::shared_ptr<CachedFrame> m_lastDirectFrame;

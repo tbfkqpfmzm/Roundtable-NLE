@@ -319,10 +319,22 @@ void ProgramMonitor::initPipeline()
             if (QThread::currentThread() == thread())
                 return presentFrame(frame);
 
+            // ── Coalesced cross-thread present ────────────────────────
+            // Store the latest frame and queue at most ONE invokeMethod.
+            // Without this, every presenter frame queues an event on the
+            // GUI thread.  If the GUI thread is busy (scrubbing, editing),
+            // the event queue grows unboundedly — each event holds a
+            // shared_ptr<CachedFrame> with pixel data — causing OOM.
+            {
+                std::lock_guard lock(m_queuedPresentMtx);
+                m_queuedPresentFrame = frame;
+                if (m_queuedPresentPending.load(std::memory_order_acquire))
+                    return true;  // already queued — just updated the frame
+                m_queuedPresentPending.store(true, std::memory_order_release);
+            }
+
             QMetaObject::invokeMethod(this,
-                                      [this, frame]() {
-                                          presentFrame(frame);
-                                      },
+                                      [this]() { flushQueuedPresent(); },
                                       Qt::QueuedConnection);
             return true;
         });
@@ -429,6 +441,33 @@ bool ProgramMonitor::presentFrame(const std::shared_ptr<CachedFrame>& frame)
     return true;
 }
 
+void ProgramMonitor::flushQueuedPresent()
+{
+    // Called on the GUI thread from a queued QMetaObject::invokeMethod.
+    // Present the latest frame from the presenter thread and clear the
+    // pending flag so the next presenter frame can queue a new invocation.
+
+    // Skip GPU display when a modal dialog is active (QDialog::exec event
+    // loop).  During modal dialogs, paint events still fire for widgets
+    // behind the dialog, and invoking Vulkan viewport operations from a
+    // paint event cascade can overflow the NVIDIA driver stack.
+    if (QApplication::activeModalWidget() != nullptr) {
+        std::lock_guard lock(m_queuedPresentMtx);
+        m_queuedPresentPending.store(false, std::memory_order_release);
+        m_queuedPresentFrame.reset();
+        return;
+    }
+
+    std::shared_ptr<CachedFrame> frame;
+    {
+        std::lock_guard lock(m_queuedPresentMtx);
+        frame = std::move(m_queuedPresentFrame);
+        m_queuedPresentPending.store(false, std::memory_order_release);
+    }
+    if (frame)
+        presentFrame(frame);
+}
+
 std::shared_ptr<CachedFrame> ProgramMonitor::lastDisplayedFrame() const
 {
     if (m_lastDirectFrame)
@@ -530,7 +569,15 @@ void ProgramMonitor::onScrub(int64_t tick)
     if (!m_controller) return;
 
     m_controller->seekTo(tick);
+
+    // Delegate to updateDisplay() which has its own scrub throttle
+    // (m_scrubSkipCounter — composites every 4th call during scrubbing).
+    // We call it on every scrub event; the single throttle ensures the
+    // GPU is not overwhelmed while keeping the display responsive.
+    // notifyScrub() below ensures the poll timer retries until a valid
+    // frame lands (handles cold decode cache after shot boundaries).
     updateDisplay();
+
     // Set settle counter so subsequent poll cycles retry if the first
     // composite returned a null/stale frame (cold decode cache after
     // export, shot boundary, etc.).  Without this the poll timer dedup
