@@ -833,8 +833,14 @@ QWidget* ShotComposer::createPropertiesPanel()
 
     connect(m_addBgBtn, &QPushButton::clicked, this, [this]() {
         auto items = m_backgroundLibrary->selectedItems();
-        if (!items.isEmpty())
-            addBackground(items.first()->text().toStdString());
+        if (!items.isEmpty()) {
+            auto* item = items.first();
+            // Use relative path for subfolder backgrounds (UserRole+2) or display text for root
+            QString bgPath = item->data(Qt::UserRole + 2).toString();
+            if (bgPath.isEmpty())
+                bgPath = item->text();
+            addBackground(bgPath.toStdString());
+        }
     });
 
     // Remove selected layers (supports multi-selection)

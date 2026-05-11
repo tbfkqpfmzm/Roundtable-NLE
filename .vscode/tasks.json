@@ -12,6 +12,31 @@
 			"command": "pwsh -NoProfile -File publish_release.ps1",
 			"group": "none",
 			"problemMatcher": []
+		},
+		{
+			"label": "Build",
+			"type": "shell",
+			"command": "powershell -ExecutionPolicy Bypass -File build.ps1"
+		},
+		{
+			"label": "Build",
+			"type": "shell",
+			"command": "powershell -ExecutionPolicy Bypass -File build.ps1"
+		},
+		{
+			"label": "Build",
+			"type": "shell",
+			"command": "powershell -ExecutionPolicy Bypass -File build.ps1"
+		},
+		{
+			"label": "Build",
+			"type": "shell",
+			"command": "powershell -ExecutionPolicy Bypass -File build.ps1"
+		},
+		{
+			"label": "Build",
+			"type": "shell",
+			"command": "powershell -ExecutionPolicy Bypass -File build.ps1"
 		}
 	]
 }

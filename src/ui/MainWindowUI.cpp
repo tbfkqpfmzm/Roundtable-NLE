@@ -24,6 +24,7 @@
 #include "panels/characters/ShotComposer.h"
 #include "panels/timeline/TimelineWorkspace.h"
 #include "panels/library/LibraryPanel.h"
+#include "panels/backgrounds/BackgroundDownloadPanel.h"
 
 // Spine cache warming after export
 #include "spine/AnimationVideoCache.h"
@@ -675,6 +676,18 @@ void MainWindow::buildPanels()
         });
     }
 
+    // When Nikke backgrounds are downloaded, refresh the COMPOSE background library
+    if (m_timelineWorkspace && m_timelineWorkspace->libraryPanel()
+        && m_timelineWorkspace->libraryPanel()->nikkeBgsPanel()
+        && m_characterShotPanel && m_characterShotPanel->shotComposer()) {
+        connect(m_timelineWorkspace->libraryPanel()->nikkeBgsPanel(),
+                &BackgroundDownloadPanel::backgroundsDownloaded,
+                this, [this]() {
+            if (m_characterShotPanel && m_characterShotPanel->shotComposer())
+                m_characterShotPanel->shotComposer()->refreshBackgroundLibrary();
+        });
+    }
+
     m_pageStack->addWidget(m_timelineWorkspace);
 
     // ── Wire ProjectBin sequence signals ────────────────────────────────
@@ -1198,7 +1211,7 @@ void MainWindow::applyDefaultLayout()
     // Try to restore the last session's layout (window geometry + dock arrangement).
     // Window geometry is applied immediately so the window appears at the correct
     // position/size.
-    QSettings settings("Roundtable", "ROUNDTABLE NLE");
+    auto settings = rt::appSettings();
     settings.beginGroup("workspace/last_session");
 
     QByteArray geo = settings.value("geometry").toByteArray();
@@ -1256,7 +1269,7 @@ void MainWindow::applyDefaultLayout()
 
 void MainWindow::saveWorkspace(const QString& name)
 {
-    QSettings settings("Roundtable", "ROUNDTABLE NLE");
+    auto settings = rt::appSettings();
     settings.beginGroup("workspace/" + name);
     settings.setValue("geometry", saveGeometry());
     settings.setValue("activePage", static_cast<int>(currentPage()));
@@ -1272,7 +1285,7 @@ void MainWindow::saveWorkspace(const QString& name)
 
 bool MainWindow::restoreWorkspace(const QString& name)
 {
-    QSettings settings("Roundtable", "ROUNDTABLE NLE");
+    auto settings = rt::appSettings();
     settings.beginGroup("workspace/" + name);
 
     QByteArray geo = settings.value("geometry").toByteArray();
@@ -1397,6 +1410,21 @@ bool MainWindow::restoreWorkspaceFromFile(const QString& filePath)
     fileSettings.endGroup();
     spdlog::info("Workspace layout restored from {}", filePath.toStdString());
     return true;
+}
+
+void MainWindow::restoreWorkspacePreset(const QString& presetName)
+{
+    if (!m_timelineWorkspace) return;
+    auto s = rt::appSettings();
+    s.beginGroup("WorkspacePresets/" + presetName);
+    if (s.childKeys().isEmpty() && s.childGroups().isEmpty()) {
+        spdlog::warn("Workspace preset '{}' not found", presetName.toStdString());
+        s.endGroup();
+        return;
+    }
+    m_timelineWorkspace->restoreDockLayout(s);
+    s.endGroup();
+    spdlog::info("Workspace preset '{}' restored", presetName.toStdString());
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

@@ -672,8 +672,23 @@ void TimelineWorkspace::setTimeline(Timeline* timeline) {
 
     // Forward to ProgramMonitor so its mini-timeline gets the correct
     // duration, in/out points, and playhead range.
-    if (m_programMonitor)
+    if (m_programMonitor) {
         m_programMonitor->setTimeline(timeline);
+
+        if (timeline) {
+            // Re-wire the composite callback — setCurrentProject() in
+            // MainWindow calls setCompositeCallback(nullptr) during cleanup,
+            // so we must re-establish it when a new timeline is set.
+            m_programMonitor->setCompositeCallback(
+                [this](int64_t tick, uint32_t w, uint32_t h, bool scrubMode)
+                    -> std::shared_ptr<CachedFrame> {
+                    return compositeFrame(tick, w, h, scrubMode);
+                });
+
+            // Re-start polling so the Program Monitor updates on every tick.
+            m_programMonitor->startPolling();
+        }
+    }
 
 #ifdef ROUNDTABLE_HAS_SPINE
     // Pre-warm the spine cache so first compositeFrame doesn't block on

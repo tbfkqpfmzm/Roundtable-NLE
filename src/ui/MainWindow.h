@@ -151,6 +151,9 @@ public:
     /// Restore a workspace layout from a binary file.
     bool restoreWorkspaceFromFile(const QString& filePath);
 
+    /// Load a saved workspace preset (e.g. "DEFAULT") into the dock layout.
+    void restoreWorkspacePreset(const QString& presetName);
+
     // ── Panel accessors (for testing / backward compat) ─────────────────
 
     // Top-level pages

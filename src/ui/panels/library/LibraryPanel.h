@@ -23,6 +23,7 @@ class QToolButton;
 
 namespace rt {
 
+class BackgroundDownloadPanel;
 class CharactersPanel;
 class MediaDragTreeWidget;
 class ModelManager;
@@ -50,6 +51,9 @@ public:
 
     /// Access the embedded characters panel (for legacy wiring).
     [[nodiscard]] CharactersPanel* charactersPanel() const noexcept { return m_characters; }
+
+    /// Access the Nikke backgrounds download panel.
+    [[nodiscard]] BackgroundDownloadPanel* nikkeBgsPanel() const noexcept { return m_nikkeBgsPanel; }
 
     /// Toggle between detailed list view and large-thumbnail (icon) view.
     void setIconMode(bool iconMode);
@@ -84,6 +88,9 @@ private:
     bool                 m_iconMode{false};
     QToolButton*         m_btnDetail{nullptr};
     QToolButton*         m_btnIcons{nullptr};
+
+    // Nikke Backgrounds download panel
+    BackgroundDownloadPanel* m_nikkeBgsPanel{nullptr};
 
     // Backgrounds tab
     QLineEdit*           m_bgSearch{nullptr};

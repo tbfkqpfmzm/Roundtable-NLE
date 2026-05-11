@@ -87,6 +87,8 @@ add_library(roundtable_ui STATIC
     panels/characters/CharacterShotPanel.cpp
     panels/characters/CharactersPanel.cpp
     panels/library/LibraryPanel.cpp
+    panels/backgrounds/BackgroundDownloadPanel.cpp
+    panels/backgrounds/BackgroundDownloadUI.cpp
     panels/project/ConversionPanel.cpp
     panels/project/ProjectPanel.cpp
     panels/project/ProjectPanelUI.cpp

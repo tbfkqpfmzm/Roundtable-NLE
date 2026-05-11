@@ -235,11 +235,21 @@ bool App::createMainWindow()
     // If launched with --capture-workspace <path>, save the layout and exit
     // before showing the window (used during publish to bundle the default
     // panel arrangement for new users).
+    // Optional --load-preset <name> loads a saved workspace preset first.
     {
         QStringList args = QCoreApplication::arguments();
         int idx = args.indexOf("--capture-workspace");
         if (idx >= 0 && idx + 1 < args.size()) {
             QString outputPath = args[idx + 1];
+
+            // If --load-preset was given, load that workspace preset first.
+            int presetIdx = args.indexOf("--load-preset");
+            if (presetIdx >= 0 && presetIdx + 1 < args.size()) {
+                QString presetName = args[presetIdx + 1];
+                spdlog::info("Loading workspace preset '{}'", presetName.toStdString());
+                m_mainWindow->restoreWorkspacePreset(presetName);
+            }
+
             spdlog::info("Capturing workspace layout to {}", outputPath.toStdString());
             m_mainWindow->saveWorkspaceToFile(outputPath);
             spdlog::info("Workspace captured — exiting");

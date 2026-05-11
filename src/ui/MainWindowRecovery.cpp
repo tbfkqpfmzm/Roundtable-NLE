@@ -335,6 +335,11 @@ void MainWindow::updateRecentFilesMenu()
     m_recentProjectsMenu->setEnabled(true);
     for (const QString& path : recent) {
         QFileInfo fi(path);
+#if !defined(ROUNDTABLE_DEBUG) && !defined(ROUNDTABLE_DEV_BUILD)
+        // Skip dev-only projects in release builds
+        if (QFileInfo::exists(fi.absolutePath() + "/_dev"))
+            continue;
+#endif
         auto* act = m_recentProjectsMenu->addAction(fi.fileName());
         act->setData(path);
         connect(act, &QAction::triggered, this, [this, path]() {

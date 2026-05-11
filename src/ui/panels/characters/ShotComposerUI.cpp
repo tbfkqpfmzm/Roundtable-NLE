@@ -5,6 +5,7 @@
 
 #include "panels/characters/ShotComposer.h"
 #include "panels/characters/ShotComposerInternal.h"
+#include "panels/backgrounds/BackgroundDownloadPanel.h"
 
 #include "Theme.h"
 #include "timeline/MediaRelinker.h"
@@ -63,6 +64,9 @@ protected:
     QMimeData* mimeData(const QList<QListWidgetItem*>& items) const override {
         if (items.isEmpty()) return nullptr;
         auto* item = items.first();
+        // Skip group-header items (non-draggable separators)
+        if (item && !(item->flags() & Qt::ItemIsDragEnabled))
+            return nullptr;
 
         QByteArray payload;
         QDataStream ds(&payload, QIODevice::WriteOnly);
@@ -85,8 +89,16 @@ protected:
             // Standalone video file
             ds << QStringLiteral("video") << item->text();
         } else if (kind.isEmpty()) {
-            // Background (text is the filename, no UserRole data)
-            ds << QStringLiteral("background") << item->text();
+            // Background — text is the display name (baseName without extension).
+            // For subfolder backgrounds, UserRole+2 holds the relative path
+            // (e.g. "Nikke In-Game Backgrounds/bg_chapter_01.png") so pass that
+            // instead of the display name for correct file resolution.
+            QString relPath = item->data(Qt::UserRole + 2).toString();
+            if (relPath.isEmpty()) {
+                ds << QStringLiteral("background") << item->text();
+            } else {
+                ds << QStringLiteral("background") << relPath;
+            }
         } else {
             // Regular character — UserRole is the folder name
             ds << QStringLiteral("character") << kind;
@@ -1210,6 +1222,14 @@ QWidget* ShotComposer::createLeftPanel()
     bgLayout->addWidget(btnAddBg);
 
     m_libraryTabs->addTab(bgTab, "Backgrounds");
+    // ---- Nikke BGs tab ----
+    {
+        auto* nikkeBgPanel = new BackgroundDownloadPanel(this);
+        connect(nikkeBgPanel, &BackgroundDownloadPanel::backgroundsDownloaded,
+                this, &ShotComposer::refreshBackgroundLibrary);
+        m_libraryTabs->addTab(nikkeBgPanel, "NikkeBKG");
+    }
+
 
     // â”€â”€ Videos tab â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     auto* videoTab = new QWidget;
@@ -1375,13 +1395,18 @@ QWidget* ShotComposer::createLeftPanel()
     });
 
     // Background library
+    auto bgItemPath = [](QListWidgetItem* item) -> std::string {
+        if (!item) return {};
+        QString relPath = item->data(Qt::UserRole + 2).toString();
+        return relPath.isEmpty() ? item->text().toStdString() : relPath.toStdString();
+    };
     connect(m_backgroundLibrary, &QListWidget::itemDoubleClicked,
-            this, [this](QListWidgetItem* item) {
-        if (item) addBackground(item->text().toStdString());
+            this, [this, bgItemPath](QListWidgetItem* item) {
+        if (item) addBackground(bgItemPath(item));
     });
-    connect(btnAddBg, &QPushButton::clicked, this, [this]() {
+    connect(btnAddBg, &QPushButton::clicked, this, [this, bgItemPath]() {
         auto items = m_backgroundLibrary->selectedItems();
-        if (!items.isEmpty()) addBackground(items.first()->text().toStdString());
+        if (!items.isEmpty()) addBackground(bgItemPath(items.first()));
     });
 
     // Video library

@@ -117,12 +117,15 @@ void ShotComposer::refreshBackgroundLibrary()
     QDir bgDir("assets/backgrounds");
     if (!bgDir.exists()) return;
 
+    const auto& tc = Theme::colors();
     QStringList filters;
     filters << "*.png" << "*.jpg" << "*.jpeg" << "*.bmp" << "*.webp";
-    auto entries = bgDir.entryInfoList(filters, QDir::Files, QDir::Name);
-    for (const auto& entry : entries) {
+
+    // Helper: add a single background item (cached thumbnail).
+    // For subfolder items, store the relative-from-backgrounds-dir path in UserRole+2
+    // so DragAssetList::mimeData() can pass the correct path to addBackground().
+    auto addBgItem = [&](const QFileInfo& entry, const QString& subdirName = QString()) {
         QPixmap thumb;
-        // Check image cache
         std::string pathKey = entry.absoluteFilePath().toStdString();
         auto cacheIt = m_bgImageCache.find(pathKey);
         if (cacheIt != m_bgImageCache.end()) {
@@ -140,10 +143,47 @@ void ShotComposer::refreshBackgroundLibrary()
         // Store absolute path in UserRole+1 so UserRole stays empty,
         // allowing DragAssetList::mimeData() to correctly identify this as a background.
         item->setData(Qt::UserRole + 1, entry.absoluteFilePath());
+        if (!subdirName.isEmpty()) {
+            // Store full relative-from-app-root path for subfolder items
+            // (e.g. "assets/backgrounds/Nikke In-Game Backgrounds/bg_chapter_01.png")
+            // so existing rendering code (which prepends "assets/backgrounds/") works.
+            QString relPath = QString("assets/backgrounds/") + subdirName + "/" + entry.fileName();
+            item->setData(Qt::UserRole + 2, relPath);
+            item->setForeground(tc.textSecondary);  // slightly dimmed for subfolder items
+        }
         m_backgroundLibrary->addItem(item);
+    };
+
+    // ── Step 1: root-level files (user-added backgrounds) ───────────────
+    auto rootFiles = bgDir.entryInfoList(filters, QDir::Files, QDir::Name);
+    for (const auto& entry : rootFiles) {
+        addBgItem(entry, QString());
     }
 
-    spdlog::debug("ShotComposer: Found {} backgrounds", entries.size());
+    // ── Step 2: subdirectories — each as a group ────────────────────────
+    auto subdirs = bgDir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+    for (const QFileInfo& sd : subdirs) {
+        QDir subDir(sd.absoluteFilePath());
+        auto subFiles = subDir.entryInfoList(filters, QDir::Files, QDir::Name);
+        if (subFiles.isEmpty()) continue;
+
+        // Non-selectable group header
+        auto* header = new QListWidgetItem(QStringLiteral("\xF0\x9F\x93\x81  ") + sd.fileName());
+        header->setFlags(header->flags() & ~(Qt::ItemIsSelectable | Qt::ItemIsDragEnabled));
+        header->setForeground(tc.accent);
+        QFont headerFont = header->font();
+        headerFont.setBold(true);
+        headerFont.setPointSize(headerFont.pointSize() + 1);
+        header->setFont(headerFont);
+        m_backgroundLibrary->addItem(header);
+
+        // Files under this subdirectory — pass subdir name for relative path
+        for (const auto& entry : subFiles) {
+            addBgItem(entry, sd.fileName());
+        }
+    }
+
+    spdlog::debug("ShotComposer: Found {} backgrounds", m_backgroundLibrary->count());
 }
 
 void ShotComposer::refreshVideoLibrary()

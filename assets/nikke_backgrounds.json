@@ -1,0 +1,327 @@
+[2026-05-10T23:10:30.197Z] (console) [warning] [dump] psa -9
+- [2026-05-10T23:10:30.330Z] (console) [warning] MegaDexie.getDBName: Adding temporal key for non-logged user.
+Snapshot: 
+- <changed> generic [active] [ref=e17]:
+  - generic [ref=e19]:
+    - text:         
+    - generic [ref=e20]:
+      - generic:
+        - generic:
+          - generic:                    
+          - generic [ref=e21]:
+            - generic [ref=e22] [cursor=pointer]: 
+            - generic [ref=e24]:
+              - text:   
+              - generic [ref=e25] [cursor=pointer]:
+                - generic [ref=e26]: 
+                - generic [ref=e27]: Log in
+              - generic [ref=e28] [cursor=pointer]:
+                - generic [ref=e29]: 
+                - generic [ref=e30]: Sign up
+              - text: 
+              - generic [ref=e32] [cursor=pointer]:
+                - generic [ref=e33]: 
+                - generic [ref=e34]: Products
+                - generic [ref=e35]: 
+              - generic:
+                - generic [ref=e36] [cursor=pointer]: Cloud storage
+                - generic [ref=e37] [cursor=pointer]: Object storage
+                - generic [ref=e38] [cursor=pointer]: VPN
+                - generic [ref=e39] [cursor=pointer]: Password manager
+                - generic [ref=e40] [cursor=pointer]: Sync
+                - generic [ref=e41] [cursor=pointer]: Backup
+                - generic [ref=e42] [cursor=pointer]: Share
+                - generic [ref=e43] [cursor=pointer]: Media files
+                - generic [ref=e44] [cursor=pointer]: Chat and meetings
+                - generic [ref=e45] [cursor=pointer]: Business
+              - generic [ref=e46] [cursor=pointer]:
+                - generic [ref=e47]: 
+                - generic [ref=e48]: Solutions
+                - generic [ref=e49]: 
+              - generic:
+                - generic [ref=e50] [cursor=pointer]: Individuals
+                - generic [ref=e51] [cursor=pointer]: Freelancers
+                - generic [ref=e52] [cursor=pointer]: Small business
+              - generic [ref=e53] [cursor=pointer]:
+                - generic [ref=e54]: 
+                - generic [ref=e55]: Platforms
+                - generic [ref=e56]: 
+              - generic:
+                - generic [ref=e57] [cursor=pointer]: Mobile apps
+                - generic [ref=e58] [cursor=pointer]: Desktop app
+                - generic [ref=e59] [cursor=pointer]: Browser extensions
+                - generic [ref=e60] [cursor=pointer]: MEGA CMD
+                - generic [ref=e61] [cursor=pointer]: CMD for NAS
+              - generic [ref=e62] [cursor=pointer]:
+                - generic [ref=e63]: 
+                - generic [ref=e64]: Plans
+                - generic [ref=e65]: 
+              - generic:
+                - generic [ref=e66] [cursor=pointer]: Pricing
+                - generic [ref=e67] [cursor=pointer]: Achievements
+              - generic [ref=e68] [cursor=pointer]:
+                - generic [ref=e69]: 
+                - generic [ref=e70]: Resources
+                - generic [ref=e71]: 
+              - generic:
+                - generic [ref=e72] [cursor=pointer]: Blog
+                - generic [ref=e73] [cursor=pointer]: Security and privacy
+                - generic [ref=e74] [cursor=pointer]: Reliability
+                - generic [ref=e75] [cursor=pointer]: Developers
+              - generic [ref=e76] [cursor=pointer]:
+                - generic [ref=e77]: 
+                - generic [ref=e78]: Help
+                - generic [ref=e79]: 
+              - generic:
+                - generic [ref=e80] [cursor=pointer]: Help Centre
+                - generic [ref=e81] [cursor=pointer]: Vulnerability Reward Programme
+              - generic [ref=e82] [cursor=pointer]:
+                - generic [ref=e83]: 
+                - generic [ref=e84]: Company
+                - generic [ref=e85]: 
+              - generic:
+                - generic [ref=e86] [cursor=pointer]: About us
+                - generic [ref=e87] [cursor=pointer]: Media
+              - generic [ref=e88] [cursor=pointer]:
+                - generic [ref=e89]: 
+                - generic [ref=e90]: Legal
+                - generic [ref=e91]: 
+              - generic:
+                - generic [ref=e92] [cursor=pointer]: Terms of Service
+                - generic [ref=e93] [cursor=pointer]: Privacy Policy
+                - generic [ref=e94] [cursor=pointer]: Copyright notice submission
+                - generic [ref=e95] [cursor=pointer]: Takedown Guidance Policy
+                - generic [ref=e96] [cursor=pointer]: Transparency Report
+                - generic [ref=e97] [cursor=pointer]: Cookie Policy
+                - generic [ref=e98] [cursor=pointer]: Cookie settings
+                - generic [ref=e99] [cursor=pointer]: Copyright dispute
+              - generic [ref=e101] [cursor=pointer]:
+                - generic [ref=e102]: 
+                - generic [ref=e103]: English
+                - generic [ref=e104]: 
+              - generic [ref=e106]:
+                - generic [ref=e107]: Follow us on social media
+                - link [ref=e108] [cursor=pointer]:
+                  - /url: https://www.facebook.com/MEGAprivacy
+                - link [ref=e110] [cursor=pointer]:
+                  - /url: https://www.instagram.com/MEGA_privacy/
+                - link [ref=e112] [cursor=pointer]:
+                  - /url: https://twitter.com/MEGAprivacy
+                - link [ref=e114] [cursor=pointer]:
+                  - /url: https://www.linkedin.com/company/mega-the-privacy-company
+                - link [ref=e116] [cursor=pointer]:
+                  - /url: https://www.youtube.com/channel/UCL0n8SACU_eghsvHxbizKCA
+              - generic [ref=e119] [cursor=pointer]: v. 6.30.2
+          - generic:         
+      - generic [ref=e120]:
+        - generic [ref=e121]:
+          - button "" [ref=e124] [cursor=pointer]:
+            - generic [ref=e125]: 
+          - navigation [ref=e126]:
+            - generic [ref=e127]:
+              - text: 
+              - link [ref=e128] [cursor=pointer]:
+                - /url: /folder/V55C3T6C
+          - text: 
+        - generic [ref=e131]:
+          - generic:
+            - generic:
+              - generic:
+                - text:  
+                - generic [ref=e132]:
+                  - generic [ref=e133]: 
+                  - textbox "Search déesse_de_la_victoire_bgi" [ref=e134]
+                  - text: 
+          - generic [ref=e135]:
+            - generic: 
+            - button "" [ref=e138] [cursor=pointer]:
+              - generic [ref=e139]: 
+            - button " EN" [ref=e140] [cursor=pointer]:
+              - generic [ref=e141]: 
+              - generic [ref=e143]: EN
+            - text:                          
+            - generic [ref=e145] [cursor=pointer]: Log in
+            - generic [ref=e147] [cursor=pointer]: Sign up
+        - text:                                                  
+        - generic [ref=e148]:
+          - text: 
+          - generic:            
+          - generic [ref=e149]:
+            - generic [ref=e150]:
+              - text:               
+              - button " Save to MEGA" [ref=e151] [cursor=pointer]:
+                - generic [ref=e152]: 
+                - generic [ref=e154]: Save to MEGA
+              - button " Download" [ref=e155] [cursor=pointer]:
+                - generic [ref=e156]: 
+                - generic [ref=e158]: Download
+              - text:  
+            - generic [ref=e159]:
+              - text:  
+              - generic [ref=e163] [cursor=pointer]: déesse_de_la_victoire_bgi
+            - text:     
+            - generic [ref=e164]:
+              - generic [ref=e165]:
+                - text: 
+                - generic [ref=e166]:
+                  - text: 
+                  - generic [ref=e167] [cursor=pointer]:
+                    - generic [ref=e168]: Type
+                    - generic [ref=e169]: 
+                  - generic [ref=e170] [cursor=pointer]:
+                    - generic [ref=e171]: Last modified
+                    - generic [ref=e172]: 
+                  - generic [ref=e173] [cursor=pointer]:
+                    - generic [ref=e174]: Date added
+                    - generic [ref=e175]: 
+              - text:                              
+              - generic [ref=e176]:
+                - button "" [ref=e177] [cursor=pointer]:
+                  - generic [ref=e178]: 
+                - button "" [ref=e179] [cursor=pointer]:
+                  - generic [ref=e180]: 
+                - button "" [ref=e181] [cursor=pointer]:
+                  - generic [ref=e182]: 
+              - text: 
+              - generic:   
+              - generic [ref=e183]:
+                - generic [ref=e184] [cursor=pointer]: 
+                - button " Name" [ref=e185] [cursor=pointer]:
+                  - generic [ref=e186]: 
+                  - generic [ref=e188]: Name
+                - button "" [ref=e189] [cursor=pointer]:
+                  - generic [ref=e190]: 
+          - text:                              
+          - generic [ref=e193]:
+            - generic "4 MB 2025FoolsDay.png" [ref=e194] [cursor=pointer]:
+              - generic [ref=e195]: 
+              - img [ref=e197]
+              - generic [ref=e198]: 2025FoolsDay.png
+              - generic:   
+            - generic "265 B AAAA - READ ME.txt" [ref=e200] [cursor=pointer]:
+              - generic [ref=e201]: 
+              - generic [ref=e204]: AAAA - READ ME.txt
+              - generic:   
+            - generic "1 MB AAAWunder_2.png" [ref=e206] [cursor=pointer]:
+              - generic [ref=e207]: 
+              - img [ref=e209]
+              - generic [ref=e210]: AAAWunder_2.png
+              - generic:   
+            - generic "1 MB AAAWunder.png" [ref=e212] [cursor=pointer]:
+              - generic [ref=e213]: 
+              - img [ref=e215]
+              - generic [ref=e216]: AAAWunder.png
+              - generic:   
+            - generic "6 MB AirView.png" [ref=e218] [cursor=pointer]:
+              - generic [ref=e219]: 
+              - img [ref=e221]
+              - generic [ref=e222]: AirView.png
+              - generic:   
+            - generic "6 MB AmusementPark.png" [ref=e224] [cursor=pointer]:
+              - generic [ref=e225]: 
+              - img [ref=e227]
+              - generic [ref=e228]: AmusementPark.png
+              - generic:   
+            - generic "5 MB APillar.png" [ref=e230] [cursor=pointer]:
+              - generic [ref=e231]: 
+              - img [ref=e233]
+              - generic [ref=e234]: APillar.png
+              - generic:   
+            - generic "7 MB Arboretum.png" [ref=e236] [cursor=pointer]:
+              - generic [ref=e237]: 
+              - img [ref=e239]
+              - generic [ref=e240]: Arboretum.png
+              - generic:   
+            - generic "1 MB Ark_02.png" [ref=e242] [cursor=pointer]:
+              - generic [ref=e243]: 
+              - img [ref=e245]
+              - generic [ref=e246]: Ark_02.png
+              - generic:   
+            - generic "5 MB Ark.png" [ref=e248] [cursor=pointer]:
+              - generic [ref=e249]: 
+              - img [ref=e251]
+              - generic [ref=e252]: Ark.png
+              - generic:   
+            - generic "5 MB ArkCleanIndoor.png" [ref=e254] [cursor=pointer]:
+              - generic [ref=e255]: 
+              - img [ref=e257]
+              - generic [ref=e258]: ArkCleanIndoor.png
+              - generic:   
+            - generic "5 MB ArkRuinIndoor.png" [ref=e260] [cursor=pointer]:
+              - generic [ref=e261]: 
+              - img [ref=e263]
+              - generic [ref=e264]: ArkRuinIndoor.png
+              - generic:   
+            - generic "5 MB Armory.png" [ref=e266] [cursor=pointer]:
+              - generic [ref=e267]: 
+              - img [ref=e269]
+              - generic [ref=e270]: Armory.png
+              - generic:   
+            - generic "5 MB artcity_d.png" [ref=e272] [cursor=pointer]:
+              - generic [ref=e273]: 
+              - img [ref=e275]
+              - generic [ref=e276]: artcity_d.png
+              - generic:   
+            - generic "6 MB artcity_s.png" [ref=e278] [cursor=pointer]:
+              - generic [ref=e279]: 
+              - img [ref=e281]
+              - generic [ref=e282]: artcity_s.png
+              - generic:   
+            - generic "5 MB AtlasCage_01.png" [ref=e284] [cursor=pointer]:
+              - generic [ref=e285]: 
+              - img [ref=e287]
+              - generic [ref=e288]: AtlasCage_01.png
+              - generic:   
+            - generic "5 MB AtlasCage_02.png" [ref=e290] [cursor=pointer]:
+              - generic [ref=e291]: 
+              - img [ref=e293]
+              - generic [ref=e294]: AtlasCage_02.png
+              - generic:   
+            - generic "5 MB AtlasCage_03.png" [ref=e296] [cursor=pointer]:
+              - generic [ref=e297]: 
+              - img [ref=e299]
+              - generic [ref=e300]: AtlasCage_03.png
+              - generic:   
+            - generic "5 MB Atlascage.png" [ref=e302] [cursor=pointer]:
+              - generic [ref=e303]: 
+              - img [ref=e305]
+              - generic [ref=e306]: Atlascage.png
+              - generic:   
+            - generic "5 MB AZXIn.png" [ref=e308] [cursor=pointer]:
+              - generic [ref=e309]: 
+              - img [ref=e311]
+              - generic [ref=e312]: AZXIn.png
+              - generic:   
+            - generic "5 MB Backstreet_n.png" [ref=e314] [cursor=pointer]:
+              - generic [ref=e315]: 
+              - img [ref=e317]
+              - generic [ref=e318]: Backstreet_n.png
+              - generic:   
+            - generic "5 MB Backstreet.png" [ref=e320] [cursor=pointer]:
+              - generic [ref=e321]: 
+              - img [ref=e323]
+              - generic [ref=e324]: Backstreet.png
+              - generic:   
+            - generic "6 MB BambooForest_d.png" [ref=e326] [cursor=pointer]:
+              - generic [ref=e327]: 
+              - img [ref=e329]
+              - generic [ref=e330]: BambooForest_d.png
+              - generic:   
+            - generic "5 MB BambooForest_n.png" [ref=e332] [cursor=pointer]:
+              - generic [ref=e333]: 
+              - img [ref=e335]
+              - generic [ref=e336]: BambooForest_n.png
+              - generic:   
+          - text:                                              
+        - text: "*                                                                                                                                 "
+        - generic:
+          - text:   
+          - generic:
+            - generic:
+              - generic:
+                - text: 
+                - generic [ref=e342] [cursor=pointer]: 
+                - generic [ref=e344] [cursor=pointer]: 
+      - text:  
+    - text:   
+  - ref=e16 [unchanged]

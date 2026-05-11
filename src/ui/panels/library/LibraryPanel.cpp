@@ -3,6 +3,7 @@
  */
 
 #include "panels/library/LibraryPanel.h"
+#include "panels/backgrounds/BackgroundDownloadPanel.h"
 #include "panels/characters/CharactersPanel.h"
 #include "widgets/MediaDragTreeWidget.h"
 #include "Theme.h"
@@ -208,7 +209,13 @@ void LibraryPanel::buildUI()
                 this, [debounce]() { debounce->start(); });
     }
 
-    // Tab 3: Videos
+    // Tab 3: NikkeBKG
+    {
+        m_nikkeBgsPanel = new BackgroundDownloadPanel(this);
+        m_tabs->addTab(m_nikkeBgsPanel, tr("NikkeBKG"));
+    }
+
+    // Tab 4: Videos
     {
         auto w = buildFolderTab(this, tr("\U0001F50D Search videos…"));
         m_videoSearch = w.search;
@@ -232,7 +239,7 @@ void LibraryPanel::buildUI()
                 this, [debounce]() { debounce->start(); });
     }
 
-    // Tab 4: Audio
+    // Tab 5: Audio
     {
         auto w = buildFolderTab(this, tr("\U0001F50D Search audio…"));
         m_audioSearch = w.search;
@@ -306,11 +313,15 @@ void LibraryPanel::refreshCurrentTab()
         return;
     }
     if (index == 2) {
+        // NikkeBKG — auto-scans via QFileSystemWatcher, no manual refresh needed
+        return;
+    }
+    if (index == 3) {
         refreshFolderTree(m_videoTree, kVideosDir, kVideoFilters(),
                           m_videoSearch ? m_videoSearch->text().trimmed().toLower() : QString());
         return;
     }
-    if (index == 3) {
+    if (index == 4) {
         refreshFolderTree(m_audioTree, kAudioDir, kAudioFilters(),
                           m_audioSearch ? m_audioSearch->text().trimmed().toLower() : QString());
     }

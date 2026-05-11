@@ -144,6 +144,9 @@ public:
     /// Remove a background by index.
     bool removeBackground(int index);
 
+    /// Refresh the background library list from disk (subfolders become groups).
+    void refreshBackgroundLibrary();
+
     // ── Layer ordering ──────────────────────────────────────────────────
 
     void moveSelectedLayerUp();
@@ -288,7 +291,6 @@ private:
     void clearLayerProperties();
     void showCharacterProperties(const CharacterState& ch);
     void showBackgroundProperties(const BackgroundState& bg);
-    void refreshBackgroundLibrary();
     void refreshVideoLibrary();
     int  addVideoLayer(const std::string& filename);
     void onVideoTimingChanged();

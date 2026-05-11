@@ -213,6 +213,13 @@ void MainWindow::refreshProjectsList()
 
     QFileInfoList entries;
     for (const auto& subDir : dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+        // Skip dev-only projects in release builds — a project folder that
+        // contains a `_dev` marker file is only shown when ROUNDTABLE_DEBUG
+        // or ROUNDTABLE_DEV_BUILD is defined.
+#if !defined(ROUNDTABLE_DEBUG) && !defined(ROUNDTABLE_DEV_BUILD)
+        if (QFileInfo::exists(subDir.absoluteFilePath() + "/_dev"))
+            continue;
+#endif
         QDir sub(subDir.absoluteFilePath());
         entries.append(sub.entryInfoList(filters, QDir::Files, QDir::Time));
     }
@@ -234,6 +241,11 @@ void MainWindow::refreshProjectsList()
             if (rfi.exists() && rfi.fileName().endsWith(".rtp", Qt::CaseInsensitive)) {
                 if (normPath.startsWith(projDirPrefix))
                     continue;
+#if !defined(ROUNDTABLE_DEBUG) && !defined(ROUNDTABLE_DEV_BUILD)
+                // Skip dev-only projects in release builds
+                if (QFileInfo::exists(rfi.absolutePath() + "/_dev"))
+                    continue;
+#endif
                 entries.append(rfi);
                 seen.insert(normPath);
             }

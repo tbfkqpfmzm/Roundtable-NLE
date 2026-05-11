@@ -377,7 +377,7 @@ void MainWindow::buildWindowMenu(QMenuBar* menuBar)
         // Reset to Saved Layout
         wsMenu->addAction("Reset to Saved Layout", this, [this]() {
             if (!m_timelineWorkspace) return;
-            QSettings s("Roundtable", "ROUNDTABLE NLE");
+            auto s = rt::appSettings();
             s.beginGroup("workspace/last_session");
             if (m_timelineWorkspace->restoreDockLayout(s))
                 statusBar()->showMessage("Layout restored", 2000);

@@ -99,6 +99,16 @@ void MainWindow::onUndo()
         return;
     }
     if (m_commandStack && m_commandStack->canUndo()) {
+        // Save the currently raised dock in the right-side panel group so
+        // rebuildTracks() doesn't cause an unwanted dock tab switch.
+        QDockWidget* raisedDock = nullptr;
+        if (m_timelineWorkspace) {
+            for (auto* dock : m_timelineWorkspace->dockWidgets().values()) {
+                if (dock->isVisible())
+                    raisedDock = dock;
+            }
+        }
+
         auto desc = m_commandStack->undoDescription();
         m_commandStack->undo();
         // Refresh timeline UI to reflect the undone change
@@ -110,6 +120,11 @@ void MainWindow::onUndo()
         // Reload audio sources so audio reflects the undone state
         if (m_timelineWorkspace)
             m_timelineWorkspace->invalidateAudioSources();
+
+        // Restore the previously raised dock so undo doesn't switch tabs.
+        if (raisedDock)
+            raisedDock->raise();
+
         statusBar()->showMessage(
             QString("Undo: %1").arg(QString::fromStdString(desc)), 2000);
     }
@@ -126,6 +141,15 @@ void MainWindow::onRedo()
         return;
     }
     if (m_commandStack && m_commandStack->canRedo()) {
+        // Save the currently raised dock so redo doesn't switch panel tabs.
+        QDockWidget* raisedDock = nullptr;
+        if (m_timelineWorkspace) {
+            for (auto* dock : m_timelineWorkspace->dockWidgets().values()) {
+                if (dock->isVisible())
+                    raisedDock = dock;
+            }
+        }
+
         auto desc = m_commandStack->redoDescription();
         m_commandStack->redo();
         // Refresh timeline UI to reflect the redone change
@@ -137,6 +161,11 @@ void MainWindow::onRedo()
         // Reload audio sources so audio reflects the redone state
         if (m_timelineWorkspace)
             m_timelineWorkspace->invalidateAudioSources();
+
+        // Restore the previously raised dock so redo doesn't switch tabs.
+        if (raisedDock)
+            raisedDock->raise();
+
         statusBar()->showMessage(
             QString("Redo: %1").arg(QString::fromStdString(desc)), 2000);
     }
