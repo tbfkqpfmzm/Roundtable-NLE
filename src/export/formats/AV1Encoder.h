@@ -36,6 +36,8 @@ private:
     AVCodecContext* m_codecCtx{nullptr};
     AVFrame*        m_frame{nullptr};
     AVPacket*       m_packet{nullptr};
+    AVBufferRef*    m_hwDeviceCtx{nullptr};
+    AVBufferRef*    m_hwFramesCtx{nullptr};
 
     EncoderConfig              m_config;
     EncodedPacket              m_lastPacket;

@@ -509,6 +509,23 @@ void MainWindow::buildPanels()
     connect(m_audioSync, &AudioSync::exportRequested, this, [this]() {
         if (!m_audioSync || !m_currentProject) return;
 
+        // ── Warn about missing default shots ───────────────────────────
+        {
+            QStringList missingDefault = m_audioSync->missingDefaultShots();
+            if (!missingDefault.isEmpty()) {
+                auto reply = QMessageBox::warning(
+                    this, tr("Missing Default Shots"),
+                    tr("The following characters have no default shot set:\n\n  %1\n\n"
+                       "Visual layers (Spine/background) will be missing for these characters "
+                       "in the exported timeline.\n\n"
+                       "Open Compose, save a shot, and click \"SET DEFAULT\" to fix.\n\n"
+                       "Continue with export anyway?")
+                        .arg(missingDefault.join(QStringLiteral("\n  "))),
+                    QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+                if (reply != QMessageBox::Yes) return;
+            }
+        }
+
         // ── Sequence picker: ask user which sequence to export to ────
         Timeline* targetTimeline = nullptr;
         if (m_currentProject->sequenceCount() <= 1) {
@@ -1160,9 +1177,12 @@ void MainWindow::onPageTabChanged(int index)
     // The VulkanViewport native HWND can retain stale content while hidden,
     // and the ExportPanel shares the same compositeFrame() callback which
     // may have overwritten the GPU compositor output.
+    // Use requestRefresh() (not refresh()) so m_editSettleCounter is set,
+    // giving the compositor ~240ms of retry window for late decodes after
+    // a timeline-edit-heavy operation like audio export.
     if (index == static_cast<int>(Page::Timeline)) {
         if (auto* pm = programMonitor())
-            pm->refresh();
+            pm->requestRefresh();
     }
 
     // Log page switch
@@ -1208,58 +1228,33 @@ int MainWindow::dockCount() const noexcept
 
 void MainWindow::applyDefaultLayout()
 {
-    // Try to restore the last session's layout (window geometry + dock arrangement).
-    // Window geometry is applied immediately so the window appears at the correct
-    // position/size.
+    // Restore window geometry from the last session so the window appears
+    // at the correct position/size immediately.
     auto settings = rt::appSettings();
     settings.beginGroup("workspace/last_session");
 
     QByteArray geo = settings.value("geometry").toByteArray();
     bool savedCollapsed = settings.value("navCollapsed", false).toBool();
-    int savedPage = static_cast<int>(Page::Projects); // default to Projects if no saved state
     if (!geo.isEmpty()) {
         restoreGeometry(geo);
-        // Restore dock layout while still inside the workspace group
-        if (m_timelineWorkspace)
-            m_timelineWorkspace->restoreDockLayout(settings);
-        // Restore the last active page so the user returns to where they left off.
-        savedPage = settings.value("activePage",
-                                    static_cast<int>(Page::Projects)).toInt();
-        if (savedPage < 0 || savedPage > static_cast<int>(Page::Export))
-            savedPage = static_cast<int>(Page::Projects);
     }
 
     settings.endGroup();
 
-    if (geo.isEmpty()) {
-        // No saved workspace — try the bundled default layout file.
-        // This ships with the installer so new users get the developer's
-        // panel arrangement (dock positions, sizes, tab order).
-        QString bundledLayout = QCoreApplication::applicationDirPath()
-            + QStringLiteral("/assets/default_layout.bin");
-        if (QFile::exists(bundledLayout)) {
-            spdlog::info("applyDefaultLayout: loading bundled layout from {}",
-                         bundledLayout.toStdString());
-            restoreWorkspaceFromFile(bundledLayout);
-            // Always start on the PROJECTS page regardless of saved state
-            setCurrentPage(Page::Projects);
-        } else {
-            // No saved or bundled layout — reset the timeline workspace to its
-            // programmatic default dock arrangement so panels aren't scattered.
-            if (m_timelineWorkspace)
-                m_timelineWorkspace->resetToDefaultDockLayout();
-            // Always start on the PROJECTS tab
-            setCurrentPage(Page::Projects);
-        }
-    } else {
-        // Geometry was restored from saved session — always start on Projects
-        setCurrentPage(Page::Projects);
-    }
+    // ── Load the canonical default layout ───────────────────────────────
+    // Always set the dock layout to the USE_AS_DEFAULT preset (if it exists)
+    // or the bundled/programmatic default.  The last_session dock layout is
+    // intentionally NOT restored here — it may contain corrupt closedDocks
+    // data from previous sessions.  The canonical default (USE_AS_DEFAULT)
+    // should be the baseline for the "no project" state.  When a project is
+    // opened later, its own saved workspace (project/xxx) overrides this.
+    if (m_timelineWorkspace)
+        m_timelineWorkspace->resetToDefaultDockLayout();
+
+    // Always start on the PROJECTS page
+    setCurrentPage(Page::Projects);
 
     // Defer sidebar collapse until after the window is shown and laid out.
-    // toggleNavRail() measures button positions (m_navButtons[1]->y() -
-    // m_navButtons[0]->y()) to compute compact button height.  Before the
-    // window is shown, geometry is zero/invalid, producing wrong sizes.
     if (savedCollapsed != m_navCollapsed) {
         QTimer::singleShot(0, this, [this]() {
             toggleNavRail();
@@ -1309,12 +1304,16 @@ bool MainWindow::restoreWorkspace(const QString& name)
     if (savedCollapsed != m_navCollapsed)
         toggleNavRail();
 
-    // Restore the Timeline workspace dock layout
-    if (m_timelineWorkspace)
-        m_timelineWorkspace->restoreDockLayout(settings);
+    // NOTE: The Timeline dock layout is intentionally NOT restored here.
+    // The canonical default layout (USE_AS_DEFAULT preset) is always
+    // applied via resetToDefaultDockLayout() / applyDefaultLayout().
+    // Restoring a saved workspace's dock layout would override the
+    // user's preferred default arrangement with stale saved data.
+    // Project-specific dock layouts are not used — the panel arrangement
+    // is global, set by the USE_AS_DEFAULT preset for all projects.
 
     settings.endGroup();
-    spdlog::info("Workspace '{}' restored", name.toStdString());
+    spdlog::info("Workspace '{}' restored (dock layout skipped, using USE_AS_DEFAULT)", name.toStdString());
     return true;
 }
 

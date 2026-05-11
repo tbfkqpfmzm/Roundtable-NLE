@@ -97,11 +97,27 @@ void DockLayoutManager::save(QSettings& settings,
     // all docks appear hidden but most were open before maximize.
     // Skip closedDocks in that case so restoreState's own visibility
     // settings from the override state are honoured.
+    //
+    // CRITICAL: Only collect closed docks when the host widget is
+    // actually visible on screen.  QWidget::isVisible() traverses the
+    // entire parent chain — it returns false when ANY ancestor is
+    // hidden.  When the app closes while on a different page (e.g.
+    // Projects), the TimelineWorkspace (host) is not the current page
+    // in the QStackedWidget, so every dock reports isVisible()==false.
+    // Adding ALL docks to closedDocks causes the restored layout to
+    // have every dock hidden — the central widget (timeline panel)
+    // fills the entire workspace, appearing maximized.
     QStringList closedDocks;
     if (dockStateOverride.isEmpty()) {
-        for (auto it = m_cfg.dockWidgets->cbegin(); it != m_cfg.dockWidgets->cend(); ++it) {
-            if (it.value() && !it.value()->isVisible())
-                closedDocks << it.key();
+        bool hostVisible = m_cfg.hostWidget && m_cfg.hostWidget->isVisible();
+        if (hostVisible) {
+            for (auto it = m_cfg.dockWidgets->cbegin(); it != m_cfg.dockWidgets->cend(); ++it) {
+                if (it.value() && !it.value()->isVisible())
+                    closedDocks << it.key();
+            }
+        } else {
+            spdlog::info("saveDockLayout: host not visible, "
+                         "skipping closedDocks to avoid hiding all docks");
         }
     }
     settings.setValue("closedDocks", closedDocks);
@@ -170,6 +186,19 @@ bool DockLayoutManager::restore(QSettings& settings)
     }
 
     return applyState(state, edgeMeta, edgeColStates, savedSplitterSizes, floatingGeo, closedDocks);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// clearPendingState
+// ─────────────────────────────────────────────────────────────────────
+void DockLayoutManager::clearPendingState()
+{
+    m_pendingDockState.clear();
+    m_pendingEdgeColumns.clear();
+    m_pendingEdgeColStates.clear();
+    m_pendingSplitterSizes.clear();
+    m_pendingFloatingGeo.clear();
+    m_pendingClosedDocks.clear();
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -421,6 +450,17 @@ bool DockLayoutManager::applyState(const QByteArray& state,
     }
 
     // ── Ensure non-closed docks are visible ──────────────────────────
+    // Safety: if closedDocks contains ALL known docks, something went
+    // wrong during save (e.g. host was hidden so every dock reported
+    // isVisible()==false).  Ignore the closed list in that case so the
+    // layout doesn't appear maximized with all panels invisible.
+    if (!m_closedDockNames.isEmpty() &&
+        m_closedDockNames.size() >= m_cfg.dockWidgets->size()) {
+        spdlog::warn("restoreDockLayout: ALL {} docks in closedDocks "
+                     "— ignoring closedDocks (likely corrupt save)",
+                     m_closedDockNames.size());
+        m_closedDockNames.clear();
+    }
     for (auto it = m_cfg.dockWidgets->cbegin(); it != m_cfg.dockWidgets->cend(); ++it) {
         QDockWidget* dock = it.value();
         if (!dock) continue;

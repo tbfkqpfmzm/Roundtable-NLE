@@ -73,14 +73,34 @@ std::string timestampHuman() { return formatTimestamp("%Y-%m-%d %H:%M:%S"); }
 
 // ── Crash log writer ────────────────────────────────────────────────────────
 
+/// Low-level crash log append using Win32 WriteFile.
+/// Avoids std::ofstream heap allocations which can fail in a corrupted heap.
+void appendCrashLogRaw(const std::filesystem::path& logPath, const std::string& msg)
+{
+    HANDLE hFile = CreateFileW(
+        logPath.wstring().c_str(),
+        FILE_APPEND_DATA,
+        FILE_SHARE_READ,
+        nullptr,
+        OPEN_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (hFile == INVALID_HANDLE_VALUE)
+        return;
+    SetFilePointer(hFile, 0, nullptr, FILE_END);
+    DWORD written = 0;
+    WriteFile(hFile, msg.data(), static_cast<DWORD>(msg.size()), &written, nullptr);
+    FlushFileBuffers(hFile);
+    CloseHandle(hFile);
+}
+
+/// Build a timestamped crash log line and write it via the low-level path.
 void appendCrashLog(const std::filesystem::path& logPath, const std::string& msg)
 {
     try {
         std::filesystem::create_directories(logPath.parent_path());
-        std::ofstream ofs(logPath, std::ios::app);
-        if (ofs.is_open()) {
-            ofs << "[" << timestampHuman() << "] " << msg << "\n";
-        }
+        std::string line = "[" + timestampHuman() + "] " + msg + "\n";
+        appendCrashLogRaw(logPath, line);
     } catch (...) {
         // Best effort — we're in a crash handler, can't throw.
     }
@@ -171,6 +191,16 @@ bool writeMiniDump(const std::filesystem::path& dumpPath,
     return result != FALSE;
 }
 
+/// Call a noexcept-ish callback inside SEH __try/__except so that an AV
+/// inside the callback doesn't kill the crash handler.  This is a free
+/// function (no C++ try/catch) so MSVC won't complain about mixing SEH
+/// with C++ EH in the caller.
+template <typename Fn>
+inline void sehCall(Fn&& fn)
+{
+    __try { fn(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
 LONG WINAPI crashExceptionFilter(EXCEPTION_POINTERS* exInfo)
 {
     auto& s = state();
@@ -206,48 +236,42 @@ LONG WINAPI crashExceptionFilter(EXCEPTION_POINTERS* exInfo)
         info.summary = "Unhandled exception (no exception record available)";
     }
 
-    // 1. Attempt emergency auto-save
-    if (s.emergencySave) {
-        try {
-            s.emergencySave();
-        } catch (...) {
-            // Swallow — we're crashing, can't propagate.
-        }
-    }
-
-    // 2. Write minidump
+    // ── Prepare paths ─────────────────────────────────────────────────────
     std::filesystem::path dumpDir = s.crashDir;
     try {
         std::filesystem::create_directories(dumpDir);
     } catch (...) {
     }
-
-    auto dumpPath = dumpDir / ("crash_" + timestamp() + ".dmp");
-    if (writeMiniDump(dumpPath, exInfo)) {
-        info.dumpFilePath = dumpPath;
-    }
-
-    // 3. Write crash log
     auto logPath = dumpDir / "crash_log.txt";
     info.logFilePath = logPath;
+
+    // 1. Attempt emergency auto-save (SEH-protected via helper)
+    if (s.emergencySave) {
+        sehCall([&] { s.emergencySave(); });
+    }
+
+    // 2. Write crash log FIRST (before minidump — if MiniDumpWriteDump
+    //    crashes with a nested exception the process dies immediately).
     appendCrashLog(logPath, info.summary);
+
+    // 3. Write minidump (SEH-protected via helper)
+    auto dumpPath = dumpDir / ("crash_" + timestamp() + ".dmp");
+    {
+        bool dumpOk = false;
+        sehCall([&] { dumpOk = writeMiniDump(dumpPath, exInfo); });
+        if (dumpOk)
+            info.dumpFilePath = dumpPath;
+    }
     if (!info.dumpFilePath.empty()) {
         appendCrashLog(logPath, "  Dump written: " + info.dumpFilePath.string());
     }
 
-    // 3b. Capture and write stack trace
+    // 4. Capture and write stack trace (SEH-protected via helper)
     {
-        SymInitialize(GetCurrentProcess(), NULL, TRUE);
+        sehCall([&] { SymInitialize(GetCurrentProcess(), NULL, TRUE); });
+
         void* stack[64] = {};
         WORD frames = CaptureStackBackTrace(0, 64, stack, NULL);
-
-        struct SymbolInfo {
-            SYMBOL_INFO base;
-            char name[256];
-        };
-        SymbolInfo sym{};
-        sym.base.SizeOfStruct = sizeof(SYMBOL_INFO);
-        sym.base.MaxNameLen   = 255;
 
         for (WORD i = 0; i < frames; ++i) {
             DWORD64 addr = (DWORD64)(stack[i]);
@@ -259,25 +283,35 @@ LONG WINAPI crashExceptionFilter(EXCEPTION_POINTERS* exInfo)
                 GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                 (LPCSTR)stack[i], &hm);
 
+            std::string symName;
+            sehCall([&] {
+                struct SymbolInfo {
+                    SYMBOL_INFO base;
+                    char name[256];
+                };
+                SymbolInfo sym{};
+                sym.base.SizeOfStruct = sizeof(SYMBOL_INFO);
+                sym.base.MaxNameLen   = 255;
+                if (SymFromAddr(GetCurrentProcess(), addr, NULL, &sym.base))
+                    symName = sym.base.Name;
+            });
+
             std::ostringstream oss;
             oss << "  [" << i << "] 0x" << std::hex << addr;
-            if (SymFromAddr(GetCurrentProcess(), addr, NULL, &sym.base))
-                oss << " " << sym.base.Name;
+            if (!symName.empty())
+                oss << " " << symName;
             if (!mn.empty() && hm)
                 oss << " (" << mn << "+0x" << std::hex << (addr - (DWORD64)hm) << ")";
             appendCrashLog(logPath, oss.str());
         }
-        SymCleanup(GetCurrentProcess());
+        sehCall([&] { SymCleanup(GetCurrentProcess()); });
     }
 
     s.lastCrashInfo = info;
 
-    // 4. Post-crash callback
+    // 5. Post-crash callback (SEH-protected via helper)
     if (s.postCrash) {
-        try {
-            s.postCrash(info);
-        } catch (...) {
-        }
+        sehCall([&] { s.postCrash(info); });
     }
 
     // Terminate immediately — we already wrote our own dump and log.

@@ -12,7 +12,6 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
-#include <QListWidget>
 #include <QListView>
 #include <QPushButton>
 #include <QVBoxLayout>
@@ -47,24 +46,31 @@ void BackgroundDownloadPanel::setupUI()
     layout->addWidget(m_searchEdit);
 
     // ── Thumbnail grid (takes all available space) ──────────────────────
-    m_backgroundGrid = new QListWidget;
+    m_backgroundGrid = new BackgroundGridWidget;
     m_backgroundGrid->setObjectName("BackgroundGrid");
     m_backgroundGrid->setViewMode(QListView::IconMode);
     m_backgroundGrid->setIconSize(QSize(96, 96));
     m_backgroundGrid->setGridSize(QSize(120, 130));
     m_backgroundGrid->setWordWrap(true);
     m_backgroundGrid->setSpacing(4);
-    m_backgroundGrid->setSelectionMode(QAbstractItemView::NoSelection);
-    m_backgroundGrid->setDragEnabled(false);
+    m_backgroundGrid->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_backgroundGrid->setDragEnabled(true);
+    m_backgroundGrid->setDragDropMode(QAbstractItemView::DragOnly);
     m_backgroundGrid->setResizeMode(QListView::Adjust);
     m_backgroundGrid->setStyleSheet(QStringLiteral(
         "QListWidget { background: %1; border: 1px solid %2; border-radius: %3px; }"
         "QListWidget::item { padding: 4px; border-radius: 4px; }"
-        "QListWidget::item:hover { background: %4; }")
+        "QListWidget::item:hover { background: %4; }"
+        "QListWidget::item:selected { border: 1px solid %5; background: %6; }")
         .arg(Theme::rgb(c.surface0), Theme::rgb(c.border),
              QString::number(Theme::metrics().radiusMd),
-             Theme::rgb(c.surface2)));
+             Theme::rgb(c.surface2),
+             Theme::rgb(c.accent),
+             Theme::rgb(c.accentDim)));
     layout->addWidget(m_backgroundGrid, 1);
+    // Forward double-click from the grid widget to the panel signal
+    connect(m_backgroundGrid, &BackgroundGridWidget::backgroundActivated,
+            this, &BackgroundDownloadPanel::backgroundActivated);
 
     // ── Status label ─────────────────────────────────────────────────────
     m_statusLabel = new QLabel(QStringLiteral("No backgrounds found yet"));

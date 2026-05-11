@@ -73,13 +73,23 @@ ProgramMonitor::ProgramMonitor(QWidget* parent)
 
 ProgramMonitor::~ProgramMonitor()
 {
+    // Set the atomic flag FIRST so the present callback and presentFrame()
+    // can bail out immediately instead of accessing freed memory.
+    // The callback lambda captures `this`, so without this guard the
+    // presenter thread can call into a partially-destroyed ProgramMonitor
+    // even after setPresentCallback(nullptr) — std::function assignment
+    // is not atomic and the presenter may already hold a copy of the old
+    // function object.
+    m_destroying.store(true, std::memory_order_release);
+
     if (m_pipeline) {
-        // Clear callbacks FIRST — the presenter thread captures 'this' and
-        // can emit signals after our QObject base is partially destroyed,
-        // causing ACCESS_VIOLATION via stale QMetaCallEvent delivery.
+        // Stop pipeline threads BEFORE clearing callbacks.  stop() joins
+        // all threads, guaranteeing no more callbacks will fire.
+        m_pipeline->stop();
+
+        // Now it's safe to clear callbacks (no threads left to call them).
         m_pipeline->setPresentNotify(nullptr);
         m_pipeline->setPresentCallback(nullptr);
-        m_pipeline->stop();  // joins threads — no more callbacks after this
     }
 }
 

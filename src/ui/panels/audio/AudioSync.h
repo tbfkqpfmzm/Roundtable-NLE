@@ -75,6 +75,7 @@ public:
 
     void setAudioPath(const std::string& path) { m_audioPath = path; }
     void setLanguage(const std::string& lang)   { m_language = lang; }
+    void setModelSize(WhisperModelSize size)    { m_modelSize = size; }
 
     /// Access the result after finished(true).
     [[nodiscard]] const TranscriptionResult& result() const { return m_result; }
@@ -91,6 +92,7 @@ private:
     Transcriber* m_transcriber;
     std::string  m_audioPath;
     std::string  m_language;
+    WhisperModelSize m_modelSize{WhisperModelSize::Base};
     TranscriptionResult m_result;
 };
 
@@ -210,6 +212,10 @@ public:
 
     /// Get character names from the loaded script.
     [[nodiscard]] QStringList scriptCharacters() const;
+
+    /// Return the subset of script characters that have no default shot configured.
+    /// Characters are checked via ShotPresetManager::resolveDefaultShot.
+    [[nodiscard]] QStringList missingDefaultShots() const;
 
     /// Export confirmed clips to a Timeline as AudioClips (back-to-back).
     /// Ported from Python _export_timeline(). Returns number of clips exported.

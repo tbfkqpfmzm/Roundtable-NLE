@@ -1186,6 +1186,24 @@ void TimelineWorkspace::buildPanels()
 
         m_playbackController->onPlayStarting = [this](int64_t startTick) {
             if (m_programMonitor) {
+                // Defer prewarm if background media loading is still active.
+                // The compositor evaluates clip keyframes (opacity, position,
+                // etc.) during compositeFrame; racing with timeline population
+                // from background threads causes use-after-free ACCESS_VIOLATION
+                // crashes in Keyframe<float> vector iteration.
+                if (isBackgroundWarmupActive()) {
+                    spdlog::info("playback start deferred — background warmup still in progress");
+                    // Schedule a retry after a short delay, once warmup completes.
+                    QTimer::singleShot(100, this, [this, startTick]() {
+                        if (!isBackgroundWarmupActive() && m_programMonitor) {
+                            prewarmPlaybackResources(startTick,
+                                                     m_programMonitor->compositeWidth(),
+                                                     m_programMonitor->compositeHeight());
+                            m_programMonitor->requestPlaybackPreroll(startTick);
+                        }
+                    });
+                    return;
+                }
                 prewarmPlaybackResources(startTick,
                                          m_programMonitor->compositeWidth(),
                                          m_programMonitor->compositeHeight());

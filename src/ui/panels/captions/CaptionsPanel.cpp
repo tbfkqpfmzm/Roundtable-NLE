@@ -372,7 +372,15 @@ void CaptionsPanel::onTextChanged()
  [cc, oldText, self]() { cc->setText(oldText); self->refresh(); }));
  }
 
- // Update list item text inline
+ // Update list item text inline.
+ // Use the captured row index instead of currentItem() to avoid a
+ // dangling-pointer crash: QTextEdit::textChanged is emitted during
+ // key-press processing (inside QTextDocumentPrivate::finishEdit),
+ // and Qt delivers signals synchronously.  If the QListWidget item
+ // was destroyed between the initial row lookup and this update
+ // (e.g. via re-entrant refresh from a nested signal), currentItem()
+ // would return a freed pointer.  item(row) is NULL-safe when the
+ // row is out of range.
  m_updatingUI = true;
  QString tc_in = ticksToTimecode(cc->timelineIn());
  QString text = m_textEdit->toPlainText();
@@ -383,8 +391,10 @@ void CaptionsPanel::onTextChanged()
  label = QString("[%1] %2 %3").arg(tc_in, speaker, text);
  else
  label = QString("[%1] %2").arg(tc_in, text);
- if (auto* item = m_captionList->currentItem())
- item->setText(label);
+ if (row >= 0 && row < m_captionList->count()) {
+     if (auto* item = m_captionList->item(row))
+         item->setText(label);
+ }
  m_updatingUI = false;
 
  emit captionEdited();
@@ -413,7 +423,9 @@ void CaptionsPanel::onSpeakerChanged()
  [cc, oldSpeaker, self]() { cc->setSpeaker(oldSpeaker); self->refresh(); }));
  }
 
- // Update list item text inline
+ // Update list item text inline.
+ // Use captured row index (not currentItem()) to avoid dangling pointer
+ // — see onTextChanged() for rationale.
  m_updatingUI = true;
  QString tc_in = ticksToTimecode(cc->timelineIn());
  QString text = QString::fromStdString(cc->text());
@@ -424,8 +436,10 @@ void CaptionsPanel::onSpeakerChanged()
  label = QString("[%1] %2 %3").arg(tc_in, speaker, text);
  else
  label = QString("[%1] %2").arg(tc_in, text);
- if (auto* item = m_captionList->currentItem())
- item->setText(label);
+ if (row >= 0 && row < m_captionList->count()) {
+     if (auto* item = m_captionList->item(row))
+         item->setText(label);
+ }
  m_updatingUI = false;
 
  emit captionEdited();

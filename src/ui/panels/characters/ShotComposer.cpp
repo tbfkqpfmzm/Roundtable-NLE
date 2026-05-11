@@ -645,6 +645,7 @@ bool ShotComposer::saveCurrentShot()
         // Generate & persist a thumbnail PNG next to the preset JSON
         saveShotThumbnail(m_currentShot);
         refreshShotList();
+        refreshLayerList();
         spdlog::info("ShotComposer: Saved shot '{}'", m_currentShot.name());
     }
     return ok;

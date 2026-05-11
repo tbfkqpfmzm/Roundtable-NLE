@@ -294,6 +294,10 @@ void AudioSync::restoreProjectState(const QString& projectName)
         if (!targetKey.empty()) {
             restoreSession(targetKey);
 
+            // Load audio samples FIRST so waveforms appear in the list items
+            if (!m_audioPaths.empty())
+                loadAudioSamples();
+
             // Build audio file list UI
             if (m_audioFileList) {
                 m_audioFileList->blockSignals(true);
@@ -307,9 +311,6 @@ void AudioSync::restoreProjectState(const QString& projectName)
             if (m_audioStatus)
                 m_audioStatus->setText(m_audioPaths.empty() ? "No files imported"
                     : QString("%1 file(s)").arg(m_audioPaths.size()));
-
-            if (!m_audioPaths.empty())
-                loadAudioSamples();
         }
 
         // Rebuild transcription results for each session
@@ -767,6 +768,12 @@ void AudioSync::deserializeFromBlob(const std::vector<uint8_t>& blob)
         if (!targetKey.empty()) {
             restoreSession(targetKey);
 
+            // Load audio samples FIRST so waveforms appear in the list items
+            if (!m_audioPaths.empty()) {
+                loadAudioSamples();
+                m_audioImported = true;
+            }
+
             // Build audio file list UI for restored paths
             if (m_audioFileList) {
                 m_audioFileList->blockSignals(true);
@@ -780,12 +787,6 @@ void AudioSync::deserializeFromBlob(const std::vector<uint8_t>& blob)
             if (m_audioStatus)
                 m_audioStatus->setText(m_audioPaths.empty() ? "No files imported"
                     : QString("%1 file(s)").arg(m_audioPaths.size()));
-
-            // Load audio samples for the restored audio paths
-            if (!m_audioPaths.empty()) {
-                loadAudioSamples();
-                m_audioImported = true;
-            }
         }
 
         // Rebuild transcription results from clips for each session

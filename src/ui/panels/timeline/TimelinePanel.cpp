@@ -409,7 +409,10 @@ void TimelinePanel::rebuildTracks()
             spdlog::info("[LIFECYCLE] TrackWidget {} disconnect() returned {}", (void*)widget, disconnected);
         }
     }
-    QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+    // NOTE: Do NOT call processEvents() here.  During loading, pending
+    // paint/signal events could be delivered to disabled/disconnected
+    // widgets and trigger re-entrant calls into the partially torn-down
+    // timeline, causing use-after-free crashes.
     for (size_t i = 0; i < m_trackHeaders.size(); ++i) {
         auto* header = m_trackHeaders[i];
         if (header) {
@@ -1133,6 +1136,16 @@ void TimelinePanel::setAnimVideoCache(const AnimationVideoCache* cache)
 
 void TimelinePanel::resizeEvent(QResizeEvent* event)
 {
+    // Guard against resize → layout → paint → resize recursion during
+    // initial dock arrangement.  If the QSplitter triggers another resize
+    // while we're already handling one, skip it to avoid infinite loops.
+    static thread_local bool s_inResize = false;
+    if (s_inResize) {
+        QWidget::resizeEvent(event);
+        return;
+    }
+    s_inResize = true;
+
     QWidget::resizeEvent(event);
     if (!m_splitterInitialized && m_headerSplitter && m_headerSplitter->width() > 0) {
         m_splitterInitialized = true;
@@ -1150,6 +1163,8 @@ void TimelinePanel::resizeEvent(QResizeEvent* event)
     m_layoutEngine.setViewportWidth(m_ruler->width());
     m_scrollBar->update();
     m_ruler->update();
+
+    s_inResize = false;
 }
 
 void TimelinePanel::wheelEvent(QWheelEvent* event)
@@ -1269,6 +1284,16 @@ void TimelinePanel::updatePlayheadOverlay()
 
 void TimelinePanel::paintEvent(QPaintEvent* event)
 {
+    // ── Paint recursion guard ─────────────────────────────────────────
+    // Detect paint → layout → repaint loops caused by QSplitter + dock
+    // widget interactions during startup.  If we re-enter paintEvent
+    // more than 5 times without returning, bail out.
+    static thread_local int s_paintDepth = 0;
+    if (++s_paintDepth > 5) {
+        --s_paintDepth;
+        return;
+    }
+
     QWidget::paintEvent(event);
 
     // Ghost track overlay is now handled by GhostTrackOverlay widget (m_ghostOverlay)
@@ -1278,6 +1303,8 @@ void TimelinePanel::paintEvent(QPaintEvent* event)
     // (so they render ON TOP of clip content, not underneath child widgets).
     // Marquee selection is handled by QRubberBand overlay (not painted here).
     // Effect drag highlight is also rendered by TimelineTrackWidget (z-order).
+
+    --s_paintDepth;
 }
 
 // Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â

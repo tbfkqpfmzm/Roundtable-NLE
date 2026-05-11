@@ -264,7 +264,10 @@ void ExportPanel::showEvent(QShowEvent* event)
         }
     }
 
-    refreshPreview();
+    // Defer refreshPreview to the next event-loop iteration to avoid
+    // triggering GPU composition + widget state changes synchronously
+    // during a show event (which can happen during QDialog::exec event loops).
+    QTimer::singleShot(0, this, [this]() { refreshPreview(); });
     // Grab keyboard focus so Space/Left/Right/I/O work immediately
     // without requiring the user to click in the panel first.
     setFocus(Qt::OtherFocusReason);
@@ -357,7 +360,24 @@ void ExportPanel::keyPressEvent(QKeyEvent* event)
 
 void ExportPanel::refreshPreview()
 {
-    if (!m_previewImageLabel || !m_timeline) return;
+    // Re-entrancy guard: prevent recursive paint cycles when refreshPreview
+    // is triggered during paint event processing (e.g. during QDialog::exec).
+    if (m_refreshing) {
+        spdlog::warn("ExportPanel::refreshPreview: re-entrancy detected, skipping");
+        return;
+    }
+    m_refreshing = true;
+
+    // Skip GPU compositing when a modal dialog is active (QDialog::exec
+    // event loop).  The GPU compositing + QPixmap::setPixmap cascade
+    // during nested event loops exhausts the C++ heap.  The existing
+    // preview remains on screen, which is fine — the user is in a dialog.
+    if (QApplication::activeModalWidget() != nullptr) {
+        m_refreshing = false;
+        return;
+    }
+
+    if (!m_previewImageLabel || !m_timeline) { m_refreshing = false; return; }
     spdlog::info("ExportPanel::refreshPreview starting");
 
     // Update mini timeline with sequence info
@@ -418,6 +438,7 @@ void ExportPanel::refreshPreview()
 
     if (!m_previewCallback) {
         m_previewImageLabel->setText("No preview available");
+        m_refreshing = false;
         return;
     }
 
@@ -461,6 +482,8 @@ void ExportPanel::refreshPreview()
     } else {
         m_previewImageLabel->setText("No clips at playhead");
     }
+
+    m_refreshing = false;
 }
 
 void ExportPanel::populatePresets()

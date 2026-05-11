@@ -36,13 +36,16 @@ void PropertiesPanel::applySpineCharacter()
     if (newVal.empty()) newVal = m_characterCombo->currentText().toStdString();
     if (newVal == sc->characterName()) return;
     auto oldVal = sc->characterName();
+    auto oldLabel = sc->label();
+    auto newLabel = newVal + " - " + sc->animationName();
     if (m_commandStack) {
         m_commandStack->execute(std::make_unique<LambdaCommand>(
             "Change character",
-            [sc, newVal, this]() { sc->setCharacterName(newVal); populateFromClip(); emit propertyChanged(); },
-            [sc, oldVal, this]() { sc->setCharacterName(oldVal); populateFromClip(); emit propertyChanged(); }));
+            [sc, newVal, newLabel, this]() { sc->setCharacterName(newVal); sc->setLabel(newLabel); populateFromClip(); emit propertyChanged(); },
+            [sc, oldVal, oldLabel, this]() { sc->setCharacterName(oldVal); sc->setLabel(oldLabel); populateFromClip(); emit propertyChanged(); }));
     } else {
         sc->setCharacterName(newVal);
+        sc->setLabel(newLabel);
         emit propertyChanged();
     }
 }
@@ -148,6 +151,8 @@ void PropertiesPanel::applySpineAnimation()
         auto oldMute = vc->videoMutePath();
         auto oldTalk = vc->videoTalkPath();
         auto oldMedia = vc->mediaPath();
+        auto oldLabel = vc->label();
+        auto newLabel = vc->characterName() + " - " + newAnim;
         namespace fs = std::filesystem;
         std::string outfit = vc->outfit().empty() ? "default" : vc->outfit();
         std::string ext = fs::path(vc->mediaPath()).extension().string();
@@ -160,21 +165,23 @@ void PropertiesPanel::applySpineAnimation()
         if (m_commandStack) {
             m_commandStack->execute(std::make_unique<LambdaCommand>(
                 "Change animation",
-                [vc, newAnim, newMute, newTalk, newMedia, this]() {
+                [vc, newAnim, newMute, newTalk, newMedia, newLabel, this]() {
                     vc->setAnimationName(newAnim);
                     vc->setVideoMutePath(newMute);
                     vc->setVideoTalkPath(newTalk);
                     vc->setMediaPath(newMedia);
+                    vc->setLabel(newLabel);
                     m_updating = true;
                     m_animationCombo->setCurrentText(QString::fromStdString(newAnim));
                     m_updating = false;
                     emit propertyChanged();
                 },
-                [vc, oldAnim, oldMute, oldTalk, oldMedia, this]() {
+                [vc, oldAnim, oldMute, oldTalk, oldMedia, oldLabel, this]() {
                     vc->setAnimationName(oldAnim);
                     vc->setVideoMutePath(oldMute);
                     vc->setVideoTalkPath(oldTalk);
                     vc->setMediaPath(oldMedia);
+                    vc->setLabel(oldLabel);
                     m_updating = true;
                     m_animationCombo->setCurrentText(QString::fromStdString(oldAnim));
                     m_updating = false;
@@ -185,6 +192,7 @@ void PropertiesPanel::applySpineAnimation()
             vc->setVideoMutePath(newMute);
             vc->setVideoTalkPath(newTalk);
             vc->setMediaPath(newMedia);
+            vc->setLabel(newLabel);
             emit propertyChanged();
         }
         return;
@@ -195,18 +203,22 @@ void PropertiesPanel::applySpineAnimation()
     auto newVal = m_animationCombo->currentText().toStdString();
     if (newVal == sc->animationName()) return;
     auto oldVal = sc->animationName();
+    auto oldLabel = sc->label();
+    auto newLabel = sc->characterName() + " - " + newVal;
     if (m_commandStack) {
         m_commandStack->execute(std::make_unique<LambdaCommand>(
             "Change animation",
-            [sc, newVal, this]() {
+            [sc, newVal, newLabel, this]() {
                 sc->setAnimationName(newVal);
+                sc->setLabel(newLabel);
                 m_updating = true;
                 m_animationCombo->setCurrentText(QString::fromStdString(newVal));
                 m_updating = false;
                 emit propertyChanged();
             },
-            [sc, oldVal, this]() {
+            [sc, oldVal, oldLabel, this]() {
                 sc->setAnimationName(oldVal);
+                sc->setLabel(oldLabel);
                 m_updating = true;
                 m_animationCombo->setCurrentText(QString::fromStdString(oldVal));
                 m_updating = false;
@@ -214,6 +226,7 @@ void PropertiesPanel::applySpineAnimation()
             }));
     } else {
         sc->setAnimationName(newVal);
+        sc->setLabel(newLabel);
         emit propertyChanged();
     }
 }

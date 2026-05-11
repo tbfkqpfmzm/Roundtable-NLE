@@ -254,6 +254,15 @@ bool DockTitleBar::isTabbed() const
 
 void DockTitleBar::updateVisibility()
 {
+    // Re-entrancy guard: prevent infinite recursion if updateGeometry()
+    // triggered from within this function causes another layout pass that
+    // re-emits LayoutRequest/Show events back to this title bar.
+    if (m_updatingVisibility) {
+        spdlog::trace("DockTitleBar::updateVisibility: re-entrancy detected, skipping");
+        return;
+    }
+    m_updatingVisibility = true;
+
     m_tabbed = isTabbed();
     // Always show the title bar at full height.  When tabbed, Qt's tab
     // bar provides the drag handle, but DockTitleBar must STILL be
@@ -263,6 +272,8 @@ void DockTitleBar::updateVisibility()
     // Height is now dynamically managed by resizeEvent for Audio Meters.
     setVisible(true);
     updateGeometry();
+
+    m_updatingVisibility = false;
 }
 
 } // namespace rt

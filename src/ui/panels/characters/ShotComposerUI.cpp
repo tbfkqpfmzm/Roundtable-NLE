@@ -1222,11 +1222,22 @@ QWidget* ShotComposer::createLeftPanel()
     bgLayout->addWidget(btnAddBg);
 
     m_libraryTabs->addTab(bgTab, "Backgrounds");
-    // ---- Nikke BGs tab ----
+    // ---- Nikke BGs tab (supports double-click and drag just like Backgrounds tab) ----
     {
         auto* nikkeBgPanel = new BackgroundDownloadPanel(this);
         connect(nikkeBgPanel, &BackgroundDownloadPanel::backgroundsDownloaded,
                 this, &ShotComposer::refreshBackgroundLibrary);
+        // Double-click → add background to shot with full file path
+        connect(nikkeBgPanel, &BackgroundDownloadPanel::backgroundActivated,
+                this, [this](const QString& filePath) {
+            addBackground(filePath.toStdString());
+        });
+        // Ensure drag from the NikkeBKG grid also creates proper MIME data
+        // for the ShotComposer's eventFilter (which handles asset drops on
+        // the layer list and preview). The BackgroundGridWidget already
+        // provides application/x-roundtable-asset MIME in its mimeData().
+        nikkeBgPanel->backgroundGrid()->setDragEnabled(true);
+        nikkeBgPanel->backgroundGrid()->setDragDropMode(QAbstractItemView::DragOnly);
         m_libraryTabs->addTab(nikkeBgPanel, "NikkeBKG");
     }
 

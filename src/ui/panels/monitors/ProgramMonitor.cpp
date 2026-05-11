@@ -27,6 +27,7 @@
 #include <QStackedLayout>
 #include <QMenu>
 #include <QCursor>
+#include <QApplication>
 #include <QShowEvent>
 #include <QKeyEvent>
 #include <QFrame>
@@ -118,7 +119,7 @@ void ProgramMonitor::refresh()
 
 void ProgramMonitor::requestRefresh()
 {
-    m_lastRenderedTick = -1; // Force re-render on next poll cycle
+    m_lastRenderedTick = -1; // Force re-render
     m_lastRenderedFrame = -1;
     m_lastDirectFrame.reset(); // Clear stale playback frame
 
@@ -127,9 +128,74 @@ void ProgramMonitor::requestRefresh()
     // resolution — the user expects crisp display after an edit.
     m_editSettleCounter = 15;
 
-    // Do NOT call updateDisplay() — let the 60fps poll timer handle it.
-    // This keeps the calling thread (main/UI) unblocked so edits feel
-    // instant while the program monitor catches up within ≤16ms.
+    // Composite + present immediately so the Program Monitor reflects
+    // clip property changes, timeline edits, etc. without waiting for
+    // the next 16ms poll timer tick.  Without this, there is a window
+    // where the composite cache has been invalidated but the display
+    // hasn't caught up yet — the user sees stale content until the
+    // next poll cycle (or never, if the poll timer is delayed).
+    //
+    // The edit settle counter above ensures subsequent poll cycles
+    // also re-render (for late decodes, settling quality), providing
+    // defense-in-depth even if the first synchronous composite
+    // returns a partial or null frame.
+    updateDisplay();
+}
+
+void ProgramMonitor::resetViewState()
+{
+    spdlog::info("ProgramMonitor::resetViewState — recovering from corrupt preview state");
+
+    // 1. Reset render tracking so next poll produces a fresh frame.
+    m_lastRenderedTick = -1;
+    m_lastRenderedFrame = -1;
+    m_lastDirectFrame.reset();
+    m_scrubPending = false;
+    m_isScrubbing = false;
+    m_scrubSettleCounter = 0;
+    m_editSettleCounter = 15;
+    m_scrubSkipCounter = 0;
+    m_wallClockActive = false;
+
+    // 2. Re-verify the view stack index is correct for the active display path.
+    if (m_viewStack) {
+        int expectedIndex = (m_gpuDisplay && m_vulkanViewport) ? 1 : 0;
+        if (m_viewStack->currentIndex() != expectedIndex) {
+            spdlog::info("ProgramMonitor::resetViewState: correcting viewStack index {} -> {}",
+                         m_viewStack->currentIndex(), expectedIndex);
+            m_viewStack->setCurrentIndex(expectedIndex);
+        }
+    }
+
+    // 3. Clear any stale content from both viewports.
+    if (m_viewport)
+        m_viewport->clearFrame();
+    if (m_vulkanViewport)
+        m_vulkanViewport->clearFrame();
+
+    // 4. Hide the transform overlay — it may show stale guides/reticles
+    // from a previous selection that no longer applies after layout change.
+    if (m_transformOverlay) {
+        m_transformOverlay->clearTransformOverlay();
+        m_transformOverlay->hide();
+    }
+
+    // 5. Re-sync overlay geometry to ensure native HWND clipping is correct.
+    // This must happen AFTER the viewport is visible and has valid geometry.
+    QTimer::singleShot(0, this, [this]() {
+        syncOverlayGeometry();
+    });
+
+    // 6. Stop and restart the pipeline so stale queued frames are discarded.
+    if (m_pipeline && m_pipeline->isRunning()) {
+        m_pipeline->stop();
+    }
+
+    // 7. Force a full composite refresh on the next poll cycle.
+    // The poll timer must be running for this to take effect.
+    if (m_pollTimer && !m_pollTimer->isActive()) {
+        m_pollTimer->start(16);
+    }
 }
 
 void ProgramMonitor::requestPlaybackPreroll(int64_t tick)
@@ -239,6 +305,11 @@ void ProgramMonitor::initPipeline()
     // A/V sync, so the pipeline presenter must NOT touch the Vulkan viewport.
     m_pipeline->setPresentCallback(
         [this](const std::shared_ptr<CachedFrame>& frame) -> bool {
+            // If destruction has started, bail out immediately instead of
+            // accessing members of a partially-destroyed ProgramMonitor.
+            if (m_destroying.load(std::memory_order_acquire))
+                return false;
+
             if (m_controller && m_controller->isPlaying() && !usesAsyncPipelinePath())
                 return true;  // UI thread handles display during playback
 
@@ -270,6 +341,12 @@ void ProgramMonitor::initPipeline()
 
 bool ProgramMonitor::presentFrame(const std::shared_ptr<CachedFrame>& frame)
 {
+    // Bail out immediately if the destructor has started.  The presenter
+    // thread may still hold a reference to this lambda (captured `this`)
+    // after m_destroying is set; continuing would access freed members.
+    if (m_destroying.load(std::memory_order_acquire))
+        return false;
+
     if (!frame) return false;
 
     if (frame->width > 0) {
@@ -454,6 +531,12 @@ void ProgramMonitor::onScrub(int64_t tick)
 
     m_controller->seekTo(tick);
     updateDisplay();
+    // Set settle counter so subsequent poll cycles retry if the first
+    // composite returned a null/stale frame (cold decode cache after
+    // export, shot boundary, etc.).  Without this the poll timer dedup
+    // (tick == m_lastRenderedTick) skips rendering and the viewport
+    // stays frozen on whatever was last displayed.
+    notifyScrub();
     emit scrubbed(tick);
 }
 
@@ -506,6 +589,20 @@ void ProgramMonitor::onFitModeChanged(int index)
 void ProgramMonitor::updateDisplay()
 {
     if (!m_controller) return;
+
+    // Skip GPU compositing when a modal dialog is active (QDialog::exec
+    // event loop).  During modal dialogs, paint events still fire for
+    // widgets behind the dialog, causing repeated GPU compositing which
+    // rapidly exhausts the C++ heap and triggers std::bad_alloc crashes.
+    // The last-displayed frame remains on screen, which is fine since
+    // the user is interacting with the dialog, not the timeline.
+    if (QApplication::activeModalWidget() != nullptr) {
+        // Still update lightweight UI (timecode, playhead position) even
+        // when modal, so the display is ready when the dialog closes.
+        m_lastRenderedTick = -1; // force re-render when modal dismisses
+        updateTimecodeDisplay();
+        return;
+    }
 
     const bool playing = m_controller->isPlaying();
     const bool asyncPipeline = usesAsyncPipelinePath();
@@ -688,7 +785,25 @@ void ProgramMonitor::updateDisplay()
         updateShuttleLabel();
         return;
     }
-    m_lastRenderedTick = tick;
+
+    // ── Scrub composite throttle ────────────────────────────────────
+    // During scrubbing (including settle), composite only every 4th
+    // poll cycle (~15fps effective) to reduce GPU driver load.
+    // Lightweight UI (ruler, timecode, shuttle label) still updates
+    // at 60fps.  This prevents the NVIDIA driver stack overflow that
+    // occurs under rapid Vulkan resource churn from spine state
+    // recreation during sustained scrubbing.  15fps matches Premiere
+    // Pro and DaVinci Resolve scrub behavior — the user is moving
+    // too fast to perceive individual frames.
+    if (m_isScrubbing) {
+        if (++m_scrubSkipCounter % 4 != 0) {
+            updateTimecodeDisplay();
+            updateShuttleLabel();
+            return;
+        }
+    } else {
+        m_scrubSkipCounter = 0;
+    }
 
     // ── SYNC PATH: scrub / seek / paused ─────────────────────────────
     if (m_compositeCallback) {
@@ -711,9 +826,18 @@ void ProgramMonitor::updateDisplay()
             auto frame = m_compositeCallback(tick, vpW, vpH, useScrub);
             if (frame) {
                 presentFrame(frame);
-                if (frame->width > 0)
+                if (frame->width > 0) {
+                    m_lastRenderedTick = tick;
                     emit frameDisplayed(tick);
+                }
+                // width==0 means "clear viewport" — still lock tick so
+                // we don't spin trying to composite an empty position.
+                else {
+                    m_lastRenderedTick = tick;
+                }
             }
+            // frame == nullptr → do NOT update m_lastRenderedTick so the
+            // next poll cycle retries (fixes stale freeze after scrub).
         }
     }
 
@@ -748,6 +872,14 @@ void ProgramMonitor::showEvent(QShowEvent* event)
         QTimer::singleShot(50, this, [this]() {
             syncOverlayGeometry();
             refresh();
+        });
+    } else {
+        // On subsequent show events (e.g. the dock was hidden and reshown
+        // via workspace preset toggles), the viewport stack, overlay
+        // geometry, and native HWND clipping may be stale.  Recover by
+        // resetting the view state once the widget has valid geometry.
+        QTimer::singleShot(50, this, [this]() {
+            resetViewState();
         });
     }
 }

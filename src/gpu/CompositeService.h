@@ -88,6 +88,11 @@ public:
     /// Invalidate composite result LRU (thread-safe, lock-free flag).
     /// Also immediately clears m_lastGoodComposite so the contention
     /// fallback path in compositeFrame() doesn't return a stale frame.
+    /// Uses try_lock on m_compositeMutex to avoid deadlocking if the
+    /// producer thread is mid-composite (try_to_lock gives up instead
+    /// of blocking).  In that case the invalidation is deferred — the
+    /// compositeFrame() function checks m_cacheInvalidateRequested on
+    /// its next successful lock acquisition.
     void requestCacheInvalidation() {
         m_cacheInvalidateRequested.store(true, std::memory_order_release);
         {

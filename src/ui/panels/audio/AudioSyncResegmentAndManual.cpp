@@ -89,6 +89,7 @@ void AudioSync::mergeSegmentsToMatchScript()
         while (i < clipIndices.size()) {
             size_t ci = clipIndices[i];
             const auto& clip = m_clips[ci];
+            if (clip.matchState == 2) { ++i; continue; } // preserve confirmed clips
             std::string clipText = norm(clip.editedText.empty() ? clip.transcript : clip.editedText);
 
             // Best single-clip score against any script line
@@ -107,7 +108,10 @@ void AudioSync::mergeSegmentsToMatchScript()
             for (size_t j = 1; j <= 10 && i + j < clipIndices.size(); ++j) {
                 size_t nextCi = clipIndices[i + j];
                 const auto& nextClip = m_clips[nextCi];
-
+                // Never merge into a confirmed (manually assigned) clip — doing so
+                // would destroy the user's manual match.
+                if (nextClip.matchState == 2)
+                    break;
                 // Merge if clips are close together Ã¢â‚¬â€ 2.5s gap tolerance for monologues
                 if (nextClip.start - m_clips[lastMergedIdx].end > 2.5)
                     break;
@@ -537,7 +541,7 @@ void AudioSync::openManualMatch(int lineNumber)
                     }
                 }
                 populateLeftList();
-                updateSmartBar();
+                updateWorkflowState(); // also sets m_syncDone + enables export when all confirmed
             });
         } else {
             QTimer::singleShot(0, this, [this]() {

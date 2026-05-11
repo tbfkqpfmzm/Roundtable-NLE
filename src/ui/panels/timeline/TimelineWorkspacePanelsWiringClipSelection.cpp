@@ -1123,6 +1123,8 @@ void TimelineWorkspace::wireClipSelectionSignals() {
                 this, [this]() {
             invalidateCompositeCache();
 #ifdef ROUNDTABLE_HAS_SPINE
+            // Refresh timeline track widgets so clip label changes are visible
+            if (m_timelinePanel) m_timelinePanel->refreshTrackContents();
             // Spine character/outfit changes may require reloading the engine
             if (m_compositeService && m_selectedClip && m_selectedClip->clipType() == ClipType::Spine) {
                 auto* spineClip = dynamic_cast<SpineClip*>(m_selectedClip);

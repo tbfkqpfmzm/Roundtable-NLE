@@ -263,6 +263,11 @@ private:
     std::shared_ptr<CachedFrame> pipelineComposite(
         int64_t tick, int64_t nextTick,
         uint32_t w, uint32_t h, bool scrub);
+
+    /// Guards against recursive re-entry into refreshPreview() which can
+    /// cause infinite paint recursion and stack overflow (crash pattern
+    /// seen with QDialog::exec during paint events).
+    bool m_refreshing{false};
 };
 
 } // namespace rt

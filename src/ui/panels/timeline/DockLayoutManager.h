@@ -57,6 +57,11 @@ public:
     /// True when there is deferred state waiting for the next showEvent.
     [[nodiscard]] bool hasPendingState() const noexcept { return !m_pendingDockState.isEmpty(); }
 
+    /// Discard any deferred dock state so it is NOT applied on the next
+    /// showEvent.  Used when a default layout reset takes priority over
+    /// stale saved data.
+    void clearPendingState();
+
     /// Names of docks the user intentionally closed.
     [[nodiscard]] const QSet<QString>& closedDockNames() const noexcept { return m_closedDockNames; }
 

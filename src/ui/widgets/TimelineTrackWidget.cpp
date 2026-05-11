@@ -610,14 +610,13 @@ void TimelineTrackWidget::paintClip(QPainter& painter, size_t clipIndex)
         }
     }
 
-    // Override Spine clip color if the animation is pre-rendered (cached)
+    // Check if Spine animation is pre-rendered (cached) — used for VID/LIVE badge only,
+    // not for color (all Spine clips keep the same color regardless of cache status).
     bool isCachedSpine = false;
 #ifdef ROUNDTABLE_HAS_SPINE
     if (clip->clipType() == ClipType::Spine && m_animVideoCache) {
         auto* sc = static_cast<const SpineClip*>(clip);
         if (m_animVideoCache->hasVideo(sc->characterName(), sc->outfit(), sc->animationName())) {
-            style.fillColor   = tc.clipSpineCached;
-            style.borderColor = tc.clipSpineCached.lighter(130);
             isCachedSpine = true;
         }
     }

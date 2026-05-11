@@ -358,6 +358,9 @@ void MainWindow::buildWindowMenu(QMenuBar* menuBar)
                         if (auto* d = docks.value(raiseTab))
                             d->raise();
                     }
+                    // Recovery: refresh Program Monitor after dock visibility change
+                    if (auto* pm = m_timelineWorkspace->programMonitor())
+                        pm->resetViewState();
                     statusBar()->showMessage(
                         QString("Workspace applied"), 2000);
                 });
@@ -384,6 +387,21 @@ void MainWindow::buildWindowMenu(QMenuBar* menuBar)
             else
                 statusBar()->showMessage("No saved layout found", 2000);
             s.endGroup();
+            // Recovery: refresh Program Monitor after dock layout change
+            if (auto* pm = m_timelineWorkspace->programMonitor())
+                pm->resetViewState();
+        });
+
+        // ── Refresh Program Monitor ────────────────────────────────────
+        wsMenu->addAction("Refresh Program Monitor", this, [this]() {
+            if (!m_timelineWorkspace) return;
+            setCurrentPage(Page::Timeline);
+            if (auto* pm = m_timelineWorkspace->programMonitor()) {
+                pm->resetViewState();
+                statusBar()->showMessage("Program Monitor refreshed", 2000);
+            } else {
+                statusBar()->showMessage("Program Monitor not available", 2000);
+            }
         });
 
         wsMenu->addSeparator();
@@ -419,6 +437,9 @@ void MainWindow::buildWindowMenu(QMenuBar* menuBar)
                         s.beginGroup("WorkspacePresets/" + preset);
                         m_timelineWorkspace->restoreDockLayout(s);
                         s.endGroup();
+                        // Recovery: refresh Program Monitor after dock layout change
+                        if (auto* pm = m_timelineWorkspace->programMonitor())
+                            pm->resetViewState();
                         statusBar()->showMessage(
                             "Workspace '" + preset + "' loaded", 3000);
                     });

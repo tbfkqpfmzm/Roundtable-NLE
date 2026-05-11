@@ -314,7 +314,8 @@ int AudioSync::exportToTimeline(Timeline* timeline)
                         constexpr float kCharFit = 0.85f;
                         vClip->positionX().setDefaultValue((ch->posX - 0.5f) * chOutW);
                         vClip->positionY().setDefaultValue((ch->posY - 0.5f) * chOutH);
-                        vClip->scaleX().setDefaultValue(ch->scale * kCharFit);
+                        const float charScaleX = ch->flipX ? -ch->scale : ch->scale;
+                        vClip->scaleX().setDefaultValue(charScaleX * kCharFit);
                         vClip->scaleY().setDefaultValue(ch->scale * kCharFit);
                         vClip->opacity().setDefaultValue(ch->opacity);
                         if (ch->cropLeft > 0 || ch->cropRight > 0 || ch->cropTop > 0 || ch->cropBottom > 0)
@@ -341,7 +342,7 @@ int AudioSync::exportToTimeline(Timeline* timeline)
                         constexpr float spOutH = 1080.0f;
                         spClip->positionX().setDefaultValue((ch->posX - 0.5f) * spOutW);
                         spClip->positionY().setDefaultValue((ch->posY - 0.5f) * spOutH);
-                        spClip->scaleX().setDefaultValue(ch->scale);
+                        spClip->scaleX().setDefaultValue(ch->flipX ? -ch->scale : ch->scale);
                         spClip->scaleY().setDefaultValue(ch->scale);
                         spClip->opacity().setDefaultValue(ch->opacity);
                         if (ch->cropLeft > 0 || ch->cropRight > 0 || ch->cropTop > 0 || ch->cropBottom > 0)

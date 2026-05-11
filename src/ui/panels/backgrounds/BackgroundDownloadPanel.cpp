@@ -14,7 +14,9 @@
 #include <QIcon>
 #include <QImageReader>
 #include <QListWidgetItem>
+#include <QMouseEvent>
 #include <QPixmap>
+#include <QPixmapCache>
 #include <QShowEvent>
 #include <QUrl>
 
@@ -22,10 +24,56 @@
 
 namespace rt {
 
-// Shared statics — Timeline and Shot panels share file list + thumbnails
-QHash<QString, QIcon> BackgroundDownloadPanel::s_thumbnailCache;
+// Shared statics — Timeline and Shot panels share file list
 QSet<QString>         BackgroundDownloadPanel::s_sharedFileNames;
 bool                  BackgroundDownloadPanel::s_scanDone = false;
+
+// Cache key prefix for QPixmapCache entries
+static const QString kCacheKeyPrefix = QStringLiteral("nikke_thumb_");
+
+// ═════════════════════════════════════════════════════════════════════════════
+// BackgroundGridWidget — custom list widget supporting drag + double-click
+// ═════════════════════════════════════════════════════════════════════════════
+
+QMimeData* BackgroundGridWidget::mimeData(const QList<QListWidgetItem*>& items) const
+{
+    if (items.isEmpty()) return nullptr;
+    auto* item = items.first();
+    if (!item || !(item->flags() & Qt::ItemIsDragEnabled))
+        return nullptr;
+
+    const QString filePath = item->data(Qt::UserRole).toString();
+    if (filePath.isEmpty()) return nullptr;
+
+    QFileInfo fi(filePath);
+    const QString baseName = fi.completeBaseName();
+
+    auto* md = new QMimeData;
+
+    // Provide application/x-roundtable-asset for ShotComposer compatibility
+    QByteArray payload;
+    QDataStream ds(&payload, QIODevice::WriteOnly);
+    ds << QStringLiteral("background") << baseName;
+    md->setData("application/x-roundtable-asset", payload);
+
+    // Provide file URLs for Timeline / universal drop support
+    md->setUrls({QUrl::fromLocalFile(filePath)});
+
+    return md;
+}
+
+void BackgroundGridWidget::mouseDoubleClickEvent(QMouseEvent* event)
+{
+    QListWidget::mouseDoubleClickEvent(event);
+    auto* item = itemAt(event->pos());
+    if (item) {
+        const QString path = item->data(Qt::UserRole).toString();
+        if (!path.isEmpty())
+            emit backgroundActivated(path);
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 
 BackgroundDownloadPanel::BackgroundDownloadPanel(QWidget* parent)
     : QWidget(parent)
@@ -81,12 +129,18 @@ void BackgroundDownloadPanel::startPopulateGrid()
     m_batchQueue.sort();
     m_batchTotal = m_batchQueue.size();
 
+    // Build the full path prefix once
+    const QString dirPath = QString::fromLatin1(kTargetDir) + QStringLiteral("/");
+
     // Create all items upfront (no thumbnails yet — fast)
     for (const QString& name : m_batchQueue) {
         auto* item = new QListWidgetItem(name);
-        // Check shared cache first
-        if (s_thumbnailCache.contains(name))
-            item->setIcon(s_thumbnailCache.value(name));
+        // Store the full file path in UserRole for drag/double-click
+        item->setData(Qt::UserRole, dirPath + name);
+        // Check shared pixmap cache first (QPixmapCache avoids GPU resource lifetime issues)
+        QPixmap cached;
+        if (QPixmapCache::find(kCacheKeyPrefix + name, &cached))
+            item->setIcon(QIcon(cached));
         item->setForeground(tc.textSecondary);
         item->setToolTip(name);
         m_backgroundGrid->addItem(item);
@@ -95,7 +149,8 @@ void BackgroundDownloadPanel::startPopulateGrid()
     // Count how many thumbnails we still need
     int cached = 0;
     for (const QString& name : m_batchQueue) {
-        if (s_thumbnailCache.contains(name)) cached++;
+        QPixmap dummy;
+        if (QPixmapCache::find(kCacheKeyPrefix + name, &dummy)) cached++;
     }
 
     if (cached == m_batchTotal) {
@@ -111,7 +166,10 @@ void BackgroundDownloadPanel::startPopulateGrid()
     // Remove cached items from the batch queue
     m_batchQueue.erase(
         std::remove_if(m_batchQueue.begin(), m_batchQueue.end(),
-                       [](const QString& n) { return s_thumbnailCache.contains(n); }),
+                       [](const QString& n) {
+                           QPixmap dummy;
+                           return QPixmapCache::find(kCacheKeyPrefix + n, &dummy);
+                       }),
         m_batchQueue.end());
 
     setStatus(QStringLiteral("Loading thumbnails: %1/%2\u2026")
@@ -147,9 +205,8 @@ void BackgroundDownloadPanel::processBatch()
             // Try loading cached thumbnail first
             QPixmap cachedPix(thumbPath);
             if (!cachedPix.isNull()) {
-                QIcon icon(cachedPix);
-                item->setIcon(icon);
-                s_thumbnailCache[name] = icon;
+                item->setIcon(QIcon(cachedPix));
+                QPixmapCache::insert(kCacheKeyPrefix + name, cachedPix);
             } else {
                 // Decode at small size and save as cached thumbnail
                 QImageReader reader(path);
@@ -161,9 +218,9 @@ void BackgroundDownloadPanel::processBatch()
                     QDir().mkpath(QString::fromLatin1(kTargetDir) + QStringLiteral("/.thumbnails"));
                     img.save(thumbPath, "PNG");
 
-                    QIcon icon(QPixmap::fromImage(img));
-                    item->setIcon(icon);
-                    s_thumbnailCache[name] = icon;
+                    QPixmap thumbPix = QPixmap::fromImage(img);
+                    item->setIcon(QIcon(thumbPix));
+                    QPixmapCache::insert(kCacheKeyPrefix + name, thumbPix);
                 }
             }
         }
@@ -197,7 +254,7 @@ void BackgroundDownloadPanel::startWatching()
         s_scanDone = false; // force re-scan on next call
         scanLocalFiles();
         if (m_localFileNames != before) {
-            s_thumbnailCache.clear(); // files changed, invalidate all caches
+            QPixmapCache::clear(); // files changed, invalidate all caches
             startPopulateGrid();
             if (m_localFileNames.size() > 0)
                 emit backgroundsDownloaded();

@@ -190,6 +190,9 @@ void ProjectBin::importFiles()
 void ProjectBin::addFiles(const std::vector<std::filesystem::path>& files)
 {
     for (const auto& f : files) {
+        // Skip empty paths (synthetic items saved inadvertently)
+        if (f.empty())
+            continue;
         // Skip duplicates — Premiere Pro silently ignores re-imports
         if (m_grid->hasItem(f))
             continue;
@@ -546,8 +549,14 @@ std::vector<std::filesystem::path> ProjectBin::allFiles() const
     std::vector<std::filesystem::path> result;
     const auto& items = m_grid->items();
     result.reserve(items.size());
-    for (const auto& item : items)
+    for (const auto& item : items) {
+        // Skip synthetic items (sequences, bin folders) introduced by
+        // syncIconView() — they have empty file paths and saving them
+        // would create spurious "Unknown"-type entries on reload.
+        if (item.isFolder || item.filePath.empty())
+            continue;
         result.push_back(item.filePath);
+    }
     return result;
 }
 

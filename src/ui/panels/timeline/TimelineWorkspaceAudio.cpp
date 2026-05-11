@@ -25,6 +25,7 @@
 #endif
 
 #include <QTimer>
+#include <QApplication>
 #include <chrono>
 #include <map>
 #include <set>
@@ -195,7 +196,14 @@ void TimelineWorkspace::preOpenVideoMedia()
     // cheap, and the CompositeService map is populated there.
     auto* pool    = m_mediaPool;
     auto  pathMap = std::move(paths);
-    std::thread([pool, pathMap = std::move(pathMap)]() {
+
+    // Track that a background warmup thread is active so playback can be
+    // deferred until it completes.  This prevents use-after-free crashes
+    // when the compositor evaluates clip keyframes while the timeline is
+    // still being populated during project-open.
+    m_backgroundWarmupActive.fetch_add(1, std::memory_order_release);
+
+    std::thread([this, pool, pathMap = std::move(pathMap)]() {
         using namespace std::chrono;
         auto t0 = steady_clock::now();
         int loopWarmCount = 0;
@@ -236,6 +244,12 @@ void TimelineWorkspace::preOpenVideoMedia()
         auto ms = duration<double, std::milli>(steady_clock::now() - t0).count();
         spdlog::info("preOpenVideoMedia(bg): opened={} loopWarm={} headWarm={} in {:.0f}ms",
                      opened, loopWarmCount, headWarmCount, ms);
+
+        // Signal completion on the UI thread so isBackgroundWarmupActive()
+        // returns false and playback can proceed.
+        QMetaObject::invokeMethod(qApp, [this]() {
+            m_backgroundWarmupActive.fetch_sub(1, std::memory_order_release);
+        }, Qt::QueuedConnection);
     }).detach();
 }
 

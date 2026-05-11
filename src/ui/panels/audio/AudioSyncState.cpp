@@ -6,6 +6,7 @@
 #include "ai/ScriptMatcher.h"
 #include "command/CommandStack.h"
 #include "media/AudioEngine.h"
+#include "spine/ShotPreset.h"
 #include "widgets/MiniWaveformWidget.h"
 #include "Theme.h"
 
@@ -80,20 +81,62 @@ void AudioSync::updateWorkflowState()
     if (m_exportActionBtn)     m_exportActionBtn->setEnabled(m_syncDone);
 
     // Update the status label in the action bar
-    if (m_statusLabel) {
-        int confirmed = 0, total = 0;
-        if (m_script) {
-            total = static_cast<int>(m_script->lines.size());
-            std::unordered_set<int> confirmedLines;
-            for (const auto& clip : m_clips) {
-                if (clip.scriptLineNumber > 0 && clip.matchState == 2)
-                    confirmedLines.insert(clip.scriptLineNumber);
-            }
-            confirmed = static_cast<int>(confirmedLines.size());
+    int confirmed = 0, total = 0;
+    if (m_script) {
+        total = static_cast<int>(m_script->lines.size());
+        std::unordered_set<int> confirmedLines;
+        for (const auto& clip : m_clips) {
+            if (clip.scriptLineNumber > 0 && clip.matchState == 2)
+                confirmedLines.insert(clip.scriptLineNumber);
         }
-        m_statusLabel->setText(
-            total > 0 ? QString("%1 / %2 confirmed").arg(confirmed).arg(total) : QString());
+        confirmed = static_cast<int>(confirmedLines.size());
     }
+    if (m_statusLabel) {
+        QString statusText;
+        if (total > 0) {
+            statusText = QString("%1 / %2 confirmed").arg(confirmed).arg(total);
+            // When all confirmed, add default-shot advisory
+            if (confirmed >= total) {
+                QStringList missingDefault = missingDefaultShots();
+                if (!missingDefault.isEmpty()) {
+                    statusText += QStringLiteral(" \u2014 Set default shot(s) for %1 in Compose")
+                                      .arg(missingDefault.join(QStringLiteral(", ")));
+                }
+            }
+        }
+        m_statusLabel->setText(statusText);
+    }
+
+    // Enable export when all script lines have a confirmed clip, even if
+    // the user matched manually (without ever running auto-sync).
+    if (total > 0 && confirmed >= total && !m_syncDone) {
+        m_syncDone = true;
+    }
+    // Re-run enable/disable for buttons that weren't covered above.
+    // The export button stays enabled based on m_syncDone (set above) — the
+    // missing-default-shots warning is handled by the export handler dialog
+    // and the status label, so we don't gate the button here.
+    if (m_syncDone) {
+        if (m_confirmBtn)      m_confirmBtn->setEnabled(true);
+        if (m_confirmAllBtn)   m_confirmAllBtn->setEnabled(true);
+        if (m_confirmAllActionBtn) m_confirmAllActionBtn->setEnabled(true);
+        if (m_clearActionBtn)      m_clearActionBtn->setEnabled(true);
+        if (m_reviewGroup)     m_reviewGroup->setEnabled(true);
+    }
+}
+
+QStringList AudioSync::missingDefaultShots() const
+{
+    QStringList missing;
+    if (!m_shotPresetManager || !m_script) return missing;
+
+    for (const auto& character : m_script->characters) {
+        if (character.empty()) continue;
+        auto preset = m_shotPresetManager->resolveDefaultShot(character);
+        if (!preset)
+            missing.append(QString::fromStdString(character));
+    }
+    return missing;
 }
 
 void AudioSync::populateScriptList()

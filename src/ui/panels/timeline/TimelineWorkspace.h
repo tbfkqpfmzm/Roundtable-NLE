@@ -309,6 +309,15 @@ private:
     /// Warm active playback media/GPU resources before the first visible frame.
     void prewarmPlaybackResources(int64_t tick, uint32_t outW, uint32_t outH);
 
+    /// Whether background media warmup (preOpenVideoMedia thread) is still active.
+    /// Callers should gate playback start on this being false to avoid
+    /// use-after-free crashes during startup (Keyframe<float> iteration in
+    /// the compositor can race with timeline population).
+    [[nodiscard]] bool isBackgroundWarmupActive() const noexcept { return m_backgroundWarmupActive.load(std::memory_order_acquire); }
+
+    /// Number of background warmup threads still running.
+    std::atomic<int> m_backgroundWarmupActive{0};
+
 
 
 
@@ -380,6 +389,11 @@ public:
     /// Extracted so resetToDefaultDockLayout() can defer the work when
     /// the widget is not yet visible.
     void doResetToDefaultDockLayout();
+
+    /// Cancel a pending default layout reset.  Called when a saved
+    /// workspace is found during project open — the saved layout should
+    /// take priority over the USE_AS_DEFAULT preset.
+    void cancelPendingDefaultLayoutReset();
 
     /// Access the dock layout manager.
     [[nodiscard]] DockLayoutManager* dockLayoutManager() const noexcept;

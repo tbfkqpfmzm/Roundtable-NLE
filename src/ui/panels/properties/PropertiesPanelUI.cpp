@@ -357,10 +357,10 @@ void PropertiesPanel::setupTransformSection(QWidget* container)
     auto* scaleLabel = new QLabel("Scale", m_transformSection);
     scaleLabel->setStyleSheet(QStringLiteral("QLabel { color: %1; font-weight: bold; }")
         .arg(Theme::hex(Theme::colors().textPrimary)));
-    m_scaleXSpin = createScrubby(0.0, 1000.0, 0.1, 1);
-    m_scaleXSpin->setToolTip(tr("Horizontal scale percentage"));
-    m_scaleYSpin = createScrubby(0.0, 1000.0, 0.1, 1);
-    m_scaleYSpin->setToolTip(tr("Vertical scale percentage"));
+    m_scaleXSpin = createScrubby(-1000.0, 1000.0, 0.1, 1);
+    m_scaleXSpin->setToolTip(tr("Horizontal scale percentage (negative = flip horizontally)"));
+    m_scaleYSpin = createScrubby(-1000.0, 1000.0, 0.1, 1);
+    m_scaleYSpin->setToolTip(tr("Vertical scale percentage (negative = flip vertically)"));
     grid->addWidget(scaleLabel,            row, 0);
     grid->addWidget(makeAxisLabel("W"),    row, 1);
     grid->addWidget(m_scaleXSpin,          row, 2);

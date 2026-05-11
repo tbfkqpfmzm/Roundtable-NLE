@@ -36,6 +36,8 @@
 #include "QtHelpers.h"
 #include "panels/monitors/SourceMonitor.h"
 #include "panels/timeline/TimelinePanel.h"
+#include "panels/library/LibraryPanel.h"
+#include "panels/characters/CharactersPanel.h"
 
 // Core
 #include "command/CommandStack.h"
@@ -565,6 +567,11 @@ void MainWindow::onCreateProjectFromPanel(const QString& name, uint32_t resW, ui
     if (serializer.save(*project, path)) {
         spdlog::info("Project saved to: {}", path.string());
         setCurrentProject(std::move(project));
+        // Reset the Timeline dock layout to the canonical default
+        // (loads the "USE_AS_DEFAULT" workspace preset from QSettings)
+        // so new projects start with the correct panel arrangement.
+        if (m_timelineWorkspace)
+            m_timelineWorkspace->resetToDefaultDockLayout();
         addToRecentFiles(QString::fromStdString(path.string()));
         refreshProjectsList();
         statusBar()->showMessage(
@@ -638,9 +645,15 @@ void MainWindow::onOpenProjectFromPanel(const QString& name)
 
         spdlog::info("OPEN: calling restoreWorkspace");
         // Prefer the project's own saved layout; fall back to the last
-        // session snapshot for older projects that don't have one yet.
-        if (!restoreWorkspace("project/" + name))
-            restoreWorkspace("last_session");
+        // session snapshot.  If neither exists (new project / fresh install),
+        // call resetToDefaultDockLayout() which loads the user's
+        // "USE_AS_DEFAULT" workspace preset from QSettings.
+        if (!restoreWorkspace("project/" + name)
+            && !restoreWorkspace("last_session")) {
+            spdlog::info("OPEN: no saved workspace — resetting to default layout");
+            if (m_timelineWorkspace)
+                m_timelineWorkspace->resetToDefaultDockLayout();
+        }
 
         // Stay on the current tab (Projects) instead of restoring the
         // last active page for this project.
@@ -749,14 +762,40 @@ void MainWindow::onDeleteProjectFromPanel(const QString& name, const QString& fi
                 m_exportPanel->setProject(nullptr);
             }
 
-            // 8. Update UI state
+            // 8. Clear project bin items and project references so stale
+            //    media items and sequences don't linger in the bin UI
+            //    after project deletion.
+            if (auto* bin = projectBin()) {
+                bin->clearAll();
+                bin->setProject(nullptr);
+            }
+
+            // 9. Clear stale clip / project references from detail panels
+            //    that may still point into the about-to-be-destroyed project.
+            if (m_timelineWorkspace) {
+                m_timelineWorkspace->setProject(nullptr);
+                if (auto* props = m_timelineWorkspace->propertiesPanel())
+                    props->clearClip();
+                if (auto* ecp = m_timelineWorkspace->effectControlsPanel())
+                    ecp->clearClip();
+                if (auto* eff = m_timelineWorkspace->effectsPanel())
+                    eff->setClip(nullptr);
+                if (auto* sm = m_timelineWorkspace->sourceMonitor())
+                    sm->clearClip();
+                if (auto* lib = m_timelineWorkspace->libraryPanel())
+                    lib->refresh();
+                if (auto* chars = m_timelineWorkspace->charactersPanel())
+                    chars->refresh();
+            }
+
+            // 10. Update UI state
             if (m_projectPanel)
                 m_projectPanel->setCurrentProjectName({});
             if (auto* bin = projectBin())
                 bin->setProjectName({});
             setWindowTitle(QString("ROUNDTABLE NLE %1").arg(ROUNDTABLE_VERSION));
 
-            // 9. Now safe to destroy the old project
+            // 11. Now safe to destroy the old project
             m_lastSavedAudioSyncBlob = {};
             m_currentProject.reset();
         }
@@ -876,7 +915,7 @@ void MainWindow::onRevealProjectInExplorer(const QString& name)
     }
 }
 
-void MainWindow::onNewProjectForMedia(const QString& filePath, int64_t /*atTick*/, size_t /*trackIndex*/)
+void MainWindow::onNewProjectForMedia(const QString& filePath, int64_t atTick, size_t trackIndex)
 {
     if (!checkUnsavedChanges()) return;
 
@@ -930,12 +969,35 @@ void MainWindow::onNewProjectForMedia(const QString& filePath, int64_t /*atTick*
     if (serializer.save(*project, path)) {
         spdlog::info("Project saved to: {}", path.string());
         setCurrentProject(std::move(project));
+        // Reset the Timeline dock layout to the canonical default
+        // (loads the "USE_AS_DEFAULT" workspace preset from QSettings).
+        if (m_timelineWorkspace)
+            m_timelineWorkspace->resetToDefaultDockLayout();
         refreshProjectsList();
         statusBar()->showMessage(
             QString("Project '%1' created from dropped media").arg(projName), 3000);
 
         // Switch to the TIMELINE page so the user sees the result
         setCurrentPage(Page::Timeline);
+
+        // ── Place the dropped media on the timeline now that a project/sequence exists ──
+        if (!filePath.isEmpty()) {
+            // Add the file to the Project Bin
+            if (auto* bin = projectBin()) {
+                namespace fs = std::filesystem;
+                bin->addFiles({ fs::path(filePath.toStdWString()) });
+            }
+
+            // Open in MediaPool to get a handle for the clip
+            uint64_t handle = 0;
+            if (m_mediaPool)
+                handle = m_mediaPool->open(filePath.toStdString());
+
+            // Re-emit mediaDropped so the normal clip-creation path places the
+            // asset on the timeline at the exact position the user dragged it to.
+            if (auto* tlp = timelinePanel())
+                emit tlp->mediaDropped(filePath, handle, atTick, trackIndex);
+        }
     } else {
         spdlog::error("Failed to save new project: {}", path.string());
         QMessageBox::warning(this, "Error",
@@ -1118,8 +1180,11 @@ void MainWindow::onOpenProject()
             project->setName(loadedName.toStdString());
         project->setFilePath(path.toStdWString());
         setCurrentProject(std::move(project));
-        if (!restoreWorkspace("project/" + loadedName))
-            restoreWorkspace("last_session");
+        if (!restoreWorkspace("project/" + loadedName)
+            && !restoreWorkspace("last_session")) {
+            if (m_timelineWorkspace)
+                m_timelineWorkspace->resetToDefaultDockLayout();
+        }
         addToRecentFiles(path);
         // Stay on the current tab (Projects) instead of switching to Timeline
         setCurrentPage(Page::Projects);

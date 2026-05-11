@@ -49,108 +49,147 @@ bool H264Encoder::init(const EncoderConfig& config)
 
 bool H264Encoder::initCodec(const EncoderConfig& config)
 {
-    const AVCodec* codec = nullptr;
+    // ── Phase 1: Try NVENC with CUDA hardware frames (best path) ───
+    //    Create a CUDA hw device context so avcodec_open2 can set up
+    //    hw_frames_ctx.  The HW upload path in encodeFrame() uploads
+    //    the software YUV420P frame to a CUDA frame, then the encoder
+    //    reads directly from GPU memory — no CPU readback.
     if (config.hwAccel == HardwareAccel::NVENC) {
-        codec = avcodec_find_encoder_by_name("h264_nvenc");
-        if (codec) {
-            spdlog::info("H264Encoder: Using NVENC hardware encoder");
-            m_hwAccel = true;
+        const AVCodec* nvenc = avcodec_find_encoder_by_name("h264_nvenc");
+        if (nvenc) {
+            // Try CUDA hardware frames first (avoids any YUV420P fallback)
+            m_hwDeviceCtx = nullptr;
+            int ret = av_hwdevice_ctx_create(&m_hwDeviceCtx,
+                                              AV_HWDEVICE_TYPE_CUDA,
+                                              nullptr, nullptr, 0);
+            if (ret >= 0) {
+                spdlog::info("H264Encoder: CUDA device created, trying HW frames");
+
+                m_codecCtx = avcodec_alloc_context3(nvenc);
+                if (m_codecCtx) {
+                    m_codecCtx->width       = static_cast<int>(config.width);
+                    m_codecCtx->height      = static_cast<int>(config.height);
+                    m_codecCtx->time_base   = {config.fpsDen, config.fpsNum};
+                    m_codecCtx->framerate   = {config.fpsNum, config.fpsDen};
+                    m_codecCtx->pix_fmt     = AV_PIX_FMT_CUDA;
+                    m_codecCtx->gop_size    = config.gopSize > 0 ? config.gopSize : config.fpsNum * 2;
+                    m_codecCtx->max_b_frames = 2;
+                    m_codecCtx->hw_device_ctx = av_buffer_ref(m_hwDeviceCtx);
+
+                    if (config.bitrateMbps > 0) {
+                        m_codecCtx->bit_rate     = static_cast<int64_t>(config.bitrateMbps) * 1000000;
+                        m_codecCtx->rc_max_rate  = config.maxBitrateMbps > 0
+                            ? static_cast<int64_t>(config.maxBitrateMbps) * 1000000
+                            : m_codecCtx->bit_rate * 2;
+                        m_codecCtx->rc_buffer_size = static_cast<int>(m_codecCtx->rc_max_rate);
+                    }
+                    if (config.bt709) {
+                        m_codecCtx->color_primaries = AVCOL_PRI_BT709;
+                        m_codecCtx->color_trc       = AVCOL_TRC_BT709;
+                        m_codecCtx->colorspace      = AVCOL_SPC_BT709;
+                    }
+                    av_opt_set(m_codecCtx->priv_data, "preset", "p5", 0);
+                    av_opt_set(m_codecCtx->priv_data, "tune", "hq", 0);
+                    av_opt_set(m_codecCtx->priv_data, "rc", "constqp", 0);
+                    av_opt_set_int(m_codecCtx->priv_data, "qp", config.crf, 0);
+
+                    ret = avcodec_open2(m_codecCtx, nvenc, nullptr);
+                    if (ret >= 0 && m_codecCtx->hw_frames_ctx) {
+                        // SUCCESS ─ NVENC with CUDA hardware frames
+                        m_hwAccel = true;
+                        spdlog::info("H264Encoder: NVENC with CUDA HW frames (hw_frames_ctx ready)");
+                    } else {
+                        // CUDA path failed — clean up and try software input
+                        spdlog::warn("H264Encoder: CUDA HW frames failed (ret={}), "
+                                     "trying NVENC software input", ret);
+                        avcodec_free_context(&m_codecCtx);
+                        m_codecCtx = nullptr;
+                    }
+                }
+            }
+
+            // ── Phase 2: Try NVENC with software input (YUV420P) ──
+            if (!m_codecCtx) {
+                if (m_hwDeviceCtx) {
+                    av_buffer_unref(&m_hwDeviceCtx);
+                    m_hwDeviceCtx = nullptr;
+                }
+
+                m_codecCtx = avcodec_alloc_context3(nvenc);
+                if (m_codecCtx) {
+                    m_codecCtx->width       = static_cast<int>(config.width);
+                    m_codecCtx->height      = static_cast<int>(config.height);
+                    m_codecCtx->time_base   = {config.fpsDen, config.fpsNum};
+                    m_codecCtx->framerate   = {config.fpsNum, config.fpsDen};
+                    m_codecCtx->pix_fmt     = AV_PIX_FMT_YUV420P;
+                    m_codecCtx->gop_size    = config.gopSize > 0 ? config.gopSize : config.fpsNum * 2;
+                    m_codecCtx->max_b_frames = 2;
+
+                    if (config.bitrateMbps > 0) {
+                        m_codecCtx->bit_rate     = static_cast<int64_t>(config.bitrateMbps) * 1000000;
+                        m_codecCtx->rc_max_rate  = config.maxBitrateMbps > 0
+                            ? static_cast<int64_t>(config.maxBitrateMbps) * 1000000
+                            : m_codecCtx->bit_rate * 2;
+                        m_codecCtx->rc_buffer_size = static_cast<int>(m_codecCtx->rc_max_rate);
+                    }
+                    if (config.bt709) {
+                        m_codecCtx->color_primaries = AVCOL_PRI_BT709;
+                        m_codecCtx->color_trc       = AVCOL_TRC_BT709;
+                        m_codecCtx->colorspace      = AVCOL_SPC_BT709;
+                    }
+                    av_opt_set(m_codecCtx->priv_data, "preset", "p5", 0);
+                    av_opt_set(m_codecCtx->priv_data, "tune", "hq", 0);
+                    av_opt_set(m_codecCtx->priv_data, "rc", "constqp", 0);
+                    av_opt_set_int(m_codecCtx->priv_data, "qp", config.crf, 0);
+
+                    int openRet = avcodec_open2(m_codecCtx, nvenc, nullptr);
+                    if (openRet >= 0 && m_codecCtx->pix_fmt == AV_PIX_FMT_YUV420P) {
+                        m_hwAccel = true;
+                        spdlog::info("H264Encoder: NVENC with software input (YUV420P)");
+                    } else {
+                        // NVENC completely unusable — fall through to CPU
+                        spdlog::warn("H264Encoder: NVENC unusable (fmt={}), "
+                                     "falling back to CPU", openRet >= 0
+                                         ? static_cast<int>(m_codecCtx->pix_fmt) : -1);
+                        if (openRet >= 0) {
+                            // pix_fmt changed to CUDA but no hw_frames_ctx
+                            avcodec_free_context(&m_codecCtx);
+                            m_codecCtx = nullptr;
+                        } else {
+                            avcodec_free_context(&m_codecCtx);
+                            m_codecCtx = nullptr;
+                        }
+                        m_hwAccel = false;
+                    }
+                }
+            }
         }
     }
-    if (!codec) {
-        codec = avcodec_find_encoder_by_name("libx264");
-        m_hwAccel = false;
-    }
-    if (!codec) {
-        codec = avcodec_find_encoder(AV_CODEC_ID_H264);
-    }
-    if (!codec) {
-        m_lastError = "H264Encoder: No H.264 encoder found";
-        spdlog::error("{}", m_lastError);
-        return false;
-    }
 
-    m_codecCtx = avcodec_alloc_context3(codec);
+    // ── Phase 3: CPU fallback (slow but reliable) ──────────────────
     if (!m_codecCtx) {
-        m_lastError = "H264Encoder: Failed to allocate codec context";
-        return false;
-    }
-
-    m_codecCtx->width     = static_cast<int>(config.width);
-    m_codecCtx->height    = static_cast<int>(config.height);
-    m_codecCtx->time_base = {config.fpsDen, config.fpsNum};
-    m_codecCtx->framerate = {config.fpsNum, config.fpsDen};
-    m_codecCtx->pix_fmt   = AV_PIX_FMT_YUV420P;
-    m_codecCtx->gop_size  = config.gopSize > 0 ? config.gopSize : config.fpsNum * 2;
-    m_codecCtx->max_b_frames = 2;
-
-    if (config.bitrateMbps > 0) {
-        m_codecCtx->bit_rate     = static_cast<int64_t>(config.bitrateMbps) * 1000000;
-        m_codecCtx->rc_max_rate  = config.maxBitrateMbps > 0
-            ? static_cast<int64_t>(config.maxBitrateMbps) * 1000000
-            : m_codecCtx->bit_rate * 2;
-        m_codecCtx->rc_buffer_size = static_cast<int>(m_codecCtx->rc_max_rate);
-    }
-
-    if (config.bt709) {
-        m_codecCtx->color_primaries = AVCOL_PRI_BT709;
-        m_codecCtx->color_trc       = AVCOL_TRC_BT709;
-        m_codecCtx->colorspace      = AVCOL_SPC_BT709;
-    }
-
-    if (!m_hwAccel) {
-        static const char* presetNames[] = {
-            "ultrafast", "superfast", "veryfast", "faster", "fast",
-            "medium", "slow", "slower", "veryslow"
-        };
-        int idx = static_cast<int>(config.preset);
-        if (idx < 9) av_opt_set(m_codecCtx->priv_data, "preset", presetNames[idx], 0);
-        if (config.bitrateMbps == 0) {
-            av_opt_set_int(m_codecCtx->priv_data, "crf", config.crf, 0);
-        }
-    } else {
-        av_opt_set(m_codecCtx->priv_data, "preset", "p5", 0);
-        av_opt_set(m_codecCtx->priv_data, "tune", "hq", 0);
-        av_opt_set(m_codecCtx->priv_data, "rc", "constqp", 0);
-        av_opt_set_int(m_codecCtx->priv_data, "qp", config.crf, 0);
-    }
-
-    // SINGLE call to avcodec_open2.  pix_fmt is still YUV420P here.
-    // If NVENC supports software input, avcodec_open2 accepts it and
-    // pix_fmt stays YUV420P → software path works fine.
-    // If NVENC insists on CUDA, avcodec_open2 changes pix_fmt to CUDA.
-    int openRet = avcodec_open2(m_codecCtx, codec, nullptr);
-
-    // Check if the pixel format was changed to a hardware format.
-    // If so, NVENC needs CUDA frames → we can't easily support this
-    // without a full HW upload path.  Fall back to CPU encoding.
-    if (openRet >= 0 && m_codecCtx->pix_fmt != AV_PIX_FMT_YUV420P) {
-        spdlog::warn("H264Encoder: NVENC changed pix_fmt to {} (CUDA/hardware) — "
-                     "falling back to CPU encoding",
-                     static_cast<int>(m_codecCtx->pix_fmt));
-        avcodec_free_context(&m_codecCtx);
-        m_hwAccel = false;
-        // Retry with CPU encoder (libx264)
-        codec = avcodec_find_encoder_by_name("libx264");
-        if (!codec)
-            codec = avcodec_find_encoder(AV_CODEC_ID_H264);
+        const AVCodec* codec = avcodec_find_encoder_by_name("libx264");
+        if (!codec) codec = avcodec_find_encoder(AV_CODEC_ID_H264);
         if (!codec) {
             m_lastError = "H264Encoder: No H.264 encoder found";
             spdlog::error("{}", m_lastError);
             return false;
         }
+
         m_codecCtx = avcodec_alloc_context3(codec);
         if (!m_codecCtx) {
             m_lastError = "H264Encoder: Failed to allocate codec context";
             return false;
         }
-        m_codecCtx->width     = static_cast<int>(config.width);
-        m_codecCtx->height    = static_cast<int>(config.height);
-        m_codecCtx->time_base = {config.fpsDen, config.fpsNum};
-        m_codecCtx->framerate = {config.fpsNum, config.fpsDen};
-        m_codecCtx->pix_fmt   = AV_PIX_FMT_YUV420P;
-        m_codecCtx->gop_size  = config.gopSize > 0 ? config.gopSize : config.fpsNum * 2;
+
+        m_codecCtx->width       = static_cast<int>(config.width);
+        m_codecCtx->height      = static_cast<int>(config.height);
+        m_codecCtx->time_base   = {config.fpsDen, config.fpsNum};
+        m_codecCtx->framerate   = {config.fpsNum, config.fpsDen};
+        m_codecCtx->pix_fmt     = AV_PIX_FMT_YUV420P;
+        m_codecCtx->gop_size    = config.gopSize > 0 ? config.gopSize : config.fpsNum * 2;
         m_codecCtx->max_b_frames = 2;
+
         if (config.bitrateMbps > 0) {
             m_codecCtx->bit_rate     = static_cast<int64_t>(config.bitrateMbps) * 1000000;
             m_codecCtx->rc_max_rate  = config.maxBitrateMbps > 0
@@ -163,34 +202,33 @@ bool H264Encoder::initCodec(const EncoderConfig& config)
             m_codecCtx->color_trc       = AVCOL_TRC_BT709;
             m_codecCtx->colorspace      = AVCOL_SPC_BT709;
         }
-        {
-            static const char* presetNames[] = {
-                "ultrafast", "superfast", "veryfast", "faster", "fast",
-                "medium", "slow", "slower", "veryslow"
-            };
-            int idx2 = static_cast<int>(config.preset);
-            if (idx2 < 9) av_opt_set(m_codecCtx->priv_data, "preset", presetNames[idx2], 0);
-        }
+
+        static const char* presetNames[] = {
+            "ultrafast", "superfast", "veryfast", "faster", "fast",
+            "medium", "slow", "slower", "veryslow"
+        };
+        int idx = static_cast<int>(config.preset);
+        if (idx < 9) av_opt_set(m_codecCtx->priv_data, "preset", presetNames[idx], 0);
         if (config.bitrateMbps == 0)
             av_opt_set_int(m_codecCtx->priv_data, "crf", config.crf, 0);
+
         if (avcodec_open2(m_codecCtx, codec, nullptr) < 0) {
             m_lastError = "H264Encoder: Failed to open libx264";
             spdlog::error("{}", m_lastError);
             avcodec_free_context(&m_codecCtx);
             return false;
         }
-    } else if (openRet < 0) {
-        m_lastError = "H264Encoder: Failed to open codec";
-        spdlog::error("{}", m_lastError);
-        avcodec_free_context(&m_codecCtx);
-        return false;
+        m_hwAccel = false;
+        spdlog::info("H264Encoder: Using CPU (libx264)");
     }
 
     // ── Allocate a software YUV420P frame for sws_scale output ────
+    // If using CUDA HW frames, allocate with codec context dimensions
+    // (NVENC may align them); the HW upload path transfers the full frame.
     m_frame = av_frame_alloc();
     m_frame->format = AV_PIX_FMT_YUV420P;
-    m_frame->width  = static_cast<int>(config.width);
-    m_frame->height = static_cast<int>(config.height);
+    m_frame->width  = m_codecCtx->width;
+    m_frame->height = m_codecCtx->height;
     spdlog::info("H264Encoder: frame alloc wxh={}x{}  codecCtx wxh={}x{}  pix_fmt={} hw={}",
                  m_frame->width, m_frame->height,
                  m_codecCtx->width, m_codecCtx->height,
@@ -199,8 +237,8 @@ bool H264Encoder::initCodec(const EncoderConfig& config)
 
     m_packet = av_packet_alloc();
 
-    int swsW = static_cast<int>(config.width);
-    int swsH = static_cast<int>(config.height);
+    int swsW = m_codecCtx->width;
+    int swsH = m_codecCtx->height;
     t_swsCtx.reset(sws_getContext(
         swsW, swsH, AV_PIX_FMT_RGBA,
         swsW, swsH, AV_PIX_FMT_YUV420P,
@@ -230,10 +268,12 @@ bool H264Encoder::encodeFrame(const uint8_t* rgbaPixels, int64_t frameIndex)
     const uint8_t* srcSlice[] = { rgbaPixels };
     int srcStride[] = { static_cast<int>(m_config.width * 4) };
 
-    // Use m_frame->height (config height) NOT m_codecCtx->height.
-    // NVENC may align height to 16px boundary, but the source RGBA
-    // buffer only has the original (config) height.
-    sws_scale(t_swsCtx.get(), srcSlice, srcStride, 0, m_frame->height,
+    // Use min(config.height, m_frame->height) as source height so we
+    // never read past the caller's RGBA buffer (which is config sized).
+    // m_frame may be larger if NVENC aligned the dimensions — the extra
+    // lines stay zero (black) from av_frame_get_buffer.
+    int srcLines = std::min(static_cast<int>(m_config.height), m_frame->height);
+    sws_scale(t_swsCtx.get(), srcSlice, srcStride, 0, srcLines,
               m_frame->data, m_frame->linesize);
 
     m_frame->pts = frameIndex;

@@ -133,7 +133,12 @@ void GpuContext::shutdown()
     if (m_device.handle())
         m_device.waitIdle();
 
-    // Destroy in reverse order
+    // Destroy in reverse order.
+    // m_resourceManager must be destroyed BEFORE the VMA allocator and
+    // device because its staging ring calls vmaUnmapMemory/vmaDestroyBuffer.
+    // If destroyed later (during ~GpuContext static destructor at CRT exit),
+    // the VMA allocator is already freed → ACCESS_VIOLATION in nvoglv64.dll.
+    m_resourceManager.reset();
     m_cudaVulkanInterop.reset();
     m_nv12Converters.clear();
     m_transitionRenderer.reset();

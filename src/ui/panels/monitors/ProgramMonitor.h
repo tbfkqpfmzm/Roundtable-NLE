@@ -110,6 +110,14 @@ public:
     /// (split, trim, delete, property changes) to keep the UI responsive.
     void requestRefresh();
 
+    /// Fully reset the Program Monitor's rendering state.
+    /// Call this after workspace/dock layout changes to recover from a
+    /// corrupted composite preview (black screen, stale overlays, wrong
+    /// viewport index, broken native HWND clipping, etc.).
+    /// Resets: view stack index, last-rendered tick, pipeline cache,
+    /// transform overlay, wall-clock state, and native window clipping.
+    void resetViewState();
+
     /// Queue a non-blocking pre-roll composite request for playback start.
     /// This warms decode/prefetch/GPU caches on the render thread without
     /// synchronously compositing on the UI thread.
@@ -276,6 +284,11 @@ private:
     int      m_scrubSettleCounter{0};  ///< Post-scrub re-render countdown
     int      m_editSettleCounter{0};  ///< Post-edit re-render countdown (full res)
 
+    // Scrub composite throttle: skip every other frame during scrubbing
+    // to reduce GPU driver load (prevents NV driver stack overflow from
+    // rapid Vulkan resource churn when spine state is recreated).
+    int      m_scrubSkipCounter{0};
+
     // Frame-budget tracking
     QElapsedTimer m_compositeStopwatch;
     int64_t  m_lastCompositeMs{0};   ///< How long the last composite took (ms)
@@ -289,6 +302,12 @@ private:
 
     // VRAM pressure monitoring
     VramQueryCallback m_vramQuery;
+
+    /// Atomic flag set in the destructor BEFORE stopping pipeline threads.
+    /// Checked by the present callback and presentFrame() to prevent
+    /// use-after-free when the presenter thread calls into a partially-
+    /// destroyed ProgramMonitor (the callback lambda captures `this`).
+    std::atomic<bool> m_destroying{false};
 
     // ── PlaybackScheduler ────────────────────────────────────────────
     // Decoupled composite/present engine.  Two threads:

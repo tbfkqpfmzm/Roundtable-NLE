@@ -145,16 +145,34 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
             const float scaleToOutY = static_cast<float>(outH) / REF_H;
 
             const int64_t localTick = tick - clip->timelineIn();
-            float opac = clip->opacity().evaluate(localTick);
-            const float px   = clip->positionX().evaluate(localTick) * scaleToOutX;
-            const float py   = clip->positionY().evaluate(localTick) * scaleToOutY;
-            const float sx   = clip->scaleX().evaluate(localTick);
-            const float sy   = clip->scaleY().evaluate(localTick);
-            const float rot  = clip->rotation().evaluate(localTick);
+
+            // Guard: if the clip's internal state is invalid (e.g. timeline
+            // population is still in progress from a background thread),
+            // skip this clip rather than crashing on Keyframe<float> iteration.
+            // Each evaluate() call does a binary search on std::vector<Keyframe>;
+            // if the vector was moved/corrupted concurrently, we'd ACCESS_VIOLATION.
+            const uint64_t clipId = clip->id();
+            float opac = 1.0f;
+            float px = 0.0f, py = 0.0f;
+            float sx = 1.0f, sy = 1.0f, rot = 0.0f;
+            try {
+                opac = clip->opacity().evaluate(localTick);
+                px   = clip->positionX().evaluate(localTick) * scaleToOutX;
+                py   = clip->positionY().evaluate(localTick) * scaleToOutY;
+                sx   = clip->scaleX().evaluate(localTick);
+                sy   = clip->scaleY().evaluate(localTick);
+                rot  = clip->rotation().evaluate(localTick);
+            } catch (...) {
+                // Keyframe vector corruption — use defaults and continue.
+                // The preroll deferral (isBackgroundWarmupActive gate) should
+                // prevent this path from being hit, but this catch-all ensures
+                // we never crash the compositor on corrupted keyframe state.
+                spdlog::warn("compositeFrame: keyframe evaluation failed for clip {} — using defaults",
+                             clipId);
+            }
 
             // Apply transition opacity modulation (for fades & dissolves).
             // Wipe transitions store metadata for GPU spatial blending.
-            const uint64_t clipId = clip->id();
             TransitionType activeWipeType = TransitionType::CrossDissolve;
             float activeWipeProgress = -1.0f;
             float activeWipeSoftness = -1.0f;

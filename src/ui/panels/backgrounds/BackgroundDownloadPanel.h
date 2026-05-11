@@ -8,19 +8,40 @@
 
 #pragma once
 
-#include <QHash>
+#include <QDataStream>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMimeData>
+#include <QPixmapCache>
 #include <QPushButton>
 #include <QSet>
 #include <QStringList>
 #include <QTimer>
+#include <QUrl>
 #include <QWidget>
 
 class QFileSystemWatcher;
 
 namespace rt {
+
+// ── Custom list widget with drag MIME data ───────────────────────────────
+// Provides both application/x-roundtable-asset (for ShotComposer) and
+// file URLs (for Timeline), so dragging works from any parent context.
+class BackgroundGridWidget : public QListWidget
+{
+    Q_OBJECT
+public:
+    using QListWidget::QListWidget;
+
+signals:
+    /// Emitted when the user double-clicks a background item.
+    void backgroundActivated(const QString& filePath);
+
+protected:
+    QMimeData* mimeData(const QList<QListWidgetItem*>& items) const override;
+    void mouseDoubleClickEvent(QMouseEvent* event) override;
+};
 
 class BackgroundDownloadPanel : public QWidget
 {
@@ -30,12 +51,18 @@ public:
     explicit BackgroundDownloadPanel(QWidget* parent = nullptr);
     ~BackgroundDownloadPanel() override = default;
 
+    /// Access the grid widget so parent panels can connect signals.
+    [[nodiscard]] BackgroundGridWidget* backgroundGrid() const noexcept { return m_backgroundGrid; }
+
 protected:
     void showEvent(QShowEvent* event) override;
 
 signals:
     /// Emitted after new files are detected (so listeners refresh).
     void backgroundsDownloaded();
+
+    /// Emitted when the user double-clicks a background item.
+    void backgroundActivated(const QString& filePath);
 
 private slots:
     void onOpenMegaClicked();
@@ -72,14 +99,12 @@ private:
     QPushButton*  m_instructionsToggle{nullptr};
     QWidget*      m_instructionsContainer{nullptr};
     QLabel*       m_instructionsLabel{nullptr};
-    QListWidget*  m_backgroundGrid{nullptr};
+    BackgroundGridWidget* m_backgroundGrid{nullptr};
     QLabel*       m_statusLabel{nullptr};
 
     static constexpr const char* kTargetDir = "assets/NikkeBKG";
     static constexpr const char* kMegaUrl   = "https://mega.nz/folder/V55C3T6C#02N6WUjiEQ8hQv6PhZuMkg";
 
-    /// Shared thumbnail cache so Timeline + Shot panels don't decode twice.
-    static QHash<QString, QIcon> s_thumbnailCache;
     /// Shared file list so both panels see the same files.
     static QSet<QString>         s_sharedFileNames;
     static bool                  s_scanDone;

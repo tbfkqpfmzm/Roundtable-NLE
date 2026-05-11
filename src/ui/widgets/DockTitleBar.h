@@ -55,6 +55,8 @@ protected:
     bool isTabbed() const;
     void updateTitleLayout();
 
+    bool m_updatingVisibility{false};
+
  protected:
     void resizeEvent(QResizeEvent* event) override;
 

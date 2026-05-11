@@ -209,9 +209,14 @@ void LibraryPanel::buildUI()
                 this, [debounce]() { debounce->start(); });
     }
 
-    // Tab 3: NikkeBKG
+    // Tab 3: NikkeBKG (supports double-click + drag like the Backgrounds tab)
     {
         m_nikkeBgsPanel = new BackgroundDownloadPanel(this);
+        // Double-click → load in Source Monitor (mirrors setupDoubleClick on folder tabs)
+        connect(m_nikkeBgsPanel, &BackgroundDownloadPanel::backgroundActivated,
+                this, [this](const QString& filePath) {
+            emit loadInSourceMonitor(filePath);
+        });
         m_tabs->addTab(m_nikkeBgsPanel, tr("NikkeBKG"));
     }
 

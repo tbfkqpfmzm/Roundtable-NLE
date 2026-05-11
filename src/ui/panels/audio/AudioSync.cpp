@@ -217,6 +217,22 @@ void TranscriptionWorker::process()
         emit progressChanged(pct, QString::fromStdString(status));
     };
 
+    // Load model on the background thread (downloads from HuggingFace
+    // if not cached — can take a while on slow connections).  Previously
+    // this was done on the UI thread, freezing the app for the entire
+    // download duration.
+    if (!m_transcriber->isModelLoaded()) {
+        emit progressChanged(0.0f, QStringLiteral("Loading Whisper model..."));
+        if (!m_transcriber->loadModel(m_modelSize, progress)) {
+            emit errorOccurred(QString::fromStdString(
+                m_transcriber->lastError().empty()
+                    ? "Failed to load Whisper model"
+                    : m_transcriber->lastError()));
+            emit finished(false);
+            return;
+        }
+    }
+
     m_result = m_transcriber->transcribe(m_audioPath, m_language, progress);
 
     if (m_result.segments.empty() && !m_transcriber->lastError().empty()) {
@@ -870,24 +886,16 @@ void AudioSync::startTranscription()
         return;
     }
 
-    // Check if whisper is available (stub will still load, but transcribe returns empty)
-    if (!m_transcriber->isModelLoaded()) {
-        auto modelName = m_modelCombo->currentText().toStdString();
-        auto modelSize = whisperModelFromName(modelName);
-        if (!m_transcriber->loadModel(modelSize)) {
-            m_transcribeStatus->setText("Failed to load model");
-            return;
-        }
-    }
+    // Model loading is now deferred to the background worker thread
+    // (TranscriptionWorker::process) to avoid blocking the UI during
+    // download from HuggingFace.
 
-    // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Preserve existing transcription results ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â only transcribe new files ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
-    // Grow the results vector if new audio files were added since last run.
+    // Preserve existing transcription results — only transcribe new files
     if (m_allTranscriptionResults.size() < m_audioPaths.size()) {
         m_allTranscriptionResults.resize(m_audioPaths.size());
     }
 
     // Build list of file indices that still need transcription
-    // (empty segments means not yet transcribed)
     m_pendingTranscriptionIndices.clear();
     for (size_t i = 0; i < m_audioPaths.size(); ++i) {
         if (m_allTranscriptionResults[i].segments.empty())
@@ -934,6 +942,10 @@ void AudioSync::startTranscriptionForFile(size_t index)
     m_workerThread = new QThread(this);
     m_worker = new TranscriptionWorker(m_transcriber.get());
     m_worker->setAudioPath(m_audioPath);
+    {
+        auto modelName = m_modelCombo->currentText().toStdString();
+        m_worker->setModelSize(whisperModelFromName(modelName));
+    }
     m_worker->moveToThread(m_workerThread);
 
     connect(m_workerThread, &QThread::started, m_worker, &TranscriptionWorker::process);

@@ -357,10 +357,11 @@ void AudioSync::runAutoSync()
 
     updateSyncProgress(60, "Trimming silence from clips...");
 
-    // --- Step 5: Auto-trim silence from all clips ---
+    // --- Step 5: Auto-trim silence from non-confirmed clips ---
     int trimCount = 0;
     for (size_t i = 0; i < m_clips.size(); ++i) {
         auto& clip = m_clips[i];
+        if (clip.matchState == 2) continue; // preserve confirmed boundaries
         auto it = m_audioSamples.find(clip.sourceFile);
         if (it == m_audioSamples.end()) continue;
 
@@ -451,17 +452,22 @@ void AudioSync::runAutoSync()
     // When two adjacent clips come from the same audio file, snap the
     // boundary so there's no dead gap between them.  The midpoint of
     // the gap is used as the shared boundary.
-    // Sort clips by source file + start time so same-file clips are adjacent.
-    std::sort(m_clips.begin(), m_clips.end(),
-              [](const SyncClip& x, const SyncClip& y) {
-                  if (x.sourceFile != y.sourceFile) return x.sourceFile < y.sourceFile;
-                  return x.start < y.start;
+    // Use a sorted index list so m_clips retains its original order
+    // (not scrambled by source-file sorting).
+    std::vector<size_t> sortedIdx(m_clips.size());
+    std::iota(sortedIdx.begin(), sortedIdx.end(), size_t{0});
+    std::sort(sortedIdx.begin(), sortedIdx.end(),
+              [&](size_t x, size_t y) {
+                  if (m_clips[x].sourceFile != m_clips[y].sourceFile)
+                      return m_clips[x].sourceFile < m_clips[y].sourceFile;
+                  return m_clips[x].start < m_clips[y].start;
               });
     int gapsClosed = 0;
-    for (size_t i = 0; i + 1 < m_clips.size(); ++i) {
-        auto& a = m_clips[i];
-        auto& b = m_clips[i + 1];
+    for (size_t si = 0; si + 1 < sortedIdx.size(); ++si) {
+        auto& a = m_clips[sortedIdx[si]];
+        auto& b = m_clips[sortedIdx[si + 1]];
         if (a.sourceFile != b.sourceFile) continue;
+        if (a.matchState == 2 || b.matchState == 2) continue; // preserve confirmed boundaries
         double gap = b.start - a.end;
         if (gap > 0.001 && gap < 0.050) { // only close tiny seam gaps (<50ms)
             // Find the quietest point in the gap to place the boundary

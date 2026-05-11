@@ -124,6 +124,10 @@ void AudioSync::switchToScript(const std::string& sessionKey)
         m_activeScriptKey = sessionKey;
     }
 
+    // Load audio samples FIRST so waveforms appear in the list items
+    if (!m_audioPaths.empty())
+        loadAudioSamples();
+
     // Repopulate audio file list from restored paths
     if (m_audioFileList) {
         m_audioFileList->blockSignals(true);
