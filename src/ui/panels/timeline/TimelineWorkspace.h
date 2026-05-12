@@ -113,6 +113,10 @@ public:
     void buildPanels();
     void wirePanelSignals();
     void wireClipSelectionSignals();
+    void wireMediaDropSignals();
+    void wireNestSignals();
+    void wireEffectDropSignals();
+    void wireTrackSignals();
 
     /// Rebuild the sequence tab bar from the current project.
     void refreshSequenceTabs();

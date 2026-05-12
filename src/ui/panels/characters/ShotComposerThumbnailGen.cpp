@@ -558,10 +558,18 @@ QPixmap ShotComposer::makeCharacterThumbnail(const std::string& charName, int sz
     {
         std::string videoPath;
 
-        // 1) Check animation cache: assets/cache/animations/{charName}/{outfit}/idle.mp4|.mov
+        // 1) Check animation cache: assets/Converted/{format}/{charName}/{outfit}/idle.mp4|.mov
         {
             namespace fs = std::filesystem;
-            fs::path cacheBase = fs::path("assets/cache/animations") / charName / thumbOutfit;
+            // Search across all format subdirectories
+            static const char* fmtDirs[] = {"H264_Green", "H264_Blue", "H264_Custom", "ProRes"};
+            fs::path cacheBase;
+            for (const auto* fmt : fmtDirs) {
+                auto candidate = fs::path("assets/Converted") / fmt / charName / thumbOutfit;
+                if (fs::exists(candidate)) { cacheBase = candidate; break; }
+            }
+            if (cacheBase.empty())
+                cacheBase = fs::path("assets/Converted") / "H264_Green" / charName / thumbOutfit;
             static const std::string idleNames[] = {"idle", "idle_01", "wait", "stand"};
             static const std::string exts[] = {".mp4", ".mov"};
             for (const auto& anim : idleNames) {
@@ -836,8 +844,13 @@ QPixmap ShotComposer::makeShotThumbnail(const ShotPreset& shot, int thumbW, int 
             // video available for this character+outfit and try each one.
             if (!frame || !frame->ensurePixels()) {
                 namespace fs = std::filesystem;
-                fs::path outfitDir = fs::path("assets/cache/animations")
-                    / ch->characterName / outfitKey;
+                // Search across all format subdirectories
+                static const char* fmtDirs[] = {"H264_Green", "H264_Blue", "H264_Custom", "ProRes"};
+                fs::path outfitDir;
+                for (const auto* fmt : fmtDirs) {
+                    auto candidate = fs::path("assets/Converted") / fmt / ch->characterName / outfitKey;
+                    if (fs::exists(candidate)) { outfitDir = candidate; break; }
+                }
                 if (fs::exists(outfitDir) && fs::is_directory(outfitDir)) {
                     static const std::string validExts[] = {".mp4", ".mov", ".webm"};
                     for (const auto& entry : fs::directory_iterator(outfitDir)) {

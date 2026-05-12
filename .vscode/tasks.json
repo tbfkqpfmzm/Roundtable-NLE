@@ -37,6 +37,11 @@
 			"label": "Build",
 			"type": "shell",
 			"command": "powershell -ExecutionPolicy Bypass -File build.ps1"
+		},
+		{
+			"label": "Build",
+			"type": "shell",
+			"command": "powershell -ExecutionPolicy Bypass -File build.ps1"
 		}
 	]
 }

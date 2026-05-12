@@ -424,7 +424,15 @@ void TimelineWorkspace::buildPanels()
             -> std::vector<std::string> {
         namespace fs = std::filesystem;
         std::vector<std::string> names;
-        fs::path dir = fs::path("assets/cache/animations") / charName / outfit;
+        // Search across all format subdirectories
+        static const char* fmtDirs[] = {"H264_Green", "H264_Blue", "H264_Custom", "ProRes"};
+        fs::path dir;
+        for (const auto* fmt : fmtDirs) {
+            auto candidate = fs::path("assets/Converted") / fmt / charName / outfit;
+            std::error_code ec2;
+            if (fs::exists(candidate, ec2)) { dir = candidate; break; }
+        }
+        if (dir.empty()) dir = fs::path("assets/Converted") / "H264_Green" / charName / outfit;
         std::error_code ec;
         for (auto& entry : fs::directory_iterator(dir, ec)) {
             if (!entry.is_regular_file()) continue;

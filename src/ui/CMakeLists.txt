@@ -75,6 +75,12 @@ add_library(roundtable_ui STATIC
     panels/characters/ShotComposerThumbnails.cpp
     panels/characters/ShotComposerThumbnailGen.cpp
     panels/characters/ShotComposerLibrary.cpp
+    panels/characters/ShotComposerPreview.cpp
+    panels/characters/ShotComposerShots.cpp
+    panels/characters/ShotComposerLayers.cpp
+    panels/characters/ShotComposerGroups.cpp
+    panels/characters/ShotComposerClipboard.cpp
+    panels/characters/ShotComposerEvents.cpp
     panels/audio/AudioSync.cpp
     panels/audio/AudioSyncUI.cpp
     panels/audio/AudioSyncCards.cpp
@@ -108,10 +114,21 @@ add_library(roundtable_ui STATIC
     panels/project/ConversionPanel.cpp
     panels/project/ProjectPanel.cpp
     panels/project/ProjectPanelUI.cpp
+    panels/project/ProjectPanelHelpers.cpp
+    panels/project/ProjectPanelTable.cpp
+    panels/project/ProjectPanelNewPanel.cpp
+    panels/project/ProjectPanelSidePanel.cpp
+    panels/project/ProjectPanelContextMenu.cpp
+    panels/project/ProjectPanelEvents.cpp
+    panels/project/ProjectPanelThumbnails.cpp
     panels/timeline/TimelineWorkspace.cpp
     panels/timeline/TimelineWorkspacePanels.cpp
     panels/timeline/TimelineWorkspacePanelsWiring.cpp
     panels/timeline/TimelineWorkspacePanelsWiringClipSelection.cpp
+    panels/timeline/TimelineWorkspacePanelsWiringMediaDrop.cpp
+    panels/timeline/TimelineWorkspacePanelsWiringNest.cpp
+    panels/timeline/TimelineWorkspacePanelsWiringEffectDrop.cpp
+    panels/timeline/TimelineWorkspacePanelsWiringTrack.cpp
     panels/timeline/TimelineWorkspaceComposite.cpp
     panels/timeline/TimelineWorkspaceOverlay.cpp
     panels/timeline/TimelineWorkspaceSpine.cpp
@@ -175,10 +192,20 @@ set_source_files_properties(
     panels/timeline/TimelinePanelPaintEvents.cpp
     panels/timeline/TimelinePanelHitTest.cpp
     panels/timeline/TimelinePanelCommands.cpp
+    panels/timeline/TimelineWorkspacePanelsWiringMediaDrop.cpp
+    panels/timeline/TimelineWorkspacePanelsWiringNest.cpp
+    panels/timeline/TimelineWorkspacePanelsWiringEffectDrop.cpp
+    panels/timeline/TimelineWorkspacePanelsWiringTrack.cpp
     panels/properties/PropertiesPanelVideo.cpp
     panels/properties/PropertiesPanelAudio.cpp
     panels/properties/PropertiesPanelTitle.cpp
     panels/properties/PropertiesPanelGraphic.cpp
+    panels/characters/ShotComposerPreview.cpp
+    panels/characters/ShotComposerShots.cpp
+    panels/characters/ShotComposerLayers.cpp
+    panels/characters/ShotComposerGroups.cpp
+    panels/characters/ShotComposerClipboard.cpp
+    panels/characters/ShotComposerEvents.cpp
     PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON
 )
 

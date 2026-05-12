@@ -139,18 +139,12 @@ void CompositeService::reset()
 void CompositeService::initAnimVideoCache(MediaPool* pool)
 {
     if (!m_animVideoCache && pool) {
-        // Use user data directory for cache (writable when installed to Program Files)
-        std::string cacheDir = "assets/cache/animations";
-#ifdef _WIN32
-        wchar_t appData[MAX_PATH];
-        DWORD len = GetEnvironmentVariableW(L"LOCALAPPDATA", appData, MAX_PATH);
-        if (len > 0 && len < MAX_PATH) {
-            std::wstring wdir = std::wstring(appData) + L"/ROUNDTABLE/cache/animations";
-            cacheDir = std::string(wdir.begin(), wdir.end());
-        }
-#endif
+        // Cache directory is always under the program's assets/ folder
+        // (resolved relative to the working directory in dev, or to the
+        //  app directory in installed builds — the same as how assets/
+        //  itself is resolved).
         m_animVideoCache = std::make_unique<AnimationVideoCache>(
-            pool, cacheDir, "assets");
+            pool, "assets/Converted", "assets");
         m_animVideoCache->scanCacheDirectory();
     }
 }

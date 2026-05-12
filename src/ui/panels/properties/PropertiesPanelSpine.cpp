@@ -69,7 +69,22 @@ void PropertiesPanel::applySpineOutfit()
         std::string animName = vc->animationName().empty() ? "idle" : vc->animationName();
         std::string ext = fs::path(vc->mediaPath()).extension().string();
         if (ext.empty()) ext = ".mov";
-        std::string base = "assets/cache/animations/"
+        // Preserve the format subdirectory from the existing media path
+        std::string oldPath = vc->mediaPath();
+        std::string fmtDir = "H264_Green"; // default fallback
+        {
+            namespace fs = std::filesystem;
+            auto p = fs::path(oldPath);
+            // Walk up from the file to find the format directory
+            // Path: .../Converted/{fmtDir}/{char}/{outfit}/{anim}.ext
+            if (p.parent_path().has_parent_path() && p.parent_path().parent_path().has_parent_path()) {
+                auto candidate = p.parent_path().parent_path().parent_path().filename().string();
+                if (candidate == "H264_Green" || candidate == "H264_Blue" ||
+                    candidate == "H264_Custom" || candidate == "ProRes")
+                    fmtDir = candidate;
+            }
+        }
+        std::string base = "assets/Converted/" + fmtDir + "/"
             + vc->characterName() + "/" + newOutfit + "/";
         std::string newMute = base + animName + ext;
         std::string newTalk = base + animName + "_talk" + ext;
@@ -157,7 +172,19 @@ void PropertiesPanel::applySpineAnimation()
         std::string outfit = vc->outfit().empty() ? "default" : vc->outfit();
         std::string ext = fs::path(vc->mediaPath()).extension().string();
         if (ext.empty()) ext = ".mov";
-        std::string base = "assets/cache/animations/"
+        // Preserve the format subdirectory from the existing media path
+        std::string fmtDir = "H264_Green";
+        {
+            namespace fs = std::filesystem;
+            auto p = fs::path(oldMedia);
+            if (p.parent_path().has_parent_path() && p.parent_path().parent_path().has_parent_path()) {
+                auto candidate = p.parent_path().parent_path().parent_path().filename().string();
+                if (candidate == "H264_Green" || candidate == "H264_Blue" ||
+                    candidate == "H264_Custom" || candidate == "ProRes")
+                    fmtDir = candidate;
+            }
+        }
+        std::string base = "assets/Converted/" + fmtDir + "/"
             + vc->characterName() + "/" + outfit + "/";
         std::string newMute = base + newAnim + ext;
         std::string newTalk = base + newAnim + "_talk" + ext;

@@ -61,22 +61,12 @@ std::string AnimationVideoCache::makeKey(const std::string& charName,
 
 std::filesystem::path AnimationVideoCache::cachePath(const std::string& charName,
                                                        const std::string& outfit,
-                                                       const std::string& animName) const
+                                                       const std::string& animName,
+                                                       SpineCacheFormat fmt) const
 {
-    // Check if an existing .mp4 already exists (chroma key or legacy packed-alpha)
-    auto mp4Path = m_cacheDir / charName / outfit / (animName + ".mp4");
-    if (fs::exists(mp4Path))
-        return mp4Path;
-    // Check if a ProRes .mov already exists
-    auto movPath = m_cacheDir / charName / outfit / (animName + ".mov");
-    if (fs::exists(movPath))
-        return movPath;
-    // Default extension matches the currently selected encoder format
-    bool isChromaKey = (m_encoderFormat == SpineCacheFormat::GreenScreen ||
-                        m_encoderFormat == SpineCacheFormat::BlueScreen ||
-                        m_encoderFormat == SpineCacheFormat::CustomColor);
-    const char* ext = isChromaKey ? ".mp4" : ".mov";
-    return m_cacheDir / charName / outfit / (animName + ext);
+    std::string fmtDir = formatDirName(fmt);
+    const char* ext = (fmt == SpineCacheFormat::ProRes4444) ? ".mov" : ".mp4";
+    return m_cacheDir / fmtDir / charName / outfit / (animName + ext);
 }
 
 // ─── Inventory scan ──────────────────────────────────────────────────────────
@@ -94,85 +84,91 @@ void AnimationVideoCache::scanCacheDirectory()
     int count = 0;
     int cleaned = 0;
 
-    // Expect: {cacheDir}/{CharName}/{outfit}/{animName}.webm
-    // A sibling .rendering marker file means the render was interrupted.
-    for (const auto& charDir : fs::directory_iterator(m_cacheDir)) {
-        if (!charDir.is_directory()) continue;
-        std::string charName = charDir.path().filename().string();
+    // Expect: {cacheDir}/{FormatDir}/{CharName}/{outfit}/{animName}.ext
+    // Known format subdirectory names
+    static const char* formatDirs[] = {"H264_Green", "H264_Blue", "H264_Custom", "ProRes"};
 
-        for (const auto& outfitDir : fs::directory_iterator(charDir.path())) {
-            if (!outfitDir.is_directory()) continue;
-            std::string outfit = outfitDir.path().filename().string();
+    for (const auto& fmtName : formatDirs) {
+        fs::path fmtPath = m_cacheDir / fmtName;
+        if (!fs::exists(fmtPath)) continue;
 
-            // First pass: find and clean up interrupted renders
-            for (const auto& f : fs::directory_iterator(outfitDir.path())) {
-                if (!f.is_regular_file()) continue;
-                if (f.path().extension() != ".rendering") continue;
+        for (const auto& charDir : fs::directory_iterator(fmtPath)) {
+            if (!charDir.is_directory()) continue;
+            std::string charName = charDir.path().filename().string();
 
-                // Marker file found — the corresponding video is incomplete
-                // Try both .webm and .mp4 since we don't know which encoder was used
-                for (const auto& ext : {".mov", ".webm", ".mp4"}) {
-                    auto videoPath = f.path();
-                    videoPath.replace_extension(ext);
-                    std::error_code ec;
-                    if (fs::exists(videoPath, ec)) {
-                        spdlog::warn("AnimCache: removing incomplete render: {}",
-                                     videoPath.string());
-                        fs::remove(videoPath, ec);
+            for (const auto& outfitDir : fs::directory_iterator(charDir.path())) {
+                if (!outfitDir.is_directory()) continue;
+                std::string outfit = outfitDir.path().filename().string();
+
+                // First pass: find and clean up interrupted renders
+                for (const auto& f : fs::directory_iterator(outfitDir.path())) {
+                    if (!f.is_regular_file()) continue;
+                    if (f.path().extension() != ".rendering") continue;
+
+                    // Marker file found — the corresponding video is incomplete
+                    for (const auto& ext : {".mov", ".webm", ".mp4"}) {
+                        auto videoPath = f.path();
+                        videoPath.replace_extension(ext);
+                        std::error_code ec;
+                        if (fs::exists(videoPath, ec)) {
+                            spdlog::warn("AnimCache: removing incomplete render: {}",
+                                         videoPath.string());
+                            fs::remove(videoPath, ec);
+                        }
                     }
-                }
-                {
-                    std::error_code ec;
-                    fs::remove(f.path(), ec);  // remove the marker itself
-                }
-                ++cleaned;
-            }
-
-            // Second pass: load valid cache entries (.mp4, .mov, .webm)
-            for (const auto& videoFile : fs::directory_iterator(outfitDir.path())) {
-                if (!videoFile.is_regular_file()) continue;
-                auto ext = videoFile.path().extension();
-
-                if (ext != ".mp4" && ext != ".mov" && ext != ".webm") continue;
-
-                // Skip 0-byte files (failed pre-renders)
-                auto fileSize = fs::file_size(videoFile.path());
-                if (fileSize == 0) {
-                    spdlog::warn("AnimCache: skipping 0-byte file: {}",
-                                 videoFile.path().string());
-                    std::error_code removeEc;
-                    fs::remove(videoFile.path(), removeEc);
-                    continue;
+                    {
+                        std::error_code ec;
+                        fs::remove(f.path(), ec);  // remove the marker itself
+                    }
+                    ++cleaned;
                 }
 
-                std::string animName = videoFile.path().stem().string();
-                std::string key = makeKey(charName, outfit, animName);
+                // Second pass: load valid cache entries (.mp4, .mov, .webm)
+                for (const auto& videoFile : fs::directory_iterator(outfitDir.path())) {
+                    if (!videoFile.is_regular_file()) continue;
+                    auto ext = videoFile.path().extension();
 
-                // If we already have an entry for this anim, prefer
-                // .mp4 (HEVC packed-alpha) > .mov (ProRes) > .webm (VP9)
-                if (m_entries.count(key) > 0) {
-                    auto existingExt = m_entries[key].videoPath.extension();
-                    if (existingExt == ".mp4") continue;
-                    if (existingExt == ".mov" && ext != ".mp4") continue;
+                    if (ext != ".mp4" && ext != ".mov" && ext != ".webm") continue;
+
+                    // Skip 0-byte files (failed pre-renders)
+                    auto fileSize = fs::file_size(videoFile.path());
+                    if (fileSize == 0) {
+                        spdlog::warn("AnimCache: skipping 0-byte file: {}",
+                                     videoFile.path().string());
+                        std::error_code removeEc;
+                        fs::remove(videoFile.path(), removeEc);
+                        continue;
+                    }
+
+                    std::string animName = videoFile.path().stem().string();
+                    std::string key = makeKey(charName, outfit, animName);
+
+                    // If we already have an entry for this anim, prefer
+                    // .mp4 (HEVC packed-alpha) > .mov (ProRes) > .webm (VP9)
+                    if (m_entries.count(key) > 0) {
+                        auto existingExt = m_entries[key].videoPath.extension();
+                        if (existingExt == ".mp4") continue;
+                        if (existingExt == ".mov" && ext != ".mp4") continue;
+                    }
+
+                    AnimCacheEntry entry;
+                    entry.characterName = charName;
+                    entry.outfit        = outfit;
+                    entry.animationName = animName;
+                    entry.videoPath     = videoFile.path();
+                    entry.fileSizeBytes = fileSize;
+
+                    // Check skeleton modification time for staleness
+                    auto skelPaths = SpineEngine::resolvePaths(
+                        m_assetsDir, charName, outfit, CharacterStance::Default);
+                    if (skelPaths.valid) {
+                        std::error_code ec;
+                        entry.skelModTime = fs::last_write_time(skelPaths.skelPath, ec);
+                    }
+
+                    m_entries[key] = std::move(entry);
+                    ++count;
                 }
-
-                AnimCacheEntry entry;
-                entry.characterName = charName;
-                entry.outfit        = outfit;
-                entry.animationName = animName;
-                entry.videoPath     = videoFile.path();
-                entry.fileSizeBytes = fileSize;
-
-                // Check skeleton modification time for staleness
-                auto skelPaths = SpineEngine::resolvePaths(
-                    m_assetsDir, charName, outfit, CharacterStance::Default);
-                if (skelPaths.valid) {
-                    std::error_code ec;
-                    entry.skelModTime = fs::last_write_time(skelPaths.skelPath, ec);
-                }
-
-                m_entries[key] = std::move(entry);
-                ++count;
             }
         }
     }
@@ -497,7 +493,7 @@ void AnimationVideoCache::workerLoop()
             renderJob.outfit        = job.outfit;
             renderJob.animationName = job.animName;   // actual Spine animation name (no _talk suffix)
             renderJob.isTalking     = job.isTalking;  // talk track blending flag
-            renderJob.outputPath    = cachePath(job.charName, job.outfit, cacheAnimName);
+            renderJob.outputPath    = cachePath(job.charName, job.outfit, cacheAnimName, m_encoderFormat);
             renderJob.fps           = 60;
             // QP=22 ~halves bitrate vs QP=18 (~80 Mbps vs ~157 Mbps for 1632x3840
             // packed-alpha @60fps).  Lower bitrate = less PCIe traffic and less
@@ -644,7 +640,7 @@ void AnimationVideoCache::workerLoop()
             spdlog::error("AnimCache: render failed for '{}': {}", key, ex.what());
             // Clean up marker if exception thrown during render
             {
-                auto failMarker = cachePath(job.charName, job.outfit, cacheAnimName);
+                auto failMarker = cachePath(job.charName, job.outfit, cacheAnimName, m_encoderFormat);
                 failMarker.replace_extension(".rendering");
                 std::error_code ec;
                 fs::remove(failMarker, ec);
@@ -774,16 +770,20 @@ void AnimationVideoCache::removeAllForCharacter(const std::string& characterName
             ++it;
     }
 
-    // Delete the entire character cache directory from disk
-    auto charCacheDir = m_cacheDir / characterName;
+    // Delete the character cache directories across all format subdirectories
+    static const char* formatDirs[] = {"H264_Green", "H264_Blue", "H264_Custom", "ProRes"};
     std::error_code ec;
-    if (fs::exists(charCacheDir, ec)) {
-        fs::remove_all(charCacheDir, ec);
-        if (!ec)
-            spdlog::info("AnimCache: deleted cache directory for '{}'", characterName);
-        else
-            spdlog::warn("AnimCache: failed to delete cache dir '{}': {}",
-                         charCacheDir.string(), ec.message());
+    for (const auto& fmtName : formatDirs) {
+        auto charCacheDir = m_cacheDir / fmtName / characterName;
+        if (fs::exists(charCacheDir, ec)) {
+            fs::remove_all(charCacheDir, ec);
+            if (!ec)
+                spdlog::info("AnimCache: deleted cache dir '{}' for '{}'",
+                             fmtName, characterName);
+            else
+                spdlog::warn("AnimCache: failed to delete cache dir '{}': {}",
+                             charCacheDir.string(), ec.message());
+        }
     }
 
     spdlog::info("AnimCache: removed {} cache entries for '{}'",
@@ -843,19 +843,22 @@ void AnimationVideoCache::removeAllForCharacterOutfit(const std::string& charact
         }
     }
 
-    // Delete just this outfit's subdirectory: <cacheDir>/<character>/<outfit>/
+    // Delete the outfit subdirectory across all format subdirectories.
     // Does NOT touch assets/characters/<character>/ — Spine / Live2D source
     // files remain intact.
-    auto outfitCacheDir = m_cacheDir / characterName / outfit;
+    static const char* formatDirs[] = {"H264_Green", "H264_Blue", "H264_Custom", "ProRes"};
     std::error_code ec;
-    if (fs::exists(outfitCacheDir, ec)) {
-        fs::remove_all(outfitCacheDir, ec);
-        if (!ec)
-            spdlog::info("AnimCache: deleted outfit cache dir for '{}' / '{}'",
-                         characterName, outfit);
-        else
-            spdlog::warn("AnimCache: failed to delete outfit cache dir '{}': {}",
-                         outfitCacheDir.string(), ec.message());
+    for (const auto& fmtName : formatDirs) {
+        auto outfitCacheDir = m_cacheDir / fmtName / characterName / outfit;
+        if (fs::exists(outfitCacheDir, ec)) {
+            fs::remove_all(outfitCacheDir, ec);
+            if (!ec)
+                spdlog::info("AnimCache: deleted outfit cache dir for '{}' / '{}' in '{}'",
+                             characterName, outfit, fmtName);
+            else
+                spdlog::warn("AnimCache: failed to delete outfit cache dir '{}': {}",
+                             outfitCacheDir.string(), ec.message());
+        }
     }
 
     // If no in-flight renders remain for this outfit, we can safely

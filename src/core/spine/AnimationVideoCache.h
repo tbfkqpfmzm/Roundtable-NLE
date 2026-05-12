@@ -2,15 +2,18 @@
  * AnimationVideoCache — manages pre-rendered Spine animation video files.
  *
  * Central registry mapping (character, outfit, animation) → pre-rendered
- * VP9+alpha WebM files.  Provides:
- *   - Inventory scanning (discovers existing cached .webm files on startup)
+ * video files (.mp4 or .mov).  Provides:
+ *   - Inventory scanning (discovers existing cached videos on startup)
  *   - Lookup by character identity and animation name
  *   - Background pre-rendering of missing animations via SpinePrerenderer
  *   - MediaPool integration for video decode during compositing
  *   - Staleness detection (re-renders when skeleton files change)
  *
  * Cache layout on disk:
- *   assets/cache/animations/{CharName}/{outfit}/{animName}.webm
+ *   assets/Converted/{FormatDir}/{CharName}/{outfit}/{animName}.ext
+ *
+ * Where FormatDir is one of: H264_Green, H264_Blue, H264_Custom, ProRes
+ * and ext is .mp4 (chroma-key formats) or .mov (ProRes).
  *
  * Thread safety: all public methods are guarded by a mutex.
  * Background rendering happens on a worker thread; completed entries
@@ -90,11 +93,11 @@ class AnimationVideoCache
 public:
     /// Create the cache.
     /// @param cacheDir  Root directory for cached videos
-    ///                  (e.g., "assets/cache/animations")
+    ///                  (e.g., "assets/Converted")
     /// @param assetsDir Root assets directory (containing "characters/")
     /// @param pool      MediaPool for video decode (non-owning)
     explicit AnimationVideoCache(MediaPool* pool = nullptr,
-                                  const std::string& cacheDir = "assets/cache/animations",
+                                  const std::string& cacheDir = "assets/Converted",
                                   const std::string& assetsDir = "assets");
     ~AnimationVideoCache();
 
@@ -245,16 +248,39 @@ public:
     /// Safe to call multiple times (no-op if no .mp4 files exist).
     void migrateToProRes();
 
+    /// @return The root cache directory where animation video files are stored.
+    [[nodiscard]] const std::filesystem::path& cacheDirectory() const noexcept
+    {
+        return m_cacheDir;
+    }
+
+    /// Map a SpineCacheFormat to its subdirectory name under the cache root.
+    /// GreenScreen  → "H264_Green"
+    /// BlueScreen   → "H264_Blue"
+    /// CustomColor  → "H264_Custom"
+    /// ProRes4444   → "ProRes"
+    [[nodiscard]] static std::string formatDirName(SpineCacheFormat fmt) noexcept
+    {
+        switch (fmt) {
+        case SpineCacheFormat::GreenScreen:  return "H264_Green";
+        case SpineCacheFormat::BlueScreen:   return "H264_Blue";
+        case SpineCacheFormat::CustomColor:  return "H264_Custom";
+        case SpineCacheFormat::ProRes4444:   return "ProRes";
+        }
+        return "ProRes";
+    }
+
 private:
     /// Build cache key: "charName|outfit|animName"
     static std::string makeKey(const std::string& charName,
                                 const std::string& outfit,
                                 const std::string& animName);
 
-    /// Build cache file path for a given animation
+    /// Build cache file path for a given animation and format.
     std::filesystem::path cachePath(const std::string& charName,
                                      const std::string& outfit,
-                                     const std::string& animName) const;
+                                     const std::string& animName,
+                                     SpineCacheFormat fmt) const;
 
     /// Worker function for background render threads.
     /// Each worker owns its own SpinePrerenderer and processes jobs

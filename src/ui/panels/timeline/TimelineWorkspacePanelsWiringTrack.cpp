@@ -1,0 +1,132 @@
+// TimelineWorkspacePanelsWiringTrack.cpp - Track management signal wiring.
+// Extracted from TimelineWorkspacePanelsWiring.cpp for maintainability.
+
+#include <volk.h>
+
+#include <map>
+#include <set>
+
+#include "panels/timeline/TimelineWorkspace.h"
+#include "panels/timeline/ClipRenderers.h"
+#include "CompositeService.h"
+#include "spine/AnimationVideoCache.h"
+#include "Theme.h"
+
+#include "panels/audio/AudioMixer.h"
+// ShotPanel removed — character/shot controls merged into PropertiesPanel
+#include "panels/effects/EffectsPanel.h"
+#include "panels/effects/KeyframeEditor.h"
+#include "panels/monitors/ProgramMonitor.h"
+#include "panels/project/ProjectBin.h"
+#include "panels/properties/PropertiesPanel.h"
+#include "panels/effects/EffectControlsPanel.h"
+#include "panels/effects/GraphicsEditorPanel.h"
+#include "panels/effects/ColorGradingPanel.h"
+#include "panels/monitors/SourceMonitor.h"
+#include "panels/timeline/TimelinePanel.h"
+
+#include "widgets/MiniTimeline.h"
+#include "widgets/DockTitleBar.h"
+#include "widgets/VUMeter.h"
+#include "viewport/Viewport.h"
+#include "viewport/TransformOverlayWidget.h"
+
+#include "command/CommandStack.h"
+#include "command/LambdaCommand.h"
+#include "command/commands/ClipCommands.h"
+#include "command/commands/MarkerCommands.h"
+#include "command/commands/TransitionCmds.h"
+#include "command/commands/EffectCommands.h"
+#include "project/Project.h"
+#include "MainWindow.h"
+#include "media/AudioEngine.h"
+#include "media/MediaPool.h"
+#include "media/PlaybackController.h"
+#include "timeline/AudioClip.h"
+#include "timeline/EditOperations.h"
+#include "timeline/ImageClip.h"
+#include "timeline/OpacityMask.h"
+#include "timeline/SequenceClip.h"
+#include "timeline/SpineClip.h"
+#include "timeline/TitleClip.h"
+#include "timeline/VideoClip.h"
+#include "timeline/GraphicClip.h"
+#include "timeline/GraphicLayer.h"
+#include "timeline/Timeline.h"
+#include "timeline/Track.h"
+#include "timeline/Transition.h"
+#include "timeline/VideoClip.h"
+
+#include "effects/ChromaKey.h"
+#include "media/FrameCache.h"
+#include "media/AudioPlaybackService.h"
+
+#include "panels/characters/ShotComposerInternal.h"
+#include "spine/ShotPreset.h"
+
+#ifdef ROUNDTABLE_HAS_SPINE
+#include "spine/ModelManager.h"
+#endif
+
+#include <QDockWidget>
+#include <QFileInfo>
+#include <QImage>
+#include <QMessageBox>
+#include <QPainter>
+#include <QTimer>
+#include <spdlog/spdlog.h>
+
+namespace rt {
+
+void TimelineWorkspace::wireTrackSignals()
+{
+// =====================================================================
+    //  TRACK MANAGEMENT -- add/delete tracks from context menus
+    // =====================================================================
+    if (m_timelinePanel && m_timeline) {
+        connect(m_timelinePanel, &TimelinePanel::addTrackAbove,
+                this, [this](size_t nearIndex, bool video) {
+            if (!m_timeline) return;
+            auto t = std::make_unique<Track>(video ? TrackType::Video : TrackType::Audio, "");
+            size_t idx = nearIndex < m_timeline->trackCount() ? nearIndex : 0;
+            m_timeline->insertTrack(idx, std::move(t));
+            m_timelinePanel->rebuildTracks();
+            invalidateAudioSources();
+        });
+        connect(m_timelinePanel, &TimelinePanel::addTrackBelow,
+                this, [this](size_t nearIndex, bool video) {
+            if (!m_timeline) return;
+            auto t = std::make_unique<Track>(video ? TrackType::Video : TrackType::Audio, "");
+            size_t idx = nearIndex < m_timeline->trackCount() ? nearIndex + 1 : m_timeline->trackCount();
+            m_timeline->insertTrack(idx, std::move(t));
+            m_timelinePanel->rebuildTracks();
+            invalidateAudioSources();
+        });
+        connect(m_timelinePanel, &TimelinePanel::deleteTrack,
+                this, [this](size_t trackIndex) {
+            if (!m_timeline || m_timeline->trackCount() <= 1) return;
+            if (trackIndex >= m_timeline->trackCount()) return;
+
+            // Clear selection state BEFORE removing the track so we don't
+            // hold a dangling Clip* that belonged to the deleted track.
+            m_selectedClip = nullptr;
+            m_selectedTrackIdx = 0;
+            m_selectedClipIdx  = 0;
+            m_selectedGraphicLayerIdx = -1;
+            if (m_propertiesPanel) m_propertiesPanel->clearClip();
+
+            m_timeline->removeTrack(trackIndex);
+            m_timelinePanel->rebuildTracks();
+            invalidateAudioSources();
+            invalidateCompositeCache();
+            if (m_programMonitor) m_programMonitor->requestRefresh();
+        });
+
+        connect(m_timelinePanel, &TimelinePanel::clipContextAction,
+                this, [this](const QString& action, size_t trackIndex, uint64_t clipId) {
+            Q_UNUSED(action); Q_UNUSED(trackIndex); Q_UNUSED(clipId);
+        });
+    }
+}
+
+} // namespace rt

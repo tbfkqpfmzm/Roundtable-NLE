@@ -822,9 +822,19 @@ void ConversionPanel::onTableContextMenu(const QPoint& pos)
 
     // "Reveal converted files in Explorer" action
     menu.addAction(QStringLiteral("\xF0\x9F\x93\x82  Reveal Converted in Explorer"), this,
-        [charName, outfit]() {
-            QString cachePath = rt::findProjectRoot()
-                + "/assets/cache/animations/" + charName + "/" + outfit;
+        [this, charName, outfit]() {
+            QString cachePath;
+            if (m_animVideoCache) {
+                // Use the actual cache directory from AnimationVideoCache
+                // (may be %LOCALAPPDATA%/ROUNDTABLE/cache/animations/ in installed builds)
+                auto cacheDirPath = m_animVideoCache->cacheDirectory();
+                cachePath = QString::fromStdString(
+                    (cacheDirPath / charName.toStdString() / outfit.toStdString()).string());
+            } else {
+                // Fallback: project-relative path
+                cachePath = rt::findProjectRoot()
+                    + "/assets/Converted/" + charName + "/" + outfit;
+            }
             QDir cacheDir(cachePath);
             if (cacheDir.exists()) {
                 // Find the first cached video file to select

@@ -48,9 +48,15 @@ add_library(roundtable_core STATIC
 
     # Media
     media/MediaPool.cpp
+    media/MediaPoolOpen.cpp
+    media/MediaPoolFrame.cpp
+    media/MediaPoolPerf.cpp
+    media/MediaPoolQueries.cpp
     media/MediaPoolDecode.cpp
     media/MediaPoolPrefetch.cpp
     media/VideoDecoder.cpp
+    media/VideoDecoderInit.cpp
+    media/VideoDecoderDecode.cpp
     media/AudioEngine.cpp
     media/TimeStretch.cpp
     media/AudioFile.cpp
@@ -66,6 +72,8 @@ add_library(roundtable_core STATIC
     media/FrameScheduler.cpp
     media/ThumbnailGenerator.cpp
     media/AudioPlaybackService.cpp
+    media/AudioPlaybackServiceLoad.cpp
+    media/AudioPlaybackServiceCache.cpp
     media/OmniShotDetector.cpp
 
     # Spine

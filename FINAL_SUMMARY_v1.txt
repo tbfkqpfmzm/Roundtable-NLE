@@ -1,8 +1,9 @@
 ================================================================================
   FINAL_SUMMARY_v1 — ROUNDTABLE NLE Remaining Work
   Created: May 12, 2026
-  Last Updated: May 12, 2026 (stripped of all ✅ completed items —
-    archived to docs/COMPLETED_TASKS_FINAL_SUMMARY.txt)
+  Last Updated: May 12, 2026 (4th update — all [P1]/[P2] file splits complete;
+    ShotComposer.cpp, MediaPool.cpp, AudioPlaybackService.cpp,
+    VideoDecoder.cpp fully modularized)
   Based on: git diff analysis, crash logs, RENDER_FIX_PLAN.txt,
             RENDER_FIX.txt, FINAL_PUSH_FIXES.txt, Modularization_Targets.txt,
             architecture.md, repo memory notes (30+), codebase audit
@@ -12,9 +13,8 @@ TABLE OF CONTENTS
   1. PROJECT PROFILE
   2. REMAINING WORK (what hasn't been done)
   3. REMAINING ARCHITECTURAL DEFECTS
-  4. RECOMMENDED SHORT-TERM PRIORITIES
-  5. RECOMMENDED MEDIUM-TERM PRIORITIES
-  6. RECOMMENDED LONG-TERM VISION
+  4. RECOMMENDED NEXT PRIORITIES
+  5. RECOMMENDED LONG-TERM VISION
 
 
 ================================================================================
@@ -31,15 +31,16 @@ TABLE OF CONTENTS
   Build:        CMake 3.28+, unity build ON, LTO ON
   Tests:        Google Test (30+ test files)
 
-  Biggest files (all >1000 lines — 23 files remaining after splits):
-    1558  src/ui/panels/project/ProjectPanel.cpp
-    1500  src/ui/panels/timeline/TimelineWorkspacePanelsWiring.cpp
+  Biggest files (all >1000 lines — 13 files remaining after splits):
     1464  src/ui/panels/timeline/TimelineWorkspacePanels.cpp
-    1420  src/ui/panels/characters/ShotComposer.cpp
     1332  src/gpu/Nv12Converter.cpp
     1307  src/ui/MainWindowUI.cpp
-    ... (23 files exceed 1000 lines; TimelinePanel.cpp, ProjectBin.cpp
-         already split in earlier sessions)
+    1297  src/ui/panels/project/ProjectPanelUI.cpp
+    1274  src/gpu/CompositeServiceLayerBuild.cpp
+    ... (13 files exceed 1000 lines; TimelinePanel.cpp, ProjectBin.cpp,
+         ProjectPanel.cpp, TimelineWorkspacePanelsWiring.cpp,
+         ShotComposer.cpp, MediaPool.cpp, AudioPlaybackService.cpp,
+         VideoDecoder.cpp already split)
 
 ================================================================================
 2. REMAINING WORK (what hasn't been done)
@@ -102,52 +103,11 @@ TABLE OF CONTENTS
   monitoring. Loop frames and pinned frames accumulate unbounded.
 
 ================================================================================
-4. RECOMMENDED SHORT-TERM PRIORITIES (Next 1-2 Weeks)
+4. RECOMMENDED NEXT PRIORITIES
 ================================================================================
 
-  Build + test after EACH item. Crash patterns from May 10-11 are
-  ADDRESSED (log archived in COMPLETED_TASKS file).
-
-  [P1] Split ShotComposer.cpp (1420 lines)
-       Estimate: 2-3 hours
-       Impact: 4th-largest file in the project. Extract ShotPreviewEngine,
-       ShotRenderPipeline, ShotExportHandler per MODULARIZATION_PLAN P2.3.
-       Already has UI/Properties/ThumbnailGen/Video/Library sub-files.
-
-  [P1] Split ProjectPanel.cpp (1558 lines — now the largest file)
-       Estimate: 3-4 hours
-       Impact: Extract project-level operations from the 1558-line
-       monolith. Note: this is ProjectPanel.cpp, NOT ProjectBin.cpp
-       (which is already split to 46 lines). ProjectPanel handles
-       project-level create/open/save/close/recent/import workflows.
-       Also has ProjectPanelUI.cpp (1297 lines) as sibling.
-
-  [P1] Split TimelineWorkspacePanelsWiring.cpp (1500 lines)
-       Estimate: 2 hours
-       Impact: 5th-largest file. One sub-file already extracted
-       (TimelineWorkspacePanelsWiringClipSelection.cpp, 1235 lines).
-       Extract per-domain wiring modules per MODULARIZATION_PLAN P2.8:
-       WorkspaceSelectionWiring, PlaybackWiring, TrackWiring, ProjectWiring.
-
-================================================================================
-5. RECOMMENDED MEDIUM-TERM PRIORITIES (2-4 Weeks)
-================================================================================
-
-    [P2] Split MediaPool.cpp (841 lines)
-         Estimate: 2-3 hours per MODULARIZATION_PLAN P2.5
-         Impact: Extract import pipeline, dependency graph, and cache policy.
-         Interface-first approach: define MediaPool public API, delegate.
-         Already has MediaPoolPrefetch.cpp (1013) and MediaPoolDecode.cpp (481).
-
-    [P2] Split AudioPlaybackService.cpp (792 lines)
-         Estimate: 1-2 hours per MODULARIZATION_PLAN P2.6
-         Impact: Extract AudioDeviceAbstraction and PlaybackGraphBuilder.
-         Original becomes ~200-line coordinator.
-
-    [P2] Split VideoDecoder.cpp (791 lines)
-         Estimate: 1-2 hours per MODULARIZATION_PLAN P2.7
-         Impact: Extract DecoderLifecycle and DecoderFormatAdapters.
-         Keeps codec-specific code from destabilizing lifecycle logic.
+  All [P1] and [P2] file-split items are COMPLETE.
+  See docs/COMPLETED_TASKS_FINAL_SUMMARY.txt for the archive.
 
     [P3] Phase 3 modularization items from MODULARIZATION_PLAN
          See docs/MODULARIZATION_PLAN.txt for full list (24 items).
@@ -165,7 +125,7 @@ TABLE OF CONTENTS
          fence-aware eviction.
 
 ================================================================================
-6. RECOMMENDED LONG-TERM VISION (2-3 Months)
+5. RECOMMENDED LONG-TERM VISION (2-3 Months)
 ================================================================================
 
   The render graph rewrite (Phase 6 of RENDER_FIX_PLAN.txt) is the correct
