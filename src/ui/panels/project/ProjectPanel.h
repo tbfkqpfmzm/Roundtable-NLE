@@ -31,6 +31,8 @@
 #include <QStringList>
 #include <QIcon>
 
+#include <atomic>
+
 class QLabel;
 class QLineEdit;
 class QComboBox;
@@ -177,6 +179,9 @@ private:
     QString thumbnailPathForProject(const QString& projectName) const;
     void rebuildRecentPathButtons();
     void addRecentSaveLocation(const QString& path);
+
+    // ── Use-after-free guard ────────────────────────────────────────────
+    std::atomic<bool> m_destroying{false};
 
     // ── Data ────────────────────────────────────────────────────────────
     QVector<ProjectInfo> m_allProjects;

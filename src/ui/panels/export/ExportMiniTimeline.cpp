@@ -80,8 +80,14 @@ int ExportMiniTimeline::tickToX(int64_t tick) const
 
 // ── Painting ────────────────────────────────────────────────────────────────
 
-void ExportMiniTimeline::paintEvent(QPaintEvent* /*event*/)
+void ExportMiniTimeline::paintEvent(QPaintEvent* event)
 {
+    static thread_local int s_paintDepth = 0;
+    if (++s_paintDepth > 5) {
+        --s_paintDepth;
+        QWidget::paintEvent(event);
+        return;
+    }
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
 
@@ -93,7 +99,7 @@ void ExportMiniTimeline::paintEvent(QPaintEvent* /*event*/)
     const int barTop   = kBarMarginTop;
     const int barBot   = barTop + kBarHeight;
 
-    if (barW <= 0) return;
+    if (barW <= 0) { --s_paintDepth; return; }
 
     // ── 1. Draw the full-range bar background ───────────────────────
     QRect barRect(barLeft, barTop, barW, kBarHeight);

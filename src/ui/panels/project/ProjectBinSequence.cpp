@@ -1,0 +1,326 @@
+/*
+ * ProjectBinSequence.cpp — Sequence creation for ProjectBin.
+ * Extracted from ProjectBin.cpp (modularization phase).
+ *
+ * Contains: createNewSequence, createSequenceFromMedia, createColorMatte
+ */
+
+#include "QtHelpers.h"
+#include "panels/project/ProjectBin.h"
+#include "Theme.h"
+#include "widgets/MediaDragTreeWidget.h"
+#include "project/Project.h"
+#include "project/Settings.h"
+#include "timeline/Timeline.h"
+#include "timeline/Track.h"
+#include "timeline/VideoClip.h"
+#include "timeline/AudioClip.h"
+#include "timeline/ImageClip.h"
+#include "media/MediaPool.h"
+#include "dialogs/SequenceDialog.h"
+#include "command/CommandStack.h"
+#include "command/LambdaCommand.h"
+
+#include <QColorDialog>
+#include <QFileInfo>
+#include <QInputDialog>
+#include <QLineEdit>
+#include <QMessageBox>
+#include <QImage>
+#include <QRegularExpression>
+
+#include <spdlog/spdlog.h>
+
+#include <algorithm>
+#include <cctype>
+#include <filesystem>
+
+namespace rt {
+
+// =============================================================================
+//  Sequence creation
+// =============================================================================
+
+void ProjectBin::createNewSequence()
+{
+    // Show dialog FIRST — no project is created until user confirms
+    SequenceDialog dlg(this);
+    dlg.setWindowTitle(tr("New Sequence"));
+
+    if (m_project) {
+        dlg.setMediaProperties(
+            m_project->settings().resolution().width,
+            m_project->settings().resolution().height,
+            m_project->settings().frameRate());
+        dlg.setSequenceName(QString::fromStdString(m_project->nextSequenceName()));
+    } else {
+        dlg.setMediaProperties(1920, 1080, 30.0);
+        dlg.setSequenceName(QStringLiteral("Sequence 1"));
+    }
+
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+
+    QString seqName = dlg.sequenceName();
+    uint32_t w = dlg.width();
+    uint32_t h = dlg.height();
+    double fps = dlg.frameRate();
+    std::string name = seqName.toStdString();
+
+    // Auto-create project if none exists, with the chosen settings
+    if (!m_project) {
+        auto* newProj = new Project();
+        newProj->setName("Untitled");
+        newProj->settings().setResolution(w, h);
+        newProj->settings().setFrameRate(fps);
+        // Name the default sequence what the user chose
+        if (newProj->sequenceCount() > 0 && newProj->sequence(0))
+            newProj->sequence(0)->setName(name);
+        emit projectCreated(newProj);
+        if (!m_project) { delete newProj; return; }
+        // Bin already reflects the project — just signal the sequence
+        emit sequencesChanged();
+        emit sequenceOpened(0);
+    } else {
+        // Existing project: update settings and add a new sequence
+        m_project->settings().setResolution(w, h);
+        m_project->settings().setFrameRate(fps);
+        if (m_commandStack) {
+            size_t newIdx = m_project->sequenceCount();
+            m_commandStack->execute(std::make_unique<LambdaCommand>(
+                "Add Sequence '" + name + "'",
+                [this, name, newIdx]() {
+                    m_project->addSequence(name);
+                    syncListView();
+                    emit sequencesChanged();
+                    emit sequenceOpened(newIdx);
+                },
+                [this, newIdx]() {
+                    m_project->removeSequence(newIdx);
+                    syncListView();
+                    emit sequencesChanged();
+                }));
+        } else {
+            m_project->addSequence(name);
+            syncListView();
+            emit sequencesChanged();
+            emit sequenceOpened(m_project->sequenceCount() - 1);
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+//  Create sequence from media (drag-to-create-sequence button)
+// -----------------------------------------------------------------------------
+
+void ProjectBin::createSequenceFromMedia(const std::filesystem::path& filePath)
+{
+    if (!m_project) return;
+
+    // Determine media properties from the MediaPool
+    uint32_t mediaW = 0, mediaH = 0;
+    double mediaFps = 30.0;
+    double mediaDurationSec = 0.0;
+    bool mediaHasAudio = false;
+
+    if (m_pool) {
+        uint64_t handle = m_pool->open(filePath.string());
+        if (handle != 0) {
+            const auto* info = m_pool->getInfo(handle);
+            if (info) {
+                mediaW = info->width;
+                mediaH = info->height;
+                if (info->fps > 0.0) mediaFps = info->fps;
+                mediaDurationSec = info->duration;
+                mediaHasAudio = info->hasAudio;
+            }
+        }
+    }
+
+    // Default to 1920x1080 30fps if no media info
+    if (mediaW == 0 || mediaH == 0) {
+        mediaW = 1920;
+        mediaH = 1080;
+    }
+
+    // Update project settings to match media
+    m_project->settings().setResolution(mediaW, mediaH);
+    m_project->settings().setFrameRate(mediaFps);
+
+    // Create a sequence named after the media file
+    QString stem = QFileInfo(QString::fromStdString(filePath.string())).completeBaseName();
+    if (stem.isEmpty()) stem = QStringLiteral("Sequence");
+    std::string seqName = stem.toStdString();
+
+    // Compute clip duration in ticks
+    int64_t clipDuration = secondsToTicks(mediaDurationSec);
+    if (clipDuration <= 0)
+        clipDuration = secondsToTicks(5.0); // default 5 seconds
+
+    // Determine media type from extension
+    std::string ext = filePath.extension().string();
+    for (auto& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    const bool isVideo = (ext == ".mp4" || ext == ".mov" || ext == ".mkv" ||
+                          ext == ".webm" || ext == ".avi" || ext == ".m4v");
+    const bool isAudio = (ext == ".wav" || ext == ".mp3" || ext == ".flac" ||
+                          ext == ".ogg" || ext == ".m4a" || ext == ".aac" || ext == ".opus");
+    const bool isImage = (ext == ".png" || ext == ".jpg" || ext == ".jpeg" ||
+                          ext == ".bmp" || ext == ".gif" || ext == ".tga" ||
+                          ext == ".tiff" || ext == ".webp");
+
+    // Pre-build the timeline so undo/redo swaps it cleanly via
+    // insertSequence/extractSequence (no dangling pointer window).
+    auto builtTimeline = std::make_unique<Timeline>();
+    builtTimeline->setName(seqName);
+    std::string fileStr = filePath.string();
+
+    if (isVideo) {
+        // Replace default V1+A1 with our populated tracks
+        while (builtTimeline->trackCount() > 0)
+            builtTimeline->removeTrack(0);
+
+        Track* vTrack = builtTimeline->addVideoTrack("Video 1");
+        auto vClip = std::make_unique<VideoClip>(fileStr);
+        vClip->setTimelineIn(0);
+        vClip->setDuration(clipDuration);
+        vClip->setSourceIn(0);
+        vClip->setSourceResolution(mediaW, mediaH);
+        vClip->setSourceFps(mediaFps);
+        vClip->setSourceDuration(clipDuration);
+        vClip->setLabel(QFileInfo(QString::fromStdString(fileStr))
+                            .fileName().toStdString());
+        vTrack->addClip(std::move(vClip));
+
+        if (mediaHasAudio) {
+            Track* aTrack = builtTimeline->addAudioTrack("Audio 1");
+            auto aClip = std::make_unique<AudioClip>(fileStr);
+            aClip->setTimelineIn(0);
+            aClip->setDuration(clipDuration);
+            aClip->setSourceIn(0);
+            aClip->setSourceDuration(clipDuration);
+            aClip->setLabel(QFileInfo(QString::fromStdString(fileStr))
+                                .fileName().toStdString());
+            aTrack->addClip(std::move(aClip));
+        }
+    } else if (isImage) {
+        while (builtTimeline->trackCount() > 0)
+            builtTimeline->removeTrack(0);
+
+        Track* vTrack = builtTimeline->addVideoTrack("Video 1");
+        auto iClip = std::make_unique<ImageClip>(fileStr);
+        iClip->setTimelineIn(0);
+        iClip->setDuration(clipDuration);
+        iClip->setSourceIn(0);
+        iClip->setSourceResolution(mediaW, mediaH);
+        iClip->setLabel(QFileInfo(QString::fromStdString(fileStr))
+                            .fileName().toStdString());
+        vTrack->addClip(std::move(iClip));
+    } else if (isAudio) {
+        while (builtTimeline->trackCount() > 0)
+            builtTimeline->removeTrack(0);
+
+        Track* aTrack = builtTimeline->addAudioTrack("Audio 1");
+        auto aClip = std::make_unique<AudioClip>(fileStr);
+        aClip->setTimelineIn(0);
+        aClip->setDuration(clipDuration);
+        aClip->setSourceIn(0);
+        aClip->setSourceDuration(clipDuration);
+        aClip->setLabel(QFileInfo(QString::fromStdString(fileStr))
+                            .fileName().toStdString());
+        aTrack->addClip(std::move(aClip));
+    }
+
+    // Wrap in shared_ptr so we can move the unique_ptr through std::function captures
+    auto sharedTimeline = std::make_shared<std::unique_ptr<Timeline>>(
+        std::move(builtTimeline));
+
+    size_t newIdx = m_project->sequenceCount();
+
+    auto addSeqCmd = std::make_unique<LambdaCommand>(
+        "Add Sequence '" + seqName + "'",
+        [this, newIdx, sharedTimeline]() {
+            m_project->insertSequence(newIdx, std::move(*sharedTimeline));
+            *sharedTimeline = nullptr;
+            syncListView();
+            emit sequencesChanged();
+            emit sequenceOpened(newIdx);
+        },
+        [this, newIdx, sharedTimeline]() {
+            *sharedTimeline = m_project->extractSequence(newIdx);
+            syncListView();
+            emit sequencesChanged();
+        });
+
+    if (m_commandStack) {
+        m_commandStack->execute(std::move(addSeqCmd));
+    } else {
+        m_project->insertSequence(newIdx, std::move(*sharedTimeline));
+        *sharedTimeline = nullptr;
+        syncListView();
+        emit sequencesChanged();
+        emit sequenceOpened(newIdx);
+    }
+}
+
+// -----------------------------------------------------------------------------
+//  Color Matte (Premiere Pro-style)
+// -----------------------------------------------------------------------------
+
+void ProjectBin::createColorMatte()
+{
+    // 1. Pick a color
+    QColor color = QColorDialog::getColor(Qt::white, this,
+                                          tr("Choose Color Matte Color"),
+                                          QColorDialog::ShowAlphaChannel);
+    if (!color.isValid())
+        return;
+
+    // 2. Ask for a name
+    bool ok = false;
+    QString name = QInputDialog::getText(this, tr("New Color Matte"),
+                                         tr("Matte name:"),
+                                         QLineEdit::Normal,
+                                         QStringLiteral("Color Matte"), &ok);
+    name = name.trimmed();
+    if (!ok || name.isEmpty())
+        return;
+
+    // 3. Determine output directory
+    std::filesystem::path matteDir;
+    if (m_project && !m_project->filePath().empty()) {
+        // Place alongside the project file
+        matteDir = m_project->filePath().parent_path() / "Mattes";
+    } else {
+        // Fallback to user data directory
+        matteDir = std::filesystem::path(userDataDir().toStdString()) / "Mattes";
+    }
+    std::filesystem::create_directories(matteDir);
+
+    // 4. Generate a unique filename
+    QString safeName = name;
+    safeName.replace(QRegularExpression(R"([<>:"/\\|?*])"), QStringLiteral("_"));
+    std::filesystem::path mattePath = matteDir / (safeName.toStdString() + ".png");
+    {
+        int counter = 1;
+        while (std::filesystem::exists(mattePath)) {
+            mattePath = matteDir / (safeName.toStdString() + "_" + std::to_string(counter++) + ".png");
+        }
+    }
+
+    // 5. Create the solid-color PNG (1920x1080 like Premiere's default)
+    QImage matteImage(1920, 1080, QImage::Format_ARGB32_Premultiplied);
+    matteImage.fill(color);
+    if (!matteImage.save(QString::fromStdString(mattePath.string()), "PNG")) {
+        spdlog::error("Failed to save color matte: {}", mattePath.string());
+        QMessageBox::warning(this, tr("Error"),
+                             tr("Failed to save color matte image."));
+        return;
+    }
+
+    // 6. Import the generated matte into the bin
+    addFiles({mattePath});
+    spdlog::info("ProjectBin: created color matte '{}' at {}",
+                 name.toStdString(), mattePath.string());
+}
+
+} // namespace rt

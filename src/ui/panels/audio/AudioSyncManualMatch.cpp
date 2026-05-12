@@ -124,7 +124,7 @@ void AudioSync::openManualMatch(int lineNumber)
                         updateCardMatchStyle(clipIndex);
                         for (size_t waveIndex = 0; waveIndex < m_cardScriptLineNums.size(); ++waveIndex) {
                             if (m_cardScriptLineNums[waveIndex] == lineNumber && waveIndex < m_cardWaveforms.size()) {
-                                if (auto* waveform = m_cardWaveforms[waveIndex]) {
+                                if (auto waveform = m_cardWaveforms[waveIndex]) {
                                     auto sampleIt = m_audioSamples.find(m_clips[clipIndex].sourceFile);
                                     if (sampleIt != m_audioSamples.end()) {
                                         waveform->setAudioShared(

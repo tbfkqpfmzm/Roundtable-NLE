@@ -44,6 +44,7 @@ void FrameProducer::start()
 void FrameProducer::stop()
 {
     if (!m_running.load()) return;
+    m_destroying.store(true);
     m_running.store(false);
     m_reqCV.notify_one();       // wake worker if blocked
     m_exchangeCV.notify_one();  // wake presenter if blocked
@@ -59,12 +60,16 @@ void FrameProducer::requestFrame(int64_t tick)
 {
     {
         std::lock_guard lock(m_reqMtx);
-        // If the queue already has pending ticks and the producer hasn't
-        // picked them up yet, replace with the LATEST tick.  This way
-        // the producer always works on the most recent frame request and
-        // doesn't composite stale frames if the clock advances faster
-        // than the compositor (frame-dropping at the production stage).
-        if (!m_pendingTicks.empty()) {
+        // Cap the queue at kMaxPendingFrames to prevent unbounded growth
+        // when the compositor is slower than the clock.  When the cap is
+        // reached, replace the LAST entry (most recent tick) so the
+        // producer always works on the latest request, and signal
+        // backpressure so FrameClock can skip future ticks.
+        const bool overLimit = m_pendingTicks.size() >= kMaxPendingFrames;
+        if (overLimit) {
+            m_pendingTicks.back() = tick;
+            m_backpressure.store(true, std::memory_order_release);
+        } else if (!m_pendingTicks.empty()) {
             m_pendingTicks.back() = tick;
         } else {
             m_pendingTicks.push_back(tick);
@@ -96,7 +101,7 @@ void FrameProducer::producerLoop()
 
     spdlog::info("[FrameProducer] Thread started");
 
-    while (m_running.load(std::memory_order_relaxed)) {
+    while (m_running.load(std::memory_order_relaxed) && !m_destroying.load(std::memory_order_acquire)) {
         int64_t tick = 0;
         std::optional<ScrubRequest> scrubReq;
 
@@ -109,6 +114,9 @@ void FrameProducer::producerLoop()
                     || !m_running.load(std::memory_order_relaxed);
             });
             if (!m_running.load(std::memory_order_relaxed)) break;
+
+            // Clear backpressure — the producer is about to process a frame.
+            m_backpressure.store(false, std::memory_order_release);
 
             // Scrub requests have priority over clock ticks
             if (m_pendingScrub.has_value()) {
@@ -134,6 +142,7 @@ void FrameProducer::producerLoop()
 
 void FrameProducer::produceFrameImpl(int64_t tick)
 {
+    if (m_destroying.load(std::memory_order_acquire)) return;
     if (!m_compositeCB) return;
 
     const int div = m_resDivisor.load(std::memory_order_relaxed);
@@ -184,6 +193,7 @@ void FrameProducer::produceFrameImpl(int64_t tick)
 
 void FrameProducer::produceScrubFrameImpl(const ScrubRequest& req)
 {
+    if (m_destroying.load(std::memory_order_acquire)) return;
     if (!m_compositeCB) return;
 
     auto frame = m_compositeCB(req.tick, req.w, req.h, req.scrub);

@@ -618,6 +618,11 @@ TimelineWorkspace::~TimelineWorkspace()
         m_programMonitor->setCompositeCallback(nullptr);
     }
 
+    // Clear safe mode callback before destroying composite service
+    if (m_compositeService) {
+        m_compositeService->setSafeModeCallback(nullptr);
+    }
+
     // Cancel any in-flight background audio decode before destroying
     if (m_audioPlayback) {
         m_audioPlayback->cancelWarm();
@@ -653,6 +658,23 @@ void TimelineWorkspace::setTimeline(Timeline* timeline) {
                 scheduleSpineSharedLoad(c, o, s, a);
             });
 #endif
+
+        // ── Phase 7.B: Wire safe mode callback ──────────────────────
+        // When safe mode is entered or exited, update the ProgramMonitor's
+        // safe mode banner and viewport state automatically.  This is the
+        // seamless, invisible recovery mechanism — the user never needs to
+        // click a "Refresh" button.
+        m_compositeService->setSafeModeCallback(
+            [this](bool safeModeActive) {
+                if (m_programMonitor) {
+                    m_programMonitor->setSafeModeBannerVisible(safeModeActive);
+                }
+                if (safeModeActive) {
+                    spdlog::warn("[SAFEMODE] Safe mode ENTERED — using CPU fallback");
+                } else {
+                    spdlog::info("[SAFEMODE] Safe mode EXITED — GPU compositing restored");
+                }
+            });
     }
 
     // Forward to TimelinePanel so its track widgets and ensureDefaultTracks

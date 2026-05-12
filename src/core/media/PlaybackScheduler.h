@@ -5,6 +5,7 @@
 #include "media/FrameProducer.h"
 #include "media/FramePresenter.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -146,6 +147,9 @@ private:
     int m_playbackDirection{0};
     uint64_t m_latestScrubRequestId{0};
     PlaybackSchedulerStats m_stats;
+
+    /// Frames skipped by backpressure (compositor < clock speed).
+    std::atomic<int64_t> m_backpressureSkippedFrames{0};
 };
 
 [[nodiscard]] const char* toString(ScheduledFrameAction action) noexcept;

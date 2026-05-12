@@ -25,8 +25,9 @@ int AudioSync::clipRowForWidget(QWidget* widget) const
 
     QWidget* current = widget;
     while (current) {
-        for (size_t i = 0; i < m_cardWidgets.size(); ++i) {
-            if (m_cardWidgets[i] == current && i < m_cardClipIndices.size()) {
+        auto widgets = m_cardWidgets;  // local copy — protect against vector modification
+        for (size_t i = 0; i < widgets.size(); ++i) {
+            if (widgets[i] == current && i < m_cardClipIndices.size()) {
                 return m_cardClipIndices[i];
             }
         }
@@ -64,8 +65,9 @@ bool AudioSync::eventFilter(QObject* watched, QEvent* event)
                     card = card->parentWidget();
 
                 if (card) {
-                    for (size_t i = 0; i < m_cardWidgets.size(); ++i) {
-                        if (m_cardWidgets[i] == card) {
+                    auto widgets = m_cardWidgets;  // local copy — protect against vector modification
+                    for (size_t i = 0; i < widgets.size(); ++i) {
+                        if (widgets[i] == card) {
                             if (i < m_cardClipIndices.size() && m_cardClipIndices[i] >= 0)
                                 m_selectedClipIdx = m_cardClipIndices[i];
 
@@ -86,11 +88,12 @@ bool AudioSync::eventFilter(QObject* watched, QEvent* event)
                                 }
                             }
 
-                            if (m_leftScriptList) {
+                            if (m_leftScriptList && i < m_cardScriptLineNums.size()) {
+                                auto scriptLineNum = m_cardScriptLineNums[i];
                                 for (int row = 0; row < m_leftScriptList->count(); ++row) {
                                     auto* item = m_leftScriptList->item(row);
-                                    if (item && i < m_cardScriptLineNums.size() &&
-                                        item->data(Qt::UserRole).toInt() == m_cardScriptLineNums[i]) {
+                                    if (item &&
+                                        item->data(Qt::UserRole).toInt() == scriptLineNum) {
                                         m_leftScriptList->blockSignals(true);
                                         m_leftScriptList->setCurrentRow(row);
                                         m_leftScriptList->blockSignals(false);

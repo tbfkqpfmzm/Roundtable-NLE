@@ -455,6 +455,10 @@ void MainWindow::buildPanels()
 {
     if (m_panelsBuilt) return;
 
+    // Suppress paint events during widget construction to prevent
+    // paint -> layout -> repaint recursion while geometry is inconsistent.
+    setUpdatesEnabled(false);
+
     spdlog::info("MainWindow::buildPanels() — creating tabbed pages");
 
     // ── Page 0: PROJECTS ────────────────────────────────────────────────
@@ -943,8 +947,13 @@ void MainWindow::buildPanels()
     }
 
     m_panelsBuilt = true;
+
     spdlog::info("MainWindow::buildPanels() — 5 pages created "
                  "({} timeline panels)", m_timelineWorkspace->dockCount());
+
+    setUpdatesEnabled(true);
+    updateGeometry();
+    repaint();
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

@@ -163,8 +163,14 @@ void ColorWheelWidget::posToOffset(const QPointF& pos)
     m_offsetB = sat * std::cos(angle + 2.0f * static_cast<float>(M_PI) / 3.0f) * 0.7f;
 }
 
-void ColorWheelWidget::paintEvent(QPaintEvent*)
+void ColorWheelWidget::paintEvent(QPaintEvent* event)
 {
+    static thread_local int s_paintDepth = 0;
+    if (++s_paintDepth > 5) {
+        --s_paintDepth;
+        QWidget::paintEvent(event);
+        return;
+    }
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
 
@@ -221,6 +227,8 @@ void ColorWheelWidget::paintEvent(QPaintEvent*)
         QRectF labelRect(wr.x(), wr.bottom() + 4, wr.width() + kMasterSliderGap + kMasterSliderWidth, kLabelHeight);
         p.drawText(labelRect, Qt::AlignHCenter | Qt::AlignTop, m_label);
     }
+
+    --s_paintDepth;
 }
 
 void ColorWheelWidget::mousePressEvent(QMouseEvent* event)
@@ -324,9 +332,17 @@ void ColorWheelWidget::mouseDoubleClickEvent(QMouseEvent* event)
     }
 }
 
-void ColorWheelWidget::resizeEvent(QResizeEvent*)
+void ColorWheelWidget::resizeEvent(QResizeEvent* event)
 {
+    static thread_local bool s_inResize = false;
+    if (s_inResize) {
+        QWidget::resizeEvent(event);
+        return;
+    }
+    s_inResize = true;
     m_wheelDirty = true;
+    QWidget::resizeEvent(event);
+    s_inResize = false;
 }
 
 } // namespace rt

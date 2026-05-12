@@ -91,8 +91,14 @@ int FullWaveformWidget::timeToPixel(double t) const
 
 // ── Paint ────────────────────────────────────────────────────────────────
 
-void FullWaveformWidget::paintEvent(QPaintEvent*)
+void FullWaveformWidget::paintEvent(QPaintEvent* event)
 {
+    static thread_local int s_paintDepth = 0;
+    if (++s_paintDepth > 5) {
+        --s_paintDepth;
+        QWidget::paintEvent(event);
+        return;
+    }
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing, false);
 
@@ -269,6 +275,8 @@ void FullWaveformWidget::paintEvent(QPaintEvent*)
     // ── Center line ──────────────────────────────────────────────────
     p.setPen(QPen(tc.border, 1, Qt::DotLine));
     p.drawLine(0, centerY, w, centerY);
+
+    --s_paintDepth;
 }
 
 // ── Mouse interaction ────────────────────────────────────────────────────

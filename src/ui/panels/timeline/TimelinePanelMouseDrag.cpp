@@ -86,7 +86,7 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
             }
 
             // Set razor tick on the hovered track widget, clear others
-            for (auto* tw : m_trackWidgets)
+            for (auto tw : m_trackWidgets)
                 tw->setRazorTick(overClip && tw->trackIndex() == ti ? tick : -1);
 
             QWidget::mouseMoveEvent(event);
@@ -144,27 +144,27 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
                         setCursor(Qt::SizeHorCursor);
                         // Highlight the hovered edge on the track widget
                         int64_t edgeTick = nearHead ? clip->timelineIn() : clip->timelineOut();
-                        for (auto* tw : m_trackWidgets)
+                        for (auto tw : m_trackWidgets)
                             tw->setHoverEdgeTick(hitRef->trackIndex == tw->trackIndex() ? edgeTick : -1);
                     }
                     else
                     {
                         setCursor(Qt::ArrowCursor);
-                        for (auto* tw : m_trackWidgets)
+                        for (auto tw : m_trackWidgets)
                             tw->setHoverEdgeTick(-1);
                     }
                 }
                 else
                 {
                     setCursor(Qt::ArrowCursor);
-                    for (auto* tw : m_trackWidgets)
+                    for (auto tw : m_trackWidgets)
                         tw->setHoverEdgeTick(-1);
                 }
             }
             else
             {
                 setCursor(Qt::ArrowCursor);
-                for (auto* tw : m_trackWidgets)
+                for (auto tw : m_trackWidgets)
                     tw->setHoverEdgeTick(-1);
             }
             } // end if (!hoveringTransEdge)
@@ -215,8 +215,8 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
             // â”€â”€ Ghost track detection (Premiere Pro-style) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             // Cursor is OUTSIDE any existing track.  Determine if it's
             // above the topmost track or below the bottommost track.
-            auto* firstTw = m_trackWidgets.front();
-            auto* lastTw  = m_trackWidgets.back();
+            auto firstTw = m_trackWidgets.front();
+            auto lastTw  = m_trackWidgets.back();
             QPoint firstTop = firstTw->mapTo(this, QPoint(0, 0));
             QPoint lastBot  = lastTw->mapTo(this, QPoint(0, lastTw->height()));
 
@@ -433,7 +433,7 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
         executeCommand(std::move(cmd));
         // Move the hover-edge highlight with the dragged edge so the original
         // edge position doesn't stay drawn underneath as a stale blue line.
-        for (auto* tw : m_trackWidgets)
+        for (auto tw : m_trackWidgets)
             tw->setHoverEdgeTick(tw->trackIndex() == m_dragClipRef.trackIndex ? newHead : -1);
         onScrollChanged();
         break;
@@ -470,7 +470,7 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
         executeCommand(std::move(cmd));
         // Move the hover-edge highlight with the dragged edge so the original
         // edge position doesn't stay drawn underneath as a stale blue line.
-        for (auto* tw : m_trackWidgets)
+        for (auto tw : m_trackWidgets)
             tw->setHoverEdgeTick(tw->trackIndex() == m_dragClipRef.trackIndex ? newTail : -1);
         onScrollChanged();
         break;

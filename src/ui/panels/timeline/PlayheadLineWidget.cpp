@@ -16,8 +16,14 @@ PlayheadLineWidget::PlayheadLineWidget(QWidget* parent)
     setFixedWidth(3);
 }
 
-void PlayheadLineWidget::paintEvent(QPaintEvent*)
+void PlayheadLineWidget::paintEvent(QPaintEvent* event)
 {
+    static thread_local int s_paintDepth = 0;
+    if (++s_paintDepth > 5) {
+        --s_paintDepth;
+        QWidget::paintEvent(event);
+        return;
+    }
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
     QColor phCol = rt::Theme::colors().playhead;
@@ -25,4 +31,5 @@ void PlayheadLineWidget::paintEvent(QPaintEvent*)
     p.setPen(QPen(phCol, 1.5));
     const double cx = width() / 2.0;
     p.drawLine(QPointF(cx, 0), QPointF(cx, height()));
+    --s_paintDepth;
 }

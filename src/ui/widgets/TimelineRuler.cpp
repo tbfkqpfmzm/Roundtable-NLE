@@ -102,9 +102,15 @@ QSize TimelineRuler::minimumSizeHint() const
     return {100, kRulerHeight};
 }
 
-void TimelineRuler::paintEvent(QPaintEvent* /*event*/)
+void TimelineRuler::paintEvent(QPaintEvent* event)
 {
-    if (!m_engine) return;
+    static thread_local int s_paintDepth = 0;
+    if (++s_paintDepth > 5) {
+        --s_paintDepth;
+        QWidget::paintEvent(event);
+        return;
+    }
+    if (!m_engine) { --s_paintDepth; return; }
 
     auto rulerT0 = std::chrono::steady_clock::now();
 
@@ -258,6 +264,8 @@ void TimelineRuler::paintEvent(QPaintEvent* /*event*/)
                          rulerMs, marks.size());
         }
     }
+
+    --s_paintDepth;
 }
 
 void TimelineRuler::mousePressEvent(QMouseEvent* event)

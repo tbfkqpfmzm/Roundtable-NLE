@@ -12,6 +12,7 @@
 #include <volk.h>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 
 struct VmaAllocator_T;
 struct VmaAllocation_T;
@@ -34,7 +35,7 @@ public:
     void destroy();
 
     /// Reset the sub-allocator.  Call after the frame fence signals.
-    void reset() { m_offset = 0; }
+    void reset() { std::lock_guard lock(m_ringMutex); m_offset = 0; }
 
     /// Sub-allocate a region, write data, return the buffer + offset.
     /// Returns false if the staging buffer is full (fallback to VMA alloc).
@@ -57,6 +58,7 @@ private:
     void*         m_mapped{nullptr};
     VkDeviceSize  m_capacity{0};
     VkDeviceSize  m_offset{0};
+    std::mutex    m_ringMutex;
 };
 
 } // namespace rt

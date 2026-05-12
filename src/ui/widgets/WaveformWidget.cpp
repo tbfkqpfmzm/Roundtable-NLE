@@ -198,8 +198,15 @@ int64_t WaveformWidget::pixelXToFrame(double x) const
 // Paint
 // ═════════════════════════════════════════════════════════════════════════════
 
-void WaveformWidget::paintEvent(QPaintEvent* /*event*/)
+void WaveformWidget::paintEvent(QPaintEvent* event)
 {
+    static thread_local int s_paintDepth = 0;
+    if (++s_paintDepth > 5) {
+        --s_paintDepth;
+        QWidget::paintEvent(event);
+        return;
+    }
+
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, false);
 
@@ -216,6 +223,8 @@ void WaveformWidget::paintEvent(QPaintEvent* /*event*/)
 
     if (m_playheadVisible)
         paintPlayhead(painter);
+
+    --s_paintDepth;
 }
 
 void WaveformWidget::paintWaveform(QPainter& painter)
@@ -446,8 +455,15 @@ void WaveformWidget::wheelEvent(QWheelEvent* event)
 
 void WaveformWidget::resizeEvent(QResizeEvent* event)
 {
+    static thread_local bool s_inResize = false;
+    if (s_inResize) {
+        QWidget::resizeEvent(event);
+        return;
+    }
+    s_inResize = true;
     updateSamplesPerPixel();
     QWidget::resizeEvent(event);
+    s_inResize = false;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

@@ -92,6 +92,12 @@ public:
     void setGpuDisplayEnabled(bool enabled);
     [[nodiscard]] bool isGpuDisplayEnabled() const noexcept { return m_gpuDisplay; }
 
+    // ── CPU Safe Mode (Phase 6) ─────────────────────────────────────
+    /// Show or hide the safe mode yellow banner.
+    void setSafeModeBannerVisible(bool visible);
+    /// Called when user clicks "Reset GPU" in the safe mode banner.
+    void resetGpuAndExitSafeMode();
+
     // ── Display control ─────────────────────────────────────────────────
 
     /// Start polling for playback position updates (~60fps).
@@ -191,6 +197,10 @@ public:
     /// Notify the monitor that an external seek/scrub occurred so it
     /// retries compositing even if the poll-timer tick hasn't changed yet.
     void notifyScrub();
+
+    /// Signal that a new composited frame is available for display.
+    /// Called from the composite callback or pipeline.
+    void onNewFrame(std::shared_ptr<CachedFrame> frame);
 
     QSize sizeHint() const override;
 
@@ -336,6 +346,13 @@ private:
     /// the direct UI path or the async producer/presenter pipeline.
     std::shared_ptr<CachedFrame> m_lastDirectFrame;
 
+    // ── Dirty flag optimization (Phase 5.C) ───────────────────────────
+    // Set true whenever a new frame is pushed from the compositor.
+    // The pollTimer checks this and skips work if false, saving CPU
+    // cycles when the view is static.
+    std::atomic<bool> m_newFrameAvailable{false};
+    std::shared_ptr<CachedFrame> m_pendingFrame;
+
     // ── Wall-clock playback tick (matches Source Monitor architecture) ──
     // During playback, ticks are driven by steady_clock from a captured
     // start point, just like the Source Monitor.  This avoids all
@@ -345,6 +362,11 @@ private:
     int64_t                                 m_wallClockStartTick{0};
     double                                  m_wallClockSpeed{1.0};
     int                                     m_wallClockFrameCount{0};
+
+    // ── Safe mode banner (Phase 6) ──────────────────────────────────
+    QWidget*  m_safeModeBanner{nullptr};
+    QLabel*   m_safeModeLabel{nullptr};
+    QPushButton* m_btnResetGpu{nullptr};
 
     /// Present callback wired into the pipeline — called from present thread.
     bool presentFrame(const std::shared_ptr<CachedFrame>& frame);

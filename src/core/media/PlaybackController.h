@@ -21,6 +21,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -201,6 +202,13 @@ public:
     /// Use this to trigger pre-buffering (prefetch) before the clock begins.
     std::function<void(int64_t startTick)> onPlayStarting;
 
+    // ── Audio safety (Phase 2.C) ────────────────────────────────────────
+    // When true, the audio callback NEVER blocks waiting for GPU compositing.
+    // If the next audio buffer isn't ready, the last buffer is repeated
+    // instead. This prevents audio glitches when the GPU compositor is slow.
+    // Users may see a repeated video frame instead of hearing audio crackle.
+    std::atomic<bool> m_audioNeverBlock{true};
+
 private:
     Timeline*      m_timeline{nullptr};
     AudioEngine*   m_audioEngine{nullptr};
@@ -216,6 +224,9 @@ private:
     int64_t        m_standaloneTick{0};     ///< Position when no timeline/clock
     int64_t        m_standaloneDuration{0}; ///< Duration when no timeline
     int64_t        m_lastPollTimeNs{0};     ///< For standalone time advancement
+
+    /// Use-after-free guard
+    std::atomic<bool> m_destroying{false};
 
     /// Ticks per frame at current FPS.
     [[nodiscard]] int64_t ticksPerFrame() const noexcept;

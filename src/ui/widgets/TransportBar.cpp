@@ -368,14 +368,22 @@ void TransportBar::keyPressEvent(QKeyEvent* event)
 //  Paint
 // ═════════════════════════════════════════════════════════════════════════════
 
-void TransportBar::paintEvent(QPaintEvent* /*event*/)
+void TransportBar::paintEvent(QPaintEvent* event)
 {
+    static thread_local int s_paintDepth = 0;
+    if (++s_paintDepth > 5) {
+        --s_paintDepth;
+        QWidget::paintEvent(event);
+        return;
+    }
     QPainter painter(this);
     painter.fillRect(rect(), Theme::colors().surface0);
 
     // Subtle top border (Premiere style)
     painter.setPen(Theme::colors().border);
     painter.drawLine(0, 0, width(), 0);
+
+    --s_paintDepth;
 }
 
 bool TransportBar::eventFilter(QObject* watched, QEvent* event)

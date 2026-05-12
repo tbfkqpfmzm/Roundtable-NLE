@@ -19,6 +19,7 @@
 
 #include <vk_mem_alloc.h>
 #include <volk.h>
+#include <thread>
 #include <spdlog/spdlog.h>
 
 namespace rt {
@@ -108,6 +109,7 @@ bool GpuContext::init(VkSurfaceKHR surface)
     }
 
     m_initialized = true;
+    m_gpuState.store(GpuState::Healthy, std::memory_order_release);
     spdlog::info("GpuContext: Vulkan initialization complete");
 
     // Initialize shared staging ring (64 MB — absorbs CompositeService's ring)
@@ -160,6 +162,39 @@ void GpuContext::shutdown()
 
     m_initialized = false;
     spdlog::info("GpuContext: Vulkan shutdown complete");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Device-lost Recovery (Phase 2.B)
+// ═════════════════════════════════════════════════════════════════════════════
+
+bool GpuContext::tryRecover()
+{
+    GpuState expected = GpuState::DeviceLost;
+    if (!m_gpuState.compare_exchange_strong(expected, GpuState::Recovering))
+        return false;
+
+    spdlog::warn("[GPU] Device lost — attempting recovery");
+
+    // Step 1: Shutdown current GPU state
+    // Note: this resets m_initialized to false
+    shutdown();
+
+    // Step 2: Wait a brief moment for driver to settle
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // Step 3: Full re-initialize (same init sequence as startup)
+    bool ok = init();
+
+    m_gpuState.store(ok ? GpuState::Healthy : GpuState::Failed,
+                     std::memory_order_release);
+
+    if (ok) {
+        spdlog::info("[GPU] Recovery successful");
+    } else {
+        spdlog::error("[GPU] Recovery failed — falling back to safe mode");
+    }
+    return ok;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

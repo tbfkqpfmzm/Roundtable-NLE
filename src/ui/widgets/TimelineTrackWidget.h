@@ -11,6 +11,7 @@
 #include <QString>
 #include <QPixmap>
 
+#include <atomic>
 #include <cstdint>
 #include <unordered_map>
 #include <unordered_set>
@@ -92,6 +93,8 @@ public:
     /// Set / clear media-drag ghost preview (Premiere Pro-style semi-transparent clip).
     void setMediaDragPreview(int64_t tick, int64_t duration, bool isAudio);
     void clearMediaDragPreview();
+
+    std::atomic<bool> m_destroying{false};
 
 signals:
     /// Emitted when a clip is clicked.

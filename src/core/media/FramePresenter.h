@@ -84,6 +84,9 @@ private:
     std::thread       m_thread;
     std::atomic<bool> m_running{false};
 
+    // Use-after-free guard
+    std::atomic<bool> m_destroying{false};
+
     // Last displayed frame (for scopes / export readback)
     mutable std::mutex           m_displayMtx;
     std::shared_ptr<CachedFrame> m_lastDisplayed;

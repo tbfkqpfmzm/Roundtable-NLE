@@ -169,15 +169,44 @@ void GpuTextureCache::setBudget(size_t bytes)
     evictUntilFits(0);
 }
 
+// ── Pinning ─────────────────────────────────────────────────────────────────
+
+void GpuTextureCache::pin(uint64_t mediaId, int64_t frameNumber)
+{
+    CacheKey key{mediaId, frameNumber};
+    auto it = m_map.find(key);
+    if (it != m_map.end()) {
+        ++it->second.pinCount;
+    }
+}
+
+void GpuTextureCache::unpin(uint64_t mediaId, int64_t frameNumber)
+{
+    CacheKey key{mediaId, frameNumber};
+    auto it = m_map.find(key);
+    if (it != m_map.end() && it->second.pinCount > 0) {
+        --it->second.pinCount;
+    }
+}
+
+void GpuTextureCache::unpinAll()
+{
+    for (auto& [key, entry] : m_map)
+        entry.pinCount = 0;
+}
+
+// ── Eviction ────────────────────────────────────────────────────────────────
+
 void GpuTextureCache::evictUntilFits(size_t needed)
 {
-    // Pass 1: evict only non-loop frames from the LRU back.
+    // Pass 1: evict only non-loop, non-pinned frames from the LRU back.
     // Loop frames belong to short looping clips that are guaranteed to
     // be needed again every 1-3 seconds; evicting them just forces a
     // CPU→GPU re-upload on the next loop iteration, producing a visible
     // pipeline bubble (typically 30-60ms per frame for a 1920×3840
     // packed-alpha character).  Walk the LRU back-to-front skipping
-    // loop entries.
+    // loop entries and pinned entries (those referenced by in-flight
+    // GPU command buffers).
     auto walkAndEvict = [&](bool includeLoopFrames) {
         if (m_lru.empty()) return;
         auto it = m_lru.end();
@@ -188,6 +217,9 @@ void GpuTextureCache::evictUntilFits(size_t needed)
                 it = m_lru.erase(it);
                 continue;
             }
+            // Skip pinned entries — still referenced by in-flight GPU work
+            if (mapIt->second.pinCount > 0)
+                continue;
             if (!includeLoopFrames && mapIt->second.isLoopFrame) {
                 continue;
             }

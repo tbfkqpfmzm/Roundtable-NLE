@@ -13,7 +13,7 @@
  *   3. Log crash info to a file for later analysis
  *
  * Usage:
- *   CrashHandler::install("crash_logs/");
+ *   CrashHandler::install("%LOCALAPPDATA%/ROUNDTABLE/logs/");
  *   CrashHandler::setEmergencySaveCallback([&]{
  *       autoSave.saveNow();
  *   });
@@ -86,6 +86,24 @@ public:
 
     /// Check if a crash log exists from a previous session.
     [[nodiscard]] static bool hasPreviousCrashLog();
+
+    // ── Crash marker (Phase 7.A) ────────────────────────────────────────
+    /// Write a crash marker file so the next launch can detect the crash.
+    /// Written before generating the minidump in the crash handler.
+    static void writeCrashMarker(const CrashInfo& info);
+
+    /// Check if a crash marker exists from a previous session.
+    [[nodiscard]] static bool hasCrashMarker();
+
+    /// Read the crash marker and return the stored crash info.
+    /// Returns empty CrashInfo if no marker or parse failure.
+    [[nodiscard]] static CrashInfo readCrashMarker();
+
+    /// Delete the crash marker (called after user dismisses recovery dialog).
+    static void clearCrashMarker();
+
+    /// Get the path to the crash marker file.
+    [[nodiscard]] static std::filesystem::path crashMarkerPath();
 
 private:
     CrashHandler() = delete;

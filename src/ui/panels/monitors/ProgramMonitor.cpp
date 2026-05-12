@@ -142,6 +142,13 @@ void ProgramMonitor::requestRefresh()
     updateDisplay();
 }
 
+void ProgramMonitor::onNewFrame(std::shared_ptr<CachedFrame> frame)
+{
+    m_pendingFrame = std::move(frame);
+    m_newFrameAvailable.store(true);
+    // The pollTimer will pick this up on its next tick
+}
+
 void ProgramMonitor::resetViewState()
 {
     spdlog::info("ProgramMonitor::resetViewState — recovering from corrupt preview state");
@@ -270,6 +277,93 @@ void ProgramMonitor::setGpuDisplayEnabled(bool enabled)
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+//  CPU Safe Mode (Phase 6)
+// ═════════════════════════════════════════════════════════════════════════════
+
+void ProgramMonitor::setSafeModeBannerVisible(bool visible)
+{
+    if (!m_safeModeBanner)
+        return;
+
+    m_safeModeBanner->setVisible(visible);
+
+    if (visible) {
+        // Switch to CPU viewport (index 0) — safe mode frames are CPU-only
+        if (m_viewStack) {
+            m_viewStack->setCurrentIndex(0);
+        }
+        if (m_transformOverlay)
+            m_transformOverlay->hide();
+
+        // Reduce poll rate to ~2 fps in safe mode — saves CPU cycles
+        if (m_pollTimer)
+            m_pollTimer->setInterval(500);
+
+        spdlog::warn("[SAFEMODE] Safe mode banner shown — CPU viewport active, poll rate reduced to 500ms");
+    } else {
+        // Restore normal poll rate
+        if (m_pollTimer)
+            m_pollTimer->setInterval(16);
+
+        spdlog::info("[SAFEMODE] Safe mode banner hidden — normal operation restored");
+    }
+}
+
+void ProgramMonitor::resetGpuAndExitSafeMode()
+{
+    spdlog::warn("[SAFEMODE] User requested GPU reset — attempting to exit safe mode");
+
+    // 1. Attempt GPU recovery via GpuContext
+    auto& gpu = GpuContext::get();
+    if (gpu.gpuState() == GpuState::Failed || gpu.gpuState() == GpuState::DeviceLost) {
+        // Force state to DeviceLost so tryRecover() will run
+        if (gpu.gpuState() == GpuState::Failed) {
+            // Can't directly set m_gpuState from here (it's private-ish).
+            // The tryRecover() path handles Failed → Recovering transition
+            // if DeviceLost triggers the recovery flow.  Since we're already
+            // Failed, call shutdown + init directly.
+            spdlog::info("[SAFEMODE] GPU state is Failed — full re-initialization needed");
+        }
+        if (!gpu.tryRecover()) {
+            spdlog::error("[SAFEMODE] GPU recovery FAILED — staying in safe mode");
+            // Update banner text to reflect reset failure
+            if (m_safeModeLabel) {
+                m_safeModeLabel->setText(
+                    QStringLiteral("\u26A0 Safe Mode — GPU reset failed. "
+                                   "Please restart the application."));
+            }
+            m_safeModeBanner->setStyleSheet(
+                QStringLiteral("#SafeModeBanner { background: #553333; border-bottom: 2px solid #FF4444; }"));
+            return;
+        }
+    }
+
+    // 2. Recovery succeeded — clear safe mode on the compositor
+    // The composite callback is owned by TimelineWorkspace which owns
+    // CompositeService.  We can't access CompositeService directly from
+    // ProgramMonitor, but the composite callback will check the GPU state
+    // and auto-exit safe mode on the next compositeFrame call.
+
+    // 3. Restore GPU display mode
+    if (m_gpuDisplay && m_vulkanViewport) {
+        // GPU display is already active; just clear and refresh
+        m_vulkanViewport->clearFrame();
+    } else if (m_vulkanViewport && m_vulkanViewport->isGpuActive()) {
+        // VulkanViewport is available but was showing CPU path — switch back
+        setGpuDisplayEnabled(true);
+    }
+
+    // 4. Reset render state and force a fresh composite
+    resetViewState();
+    refresh();
+
+    // 5. Hide the safe mode banner
+    setSafeModeBannerVisible(false);
+
+    spdlog::info("[SAFEMODE] GPU reset successful — exited safe mode");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 //  PlaybackPipeline integration
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -345,6 +439,8 @@ void ProgramMonitor::initPipeline()
     // duplicate signals and stale-tick deliveries to scopes.
     m_pipeline->setPresentNotify(
         [this](int64_t tick) {
+            if (m_destroying.load(std::memory_order_acquire))
+                return;
             if (m_controller && m_controller->isPlaying() && !usesAsyncPipelinePath())
                 return;
             emit frameDisplayed(tick);
@@ -497,6 +593,25 @@ QSize ProgramMonitor::sizeHint() const
 
 void ProgramMonitor::onPollTimer()
 {
+    if (m_destroying.load(std::memory_order_acquire)) return;
+    // ── Dirty flag optimization (Phase 5.C) ──────────────────────────
+    // If no new frame has arrived since the last poll AND we're not in
+    // an active playback/scrub state, skip heavy work.  The timer keeps
+    // running (handles resize, overlay updates) but the composite/present
+    // path is avoided when the view is static.
+    //
+    // During playback, the poll timer drives frame generation directly
+    // via the composite callback — the dirty flag is never set by this
+    // path.  Without this guard, the early return would prevent the
+    // playhead from advancing and the Program Monitor from updating.
+    if (!m_newFrameAvailable.exchange(false)) {
+        const bool isPlaying = m_controller && m_controller->isPlaying();
+        if (!isPlaying && !m_scrubPending && m_scrubSettleCounter <= 0) {
+            syncOverlayGeometry();
+            return;
+        }
+    }
+
     auto pollStart = std::chrono::steady_clock::now();
 
     // Detect event-loop stalls (gap between consecutive polls)

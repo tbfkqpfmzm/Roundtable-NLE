@@ -150,6 +150,11 @@ void TimelineWorkspace::installEdgeGuard(QMainWindow* edgeCol)
 void TimelineWorkspace::buildPanels()
 {
     if (m_panelsBuilt) return;
+
+    // Suppress paint events during widget construction to prevent
+    // paint -> layout -> repaint recursion while geometry is inconsistent.
+    setUpdatesEnabled(false);
+
     spdlog::info("TimelineWorkspace::buildPanels() - dockable Premiere Pro-style layout");
 
     auto* mainLayout = new QVBoxLayout(this);
@@ -1606,6 +1611,10 @@ void TimelineWorkspace::buildPanels()
         m_defaultDockState = m_innerMainWindow->saveState(4);
 
     spdlog::info("TimelineWorkspace::buildPanels() - dockable layout with {} panels", m_dockWidgets.size());
+
+    setUpdatesEnabled(true);
+    updateGeometry();
+    repaint();
 }
 
 

@@ -38,14 +38,12 @@
 #include <unordered_set>
 
 // GPU compositing
-#include "GpuWorkSubmission.h"
+#include "CompositeEngine.h"
 #include "GpuContext.h"
 #include "Compositor.h"
-#include "GpuTextureCache.h"
 #include "EffectProcessor.h"
 #include "SpineRenderer.h"
 #include "TransitionRenderer.h"
-#include "vulkan/Texture.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -54,19 +52,69 @@
 namespace rt {
 
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Background-thread prewarm dispatch
+// ─────────────────────────────────────────────────────────────────────────────
+
 void CompositeService::prewarmPlaybackResources(int64_t tick, uint32_t outW, uint32_t outH)
 {
+    if (m_shutdown.load(std::memory_order_acquire))
+        return;
+
+    std::lock_guard lock(m_prewarmMutex);
+    m_prewarmRequest = {tick, outW, outH};
+    m_prewarmPending = true;
+    m_prewarmCv.notify_one();
+}
+
+void CompositeService::prewarmThreadLoop()
+{
+    while (true) {
+        PrewarmRequest req;
+        {
+            std::unique_lock lock(m_prewarmMutex);
+            m_prewarmCv.wait(lock, [this]() {
+                return m_prewarmPending || m_destroying.load(std::memory_order_acquire);
+            });
+            if (m_destroying.load(std::memory_order_acquire))
+                break;
+            req = m_prewarmRequest;
+            m_prewarmPending = false;
+        }
+
+        // Run the actual prewarm work on this background thread.
+        // The internal try_to_lock on m_compositeMutex means this will
+        // safely defer if compositeFrame() is mid-execution.
+        doPrewarmPlaybackResources(req.tick, req.outW, req.outH);
+    }
+}
+
+void CompositeService::doPrewarmPlaybackResources(int64_t tick, uint32_t outW, uint32_t outH)
+{
+    if (m_shutdown.load(std::memory_order_acquire))
+        return;
     if (!m_timeline || !m_mediaPool || outW == 0 || outH == 0)
         return;
 
-    std::unique_lock lock(m_compositeMutex, std::try_to_lock);
-    if (!lock.owns_lock())
+    // Prevent overlapping prewarm runs
+    // (Thread_local guard is sufficient since this is called from the
+    //  background prewarm thread, not the UI thread)
+    static thread_local bool s_inPrewarm = false;
+    if (s_inPrewarm)
         return;
+    s_inPrewarm = true;
+
+    std::unique_lock lock(m_compositeMutex, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        s_inPrewarm = false;
+        return;
+    }
 
     auto& gpu = GpuContext::get();
     if (gpu.isInitialized()) {
         auto* comp = gpu.compositor(outW, outH);
         if (comp && comp->isInitialized()) {
+            m_compositorReady.store(true);
             static std::atomic<int> s_prewarmLog{0};
             if (++s_prewarmLog <= 10 || s_prewarmLog % 30 == 0) {
                 spdlog::info("[PERF] prewarmPlaybackResources: compositor ready {}x{} at tick={}",
@@ -75,19 +123,10 @@ void CompositeService::prewarmPlaybackResources(int64_t tick, uint32_t outW, uin
         }
     }
 
-    // Program monitor preview tier — driven by the playback-resolution
-    // dropdown (Full / 1/2 / 1/4 / 1/8).  Lower tier means smaller decoded
-    // frames, smaller FrameCache footprint, less CPU→GPU upload.  Matches
-    // the source monitor, which always uses Half.  Character overlays
-    // below still force Half since they composite at ~200 px anyway.
+    // Program monitor preview tier
     const ResolutionTier previewTier = playbackTier();
     bool warmedEffectProcessor = false;
 
-    // Track (handle, firstUpcomingFrame, tier) for each active video clip
-    // so we can briefly wait for the first prefetched frame to land in
-    // cache before play actually starts. This kills the cold-start
-    // hiccup where the first 1-3 frames of playback are stale-frame
-    // displays while the urgent prefetch is still mid-decode.
     struct PrerollTarget { uint64_t handle; int64_t frame; ResolutionTier tier; };
     std::vector<PrerollTarget> prerollTargets;
     prerollTargets.reserve(8);
@@ -116,7 +155,6 @@ void CompositeService::prewarmPlaybackResources(int64_t tick, uint32_t outW, uin
                     if (handle != 0)
                         m_openMediaHandles[mediaPath] = handle;
                 } else {
-                    // Start async open for upcoming playback
                     m_mediaPool->openAsync(mediaPath);
                     handle = 0;
                 }
@@ -137,7 +175,6 @@ void CompositeService::prewarmPlaybackResources(int64_t tick, uint32_t outW, uin
                 if (!mediaInfo)
                     continue;
 
-                // If clip had no stored fps, use the authoritative MediaPool fps
                 if (videoClip->sourceFps() <= 0.0 && mediaInfo->fps > 0.0) {
                     fps = mediaInfo->fps;
                     frameNum = static_cast<int64_t>(ticksToSeconds(srcTick) * fps);
@@ -152,26 +189,16 @@ void CompositeService::prewarmPlaybackResources(int64_t tick, uint32_t outW, uin
                     frameNum = std::clamp(frameNum, int64_t(0), mediaInfo->frameCount - 1);
                 }
 
-                // Use Half tier for character overlays in prewarm (consistent with compositeFrame)
                 const auto warmTier = videoClip->isVideoCharacter()
                     ? ResolutionTier::Half : previewTier;
                 (void)m_mediaPool->tryGetFrame(handle, frameNum, warmTier);
 
-                // Explicitly schedule ahead-of-playhead prefetch so
-                // decode workers start filling the cache before audio
-                // begins.  tryGetFrame above hits the scrub-cached
-                // current frame and doesn't schedule ahead.  Without
-                // this, the first several frames after play start are
-                // cold cache misses (returning stale lastGoodFrame)
-                // which causes visible A/V desync with slow codecs.
                 if (mediaInfo->frameCount > 1) {
                     m_mediaPool->schedulePrefetch(
                         handle, frameNum + 1, 60, /*urgent=*/true, warmTier);
                     prerollTargets.push_back({handle, frameNum + 1, warmTier});
                 }
 
-                // Pre-decode entire loop for short character animations so
-                // playback is 100% cache hits and never stalls on ProRes decode.
                 if (videoClip->isVideoCharacter() &&
                     mediaInfo->frameCount > 1 &&
                     mediaInfo->frameCount <= MediaPool::LOOP_PREDECODE_MAX_FRAMES) {
@@ -198,17 +225,8 @@ void CompositeService::prewarmPlaybackResources(int64_t tick, uint32_t outW, uin
                 warmedEffectProcessor = fx && fx->isInitialized();
             }
 #ifdef ROUNDTABLE_HAS_SPINE
-            // SpineClips may have a pre-rendered mp4/webm in the animation
-            // video cache.  If so, prewarm it like a VideoClip so the first
-            // shot doesn't show 1-2fps while the decoder catches up.
             if (auto* spineClip = dynamic_cast<SpineClip*>(clip);
                 spineClip && m_animVideoCache) {
-                // Pick the variant that will actually be rendered given
-                // this clip's current isTalking() state.  The other
-                // variant is only needed if the user toggles talk mid-
-                // playback; pre-decoding both doubles the frame-cache
-                // footprint and forces LRU to evict loop frames of
-                // currently-playing clips.
                 const std::string baseAnim = spineClip->animationName();
                 const bool animIsAlreadyTalk =
                     (baseAnim.size() >= 5 &&
@@ -217,9 +235,7 @@ void CompositeService::prewarmPlaybackResources(int64_t tick, uint32_t outW, uin
                     spineClip->isTalking() && !animIsAlreadyTalk
                         ? (baseAnim + "_talk") : baseAnim;
                 const auto* entry = m_animVideoCache->getEntry(
-                    spineClip->characterName(),
-                    spineClip->outfit(),
-                    selectedAnim);
+                    spineClip->characterName(), spineClip->outfit(), selectedAnim);
                 if (entry) {
                     const std::string mp = entry->videoPath.string();
                     uint64_t handle = 0;
@@ -234,12 +250,6 @@ void CompositeService::prewarmPlaybackResources(int64_t tick, uint32_t outW, uin
                         const auto* info = m_mediaPool->getInfo(handle);
                         if (info && info->frameCount > 1) {
                             const auto warmTier = ResolutionTier::Half;
-                            // Compute the loop frame the compositor will
-                            // actually ask for at play-start (mirrors
-                            // the logic later in compositeFrame()).  At
-                            // scrub-then-play this may be deep inside
-                            // the loop — preroll-waiting on frame 0 is
-                            // useless when the playhead is at frame 120.
                             int64_t animFrame = 0;
                             if (info->fps > 0.0 && info->frameCount > 0) {
                                 const int64_t localTick =
@@ -259,9 +269,6 @@ void CompositeService::prewarmPlaybackResources(int64_t tick, uint32_t outW, uin
                             m_mediaPool->schedulePrefetch(
                                 handle, animFrame, /*count=*/30, /*urgent=*/true, warmTier);
                             prerollTargets.push_back({handle, animFrame, warmTier});
-                            // Full-loop pre-decode for short character loops:
-                            // flips playback from reactive cold-seek (~12fps)
-                            // to 100% cache hits.
                             if (info->frameCount <= MediaPool::LOOP_PREDECODE_MAX_FRAMES) {
                                 m_mediaPool->startLoopPreDecode(handle, warmTier, clip->timelineIn());
                                 spdlog::info("[PREWARM] Spine loop pre-decode: clip {} '{}' ({} frames), startFrame={}",
@@ -277,9 +284,7 @@ void CompositeService::prewarmPlaybackResources(int64_t tick, uint32_t outW, uin
         }
     }
 
-    // ── Seed m_lastActiveClipIds so the first compositeFrame() call ────
-    // doesn't detect a "shot boundary" (all clips new) and force a
-    // blocking decode that adds 100-300ms to the first frame.
+    // ── Seed m_lastActiveClipIds ────────────────────────────────────────
     {
         std::unordered_set<uint64_t> activeIds;
         for (size_t ti = m_timeline->trackCount(); ti > 0; --ti) {
@@ -294,13 +299,8 @@ void CompositeService::prewarmPlaybackResources(int64_t tick, uint32_t outW, uin
         m_lastActiveClipIds = std::move(activeIds);
     }
 
-    // ── Pre-open ALL media handles on ALL video tracks (background) ────
-    // Warms MediaPool's internal dedup cache so compositeFrame's on-demand
-    // open() calls hit the fast path (~0ms) instead of probing FFmpeg
-    // (50-200ms per file).  Runs on a detached thread so play-start
-    // is not blocked by files that aren't needed for the first frame.
+    // ── Pre-open ALL media handles on ALL video tracks (background) ─────
     {
-        // Collect paths that still need opening
         std::vector<std::string> pathsToOpen;
         for (size_t ti = m_timeline->trackCount(); ti > 0; --ti) {
             auto* track = m_timeline->track(ti - 1);
@@ -319,12 +319,14 @@ void CompositeService::prewarmPlaybackResources(int64_t tick, uint32_t outW, uin
         }
 
         if (!pathsToOpen.empty()) {
-            // Deduplicate
             std::sort(pathsToOpen.begin(), pathsToOpen.end());
             pathsToOpen.erase(std::unique(pathsToOpen.begin(), pathsToOpen.end()),
                               pathsToOpen.end());
 
             auto* pool = m_mediaPool;
+            // Release mutex during background bulk-open so FrameProducer
+            // is not starved
+            lock.unlock();
             std::thread([pool, paths = std::move(pathsToOpen)]() {
                 for (const auto& mediaPath : paths) {
                     namespace fs = std::filesystem;
@@ -341,43 +343,27 @@ void CompositeService::prewarmPlaybackResources(int64_t tick, uint32_t outW, uin
                                 handle = pool->open(mp4InVideos);
                         }
                     }
-                    if (handle == 0)
-                        pool->open(mediaPath);
+                    if (handle == 0) {
+                        uint64_t fallbackHandle = pool->open(mediaPath);
+                        (void)fallbackHandle;
+                    }
                 }
                 spdlog::info("[PERF] background bulk-open finished ({} paths)", paths.size());
             }).detach();
+            lock.lock();
         }
     }
 
-    // ── Bounded play-start preroll ───────────────────────────────────
-    // Briefly wait for the first upcoming frame of each active clip to
-    // land in the cache. The urgent prefetch above has workers decoding
-    // ahead-of-playhead frames; this just delays the pipeline start
-    // enough that the first compositor request hits a cache hit instead
-    // of a stale last-good-frame fallback.
-    //
-    // CRITICAL: Release m_compositeMutex between poll cycles so the
-    // FrameProducer thread can submit GPU work.  Holding this mutex for
-    // hundreds of ms blocks the entire composite pipeline (including GPU
-    // command submission), which can trigger the Windows GPU watchdog
-    // (TDR) and cause nvoglv64.dll driver crashes — the exact symptom
-    // reported in the playback-preview crash.
+    // ── Bounded play-start preroll ──────────────────────────────────────
     if (!prerollTargets.empty()) {
         using namespace std::chrono;
-        // 400ms cap: the mutex-releasing poll pattern (unlock → sleep 2ms
-        // → re-lock) keeps the FrameProducer thread alive, so we can afford
-        // more time than the old 200ms without triggering the GPU watchdog
-        // (TDR).  Cold NVDEC init can spike to 380ms on first play-start,
-        // so 200ms was too short — we'd bail early and show a stale frame.
-        // WASAPI startup absorbs ~50-100ms in the background, so the user-
-        // visible delay is ~300ms worst case — still imperceptible.
         const auto deadline = steady_clock::now() + milliseconds(400);
         int pollCount = 0;
         size_t lastReady = 0;
         bool allWarm = false;
         do {
             // Release the mutex so the FrameProducer thread can composite
-            // frames and submit GPU work.  Re-acquire for each poll cycle.
+            // frames and submit GPU work.
             lock.unlock();
             std::this_thread::sleep_for(milliseconds(2));
             lock.lock();
@@ -393,17 +379,20 @@ void CompositeService::prewarmPlaybackResources(int64_t tick, uint32_t outW, uin
             }
             ++pollCount;
         } while (steady_clock::now() < deadline);
+
         static std::atomic<int> s_prerollLog{0};
         if (++s_prerollLog <= 10 || s_prerollLog % 30 == 0) {
             if (allWarm) {
                 spdlog::info("[PERF] play-start preroll: {}/{} frames warm after {} polls",
                              lastReady, prerollTargets.size(), pollCount);
             } else {
-                spdlog::warn("[PERF] play-start preroll TIMEOUT: only {}/{} frames warm after {} polls — stale frame may show",
+                spdlog::warn("[PERF] play-start preroll TIMEOUT: only {}/{} frames warm after {} polls",
                              lastReady, prerollTargets.size(), pollCount);
             }
         }
     }
+
+    s_inPrewarm = false;
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -419,6 +408,8 @@ void CompositeService::prewarmPlaybackResources(int64_t tick, uint32_t outW, uin
 // ─────────────────────────────────────────────────────────────────────
 void CompositeService::prewarmUpcomingShots(int64_t tick)
 {
+    if (m_shutdown.load(std::memory_order_acquire))
+        return;
     if (!m_timeline || !m_mediaPool) return;
 
     using namespace std::chrono;
@@ -571,6 +562,8 @@ std::shared_ptr<CachedFrame> CompositeService::compositeFrame(int64_t tick, uint
                                                                 bool scrubMode)
 try
 {
+    if (m_shutdown.load(std::memory_order_acquire))
+        return nullptr;
     if (!m_timeline) return nullptr;
 
     // Suppress GPU compositing when a modal dialog is active (QDialog::exec
@@ -614,6 +607,44 @@ try
         ~DepthGuard() { --compositeDepth(); }
     } depthGuard;
 
+    // ── CPU Safe Mode (Phase 6/7) ────────────────────────────────────
+    // When the GPU has failed persistently and backoff is exhausted, use
+    // the minimal safe-mode compositor instead.  Safe mode produces one
+    // frame every ~500ms using software decode + MemCpy — NOT for playback.
+    // It's a recovery bridge to get back to GPU operation.
+    // Phase 7.B: While in safe mode, periodically check GPU health and
+    // auto-recover when the GPU becomes operational again.
+    if (m_safeMode.load(std::memory_order_acquire)) {
+        // Attempt periodic auto-recovery (throttled to every 5s internally)
+        tryAutoRecoverFromSafeMode();
+
+        // If recovery succeeded, m_safeMode is now false — fall through
+        // to the normal GPU path below.
+        if (m_safeMode.load(std::memory_order_acquire)) {
+            // Still in safe mode — composite a safe-mode frame
+            auto safeFrame = compositeSafeMode(tick, outW, outH);
+            if (safeFrame) {
+                // Update last-good-composite for continuity
+                std::lock_guard lg(m_lastCompositeMtx);
+                m_lastGoodComposite = safeFrame;
+                m_lastGoodCompositeTick = tick;
+                return safeFrame;
+            }
+            // compositeSafeMode returned nullptr (throttled) — return last
+            // good frame if available
+            std::lock_guard lg(m_lastCompositeMtx);
+            if (m_lastGoodComposite) {
+                m_lastGoodComposite->gpuReady     = false;
+                m_lastGoodComposite->gpuImageView = 0;
+                m_lastGoodComposite->gpuSampler   = 0;
+                m_lastGoodComposite->gpuSemaphore = 0;
+            }
+            return m_lastGoodComposite;
+        }
+        // Recovery succeeded — fall through to normal GPU path
+        spdlog::info("[SAFEMODE] Auto-recovery complete — resuming GPU compositing");
+    }
+
     std::unique_lock lock(m_compositeMutex, std::try_to_lock);
     if (!lock.owns_lock()) {
         // If the composite cache was just invalidated, don't return the
@@ -641,22 +672,21 @@ try
     // invalidation while we held the mutex (try_to_lock in
     // invalidateCompositeCache sets the atomic rather than racing).
     if (m_cacheInvalidateRequested.exchange(false, std::memory_order_acquire)) {
-        m_compositeLru.clear();
-        m_compositeLruIdx = 0;
+        if (m_engine)
+            m_engine->clearLru();
         {
             std::lock_guard lg(m_lastCompositeMtx);
             m_lastGoodComposite.reset();
             m_lastGoodCompositeTick = -1;
         }
-        // GPU tex cache is NOT cleared: entries keyed by (mediaId, frameNumber)
-        // remain valid across edits.  Pool-texture dirty tracking is reset.
-        m_gpuLayerTexKeys.clear();
     }
 
-    // Keep all non-scrub program-monitor composites non-blocking. This lets
-    // playback preroll and paused cold-start refreshes warm decode/GPU caches
-    // without parking the render thread on a heavyweight first decode.
-    bool playbackNonBlocking = !scrubMode;
+    // All composites are now non-blocking — the scrub path was migrated from
+    // blocking inline NVDEC decode (which held m_compositeMutex for 50-500ms,
+    // freezing the UI) to the same non-blocking tryGetFrame that playback
+    // uses.  Prefetch workers fill the cache asynchronously; the ProgramMonitor
+    // settle mechanism retries until the frame arrives (~30-100ms).
+    bool playbackNonBlocking = true;
     // Only one GPU Spine render per compositeFrame — the shared FBO gets
     // cleared by beginFrame(), destroying previous renders.
     bool gpuSpineUsedThisFrame = false;
@@ -790,13 +820,17 @@ try
                                ResolutionTier tier) -> std::shared_ptr<CachedFrame> {
         if (!m_mediaPool)
             return nullptr;
-        if (playbackNonBlocking) {
-            // During playback, always use non-blocking tryGetFrame.
-            // Even for still images, we prefer a 1-2 frame sticky fallback
-            // over a 400ms UI-thread stall.
-            return m_mediaPool->tryGetFrame(handle, frameNumber, tier);
-        }
-        return m_mediaPool->getFrame(handle, frameNumber, tier, scrubMode);
+        // During playback AND scrub, always use non-blocking tryGetFrame.
+        // Previously the scrub path called getFrame(scrubMode=true) which
+        // did blocking inline NVDEC decode, holding m_compositeMutex for
+        // 50-500ms and freezing the UI during playhead drag.  Now the
+        // prefetch workers fill the cache asynchronously, and the
+        // ProgramMonitor's settle mechanism (m_scrubSettleCounter × 16ms
+        // = 240ms) retries until the frame lands.  The first retry after
+        // the prefetch completes (typically 30-100ms) returns the cached
+        // frame — imperceptibly later than blocking decode but without
+        // freezing the entire UI.
+        return m_mediaPool->tryGetFrame(handle, frameNumber, tier);
     };
 
     // Ã¢â€â‚¬Ã¢â€â‚¬ ONE-TIME STARTUP DIAGNOSTIC Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
@@ -812,12 +846,15 @@ try
             spdlog::info("  outW={} outH={}", outW, outH);
             if (m_mediaPool)
                 spdlog::info("  open media count = {}", m_mediaPool->openCount());
-            if (m_gpuTexCache)
-                spdlog::info("  GpuTexCache budget = {:.0f} MB, entries = {}",
-                             m_gpuTexCache->budget() / 1048576.0,
-                             m_gpuTexCache->entryCount());
-            else
-                spdlog::info("  GpuTexCache = NOT yet created");
+            if (m_engine) {
+                auto* texCache = m_engine->textureCache();
+                if (texCache)
+                    spdlog::info("  GpuTexCache budget = {:.0f} MB, entries = {}",
+                                 texCache->budget() / 1048576.0,
+                                 texCache->entryCount());
+                else
+                    spdlog::info("  GpuTexCache = NOT yet created");
+            }
             spdlog::info("===============================================");
         }
     }
@@ -838,27 +875,15 @@ try
     // missing layers.  Re-compositing is cheap (~2ms GPU).
     // Keep the LRU during export (forceFullRes) since frames are sequential
     // and there's no decode catch-up issue.
-    // Also skip gpuReady results: they hold handles into the compositor's
-    // single output texture, which gets overwritten on every composite.
-    // Returning a stale cached handle causes the VulkanViewport to display
-    // the wrong frame or garbage.
-    if (!scrubMode || m_forceFullResolution.load()) {
-    for (auto& ce : m_compositeLru) {
-        if (ce.frame && ce.frame->gpuReady) continue;
-        if (ce.tick == tick && ce.w == outW && ce.h == outH && ce.frame) {
-            return ce.frame;
-        }
-    }
+    if (m_engine && (!scrubMode || m_forceFullResolution.load())) {
+        auto cached = m_engine->checkLru(tick, outW, outH);
+        if (cached)
+            return cached;
     }
 
-    // If the output resolution changed, flush the LRU.  Cached entries
-    // hold gpuImageView / gpuSampler handles that point into the old
-    // Compositor output texture â€” which will be destroyed on resize.
-    if (!m_compositeLru.empty() &&
-        (m_compositeLru.front().w != outW || m_compositeLru.front().h != outH))
-    {
-        m_compositeLru.clear();
-        m_compositeLruIdx = 0;
+    // If the output resolution changed, flush the LRU.
+    if (m_engine) {
+        m_engine->flushLruOnResize(outW, outH);
     }
 
     // Output resolution from caller (viewport actual pixel size).
@@ -978,11 +1003,41 @@ try
             return gpuResult;
         }
     }
-    // GPU failed â€” fall through to CPU path below
-    // WARNING: CPU compositing is extremely slow and produces unusable results.
-    // This path is a TEMPORARY LAST RESORT only -- it should never activate in
-    // normal operation. If you see this error, fix the GPU compositor instead.
-    spdlog::error("compositeFrame: GPU composite FAILED -- falling back to SLOW CPU path");
+    // GPU failed â€” check for safe mode activation
+    // When the GPU has failed persistently, enter CPU safe mode.
+    int backoffAttempts = m_engine ? m_engine->backoffAttempts() : 0;
+    if (backoffAttempts >= 3) {
+        spdlog::warn("[SAFEMODE] GPU backoff exhausted ({} attempts) — entering CPU safe mode",
+                     backoffAttempts);
+        m_safeMode.store(true, std::memory_order_release);
+
+        // Notify the UI layer (ProgramMonitor) that safe mode was entered
+        if (m_safeModeCallback)
+            m_safeModeCallback(true);
+
+        auto safeFrame = compositeSafeMode(tick, outW, outH);
+        if (safeFrame) {
+            std::lock_guard lg(m_lastCompositeMtx);
+            m_lastGoodComposite = safeFrame;
+            m_lastGoodCompositeTick = tick;
+            return safeFrame;
+        }
+        // Safe mode throttled or no content — return last good frame
+        spdlog::info("[SAFEMODE] compositeSafeMode throttled or null, using last good frame");
+        std::lock_guard lg(m_lastCompositeMtx);
+        if (m_lastGoodComposite) {
+            m_lastGoodComposite->gpuReady     = false;
+            m_lastGoodComposite->gpuImageView = 0;
+            m_lastGoodComposite->gpuSampler   = 0;
+            m_lastGoodComposite->gpuSemaphore = 0;
+        }
+        return m_lastGoodComposite;
+    }
+
+    // Still in GPU cooldown — use legacy CPU fallback path.
+    int gpuBackoffCount = m_engine ? m_engine->backoffAttempts() : 0;
+    spdlog::warn("compositeFrame: GPU composite FAILED (backoff {}/3) — using legacy CPU path",
+                 gpuBackoffCount);
 // Multiple layers ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â CPU alpha composite with transforms (bottom to top)
     // Reuse composite buffer to avoid 8MB allocation + zero per frame.
     if (!m_compositeBuffer || m_compositeBuffer->width != outW ||
@@ -1025,12 +1080,8 @@ try
     }
 
     // Insert into composite result LRU cache
-    if (m_compositeLru.size() < COMPOSITE_CACHE_SIZE)
-        m_compositeLru.push_back({tick, outW, outH, result});
-    else {
-        m_compositeLru[m_compositeLruIdx] = {tick, outW, outH, result};
-        m_compositeLruIdx = (m_compositeLruIdx + 1) % COMPOSITE_CACHE_SIZE;
-    }
+    if (m_engine)
+        m_engine->insertLru(tick, outW, outH, result);
 
     {
         std::lock_guard lg(m_lastCompositeMtx);

@@ -213,7 +213,7 @@ void TimelinePanel::dragMoveEvent(QDragMoveEvent* event)
     // ── Sequence drag (from project bin) ────────────────────────────────
     if (event->mimeData()->hasFormat("application/x-roundtable-sequence")) {
         m_effectDropTarget.reset();
-        for (auto* tw : m_trackWidgets) tw->clearEffectHighlight();
+        for (auto tw : m_trackWidgets) tw->clearEffectHighlight();
 
         QPointF pos = event->position();
         double px = pos.x() - headerWidth();
@@ -260,7 +260,7 @@ void TimelinePanel::dragMoveEvent(QDragMoveEvent* event)
         || qobject_cast<QTreeWidget*>(event->source())
         || event->mimeData()->hasUrls()) {
         m_effectDropTarget.reset();
-        for (auto* tw : m_trackWidgets) tw->clearEffectHighlight();
+        for (auto tw : m_trackWidgets) tw->clearEffectHighlight();
         // Compute drag preview position and duration
         QPointF pos = event->position();
         double px = pos.x() - headerWidth();
@@ -337,7 +337,7 @@ void TimelinePanel::dragMoveEvent(QDragMoveEvent* event)
         }
 
         // Show snap indicator on track widgets
-        for (auto* tw : m_trackWidgets) tw->setSnapIndicatorTick(-1);
+        for (auto tw : m_trackWidgets) tw->setSnapIndicatorTick(-1);
 
         // Update only the target track's preview; clear all others.
         // Skip preview if media type doesn't match the track type
@@ -404,8 +404,8 @@ void TimelinePanel::dragMoveEvent(QDragMoveEvent* event)
 
         // ── Ghost track overlay for bin/external drags ──
         if (!m_trackWidgets.empty()) {
-            auto* firstTw = m_trackWidgets.front();
-            auto* lastTw  = m_trackWidgets.back();
+            auto firstTw = m_trackWidgets.front();
+            auto lastTw  = m_trackWidgets.back();
             QPoint firstTop = firstTw->mapTo(this, QPoint(0, 0));
             QPoint lastBot  = lastTw->mapTo(this, QPoint(0, lastTw->height()));
 
@@ -467,7 +467,7 @@ void TimelinePanel::dragLeaveEvent(QDragLeaveEvent* event)
     m_transitionDropTarget.reset();
     m_ghostTrackVisible = false;
     if (m_ghostOverlay) m_ghostOverlay->hide();
-    for (auto* tw : m_trackWidgets) {
+    for (auto tw : m_trackWidgets) {
         tw->clearEffectHighlight();
         tw->clearTransitionDropEdge();
         tw->clearMediaDragPreview();
@@ -484,7 +484,7 @@ void TimelinePanel::dropEvent(QDropEvent* event)
     if (m_ghostOverlay) m_ghostOverlay->hide();
 
     // Clear all drag previews
-    for (auto* tw : m_trackWidgets) tw->clearMediaDragPreview();
+    for (auto tw : m_trackWidgets) tw->clearMediaDragPreview();
 
     // Compute drop-time ghost zones directly from cursor Y and current track geometry,
     // so routing does not depend on whether a prior dragMove state was preserved.
@@ -506,12 +506,12 @@ void TimelinePanel::dropEvent(QDropEvent* event)
         }
 
         if (firstVideoIdx < m_trackWidgets.size()) {
-            auto* w = m_trackWidgets[firstVideoIdx];
+            auto w = m_trackWidgets[firstVideoIdx];
             QPoint top = w->mapTo(this, QPoint(0, 0));
             aboveTopVideo = (pos.y() < top.y());
         }
         if (lastAudioIdx < m_trackWidgets.size()) {
-            auto* w = m_trackWidgets[lastAudioIdx];
+            auto w = m_trackWidgets[lastAudioIdx];
             QPoint bot = w->mapTo(this, QPoint(0, w->height()));
             belowBottomAudio = (pos.y() > bot.y());
         }
@@ -520,7 +520,7 @@ void TimelinePanel::dropEvent(QDropEvent* event)
     // ── Transition drop (custom MIME type) ──────────────────────────────
     if (event->mimeData()->hasFormat(kTransitionMimeType)) {
         // Clear highlights
-        for (auto* tw : m_trackWidgets) tw->clearTransitionDropEdge();
+        for (auto tw : m_trackWidgets) tw->clearTransitionDropEdge();
 
         if (!m_transitionDropTarget || !m_timeline) {
             m_transitionDropTarget.reset();
@@ -552,7 +552,7 @@ void TimelinePanel::dropEvent(QDropEvent* event)
     // ── Effect drop (custom MIME type) ──────────────────────────────────
     if (event->mimeData()->hasFormat("application/x-roundtable-effect")) {
         m_effectDropTarget.reset();
-        for (auto* tw : m_trackWidgets) tw->clearEffectHighlight();
+        for (auto tw : m_trackWidgets) tw->clearEffectHighlight();
 
         QByteArray effectData = event->mimeData()->data("application/x-roundtable-effect");
         bool ok = false;

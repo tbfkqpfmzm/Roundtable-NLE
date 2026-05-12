@@ -13,6 +13,8 @@
 #include <QPainterPath>
 #include <QPixmap>
 #include <QString>
+#include <QTreeWidgetItem>
+#include <QVariant>
 
 #include "media/ThumbnailGenerator.h"   // MediaType
 
@@ -150,6 +152,40 @@ inline QIcon makePremiereBinIcon(const QColor& color, const QString& shape, int 
 
     p.end();
     return QIcon(px);
+}
+
+// ── Bin tree helpers (shared across ProjectBin TUs) ──────────────────────
+
+/// Get the persistent key for a tree widget item (UserRole data, or text fallback).
+inline QString projectBinItemKey(QTreeWidgetItem* item)
+{
+    QString key = item->data(0, Qt::UserRole).toString();
+    if (key.isEmpty()) key = item->text(0);
+    return key;
+}
+
+/// Find a child bin by name under a parent tree item.
+inline QTreeWidgetItem* projectBinFindChildBin(QTreeWidgetItem* parent, const QString& name)
+{
+    if (!parent) return nullptr;
+    for (int i = 0; i < parent->childCount(); ++i) {
+        auto* child = parent->child(i);
+        if (child->data(0, Qt::UserRole + 2).toBool() && child->text(0) == name)
+            return child;
+    }
+    return nullptr;
+}
+
+/// Create a new bin tree item with Premiere Pro styling.
+inline QTreeWidgetItem* projectBinCreateBinItem(const QString& name)
+{
+    auto* binItem = new QTreeWidgetItem();
+    binItem->setText(0, name);
+    binItem->setData(0, Qt::UserRole + 2, true);
+    binItem->setIcon(0, makePremiereBinIcon(kLabelBin, "bin"));
+    binItem->setData(0, Qt::UserRole + 10, QVariant::fromValue(kLabelBin));
+    binItem->setFlags(binItem->flags() | Qt::ItemIsDropEnabled | Qt::ItemIsEditable);
+    return binItem;
 }
 
 } // namespace rt

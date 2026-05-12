@@ -56,6 +56,7 @@
 #include <QKeyEvent>
 #include <QTimer>
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <map>

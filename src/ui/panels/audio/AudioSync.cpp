@@ -260,6 +260,7 @@ AudioSync::AudioSync(QWidget* parent)
     m_trimDebounceTimer->setSingleShot(true);
     m_trimDebounceTimer->setInterval(400);
     connect(m_trimDebounceTimer, &QTimer::timeout, this, [this]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         if (m_trimDebounceClipIdx < m_clips.size()) {
             auto ci   = m_trimDebounceClipIdx;
             double oS = m_preTrimStart, oE = m_preTrimEnd;
@@ -306,6 +307,7 @@ AudioSync::AudioSync(QWidget* parent)
 
 AudioSync::~AudioSync()
 {
+    m_destroying.store(true);
     if (m_workerThread && m_workerThread->isRunning()) {
         m_transcriber->cancelAsync();
         m_workerThread->quit();
@@ -332,8 +334,9 @@ int AudioSync::clipRowForWidget(QWidget* widget) const
     // Walk up through card widgets
     QWidget* w = widget;
     while (w) {
-        for (size_t i = 0; i < m_cardWidgets.size(); ++i) {
-            if (m_cardWidgets[i] == w && i < m_cardClipIndices.size()) {
+        auto widgets = m_cardWidgets;  // local copy — protect against vector modification
+        for (size_t i = 0; i < widgets.size(); ++i) {
+            if (widgets[i] == w && i < m_cardClipIndices.size()) {
                 return m_cardClipIndices[i];
             }
         }
@@ -556,8 +559,9 @@ bool AudioSync::eventFilter(QObject* watched, QEvent* event)
                     card = card->parentWidget();
                 if (card) {
                     // Find card index
-                    for (size_t i = 0; i < m_cardWidgets.size(); ++i) {
-                        if (m_cardWidgets[i] == card) {
+                    auto widgets = m_cardWidgets;  // local copy — protect against vector modification
+                    for (size_t i = 0; i < widgets.size(); ++i) {
+                        if (widgets[i] == card) {
                             // Set selected clip
                             if (i < m_cardClipIndices.size() && m_cardClipIndices[i] >= 0)
                                 m_selectedClipIdx = m_cardClipIndices[i];
@@ -579,11 +583,12 @@ bool AudioSync::eventFilter(QObject* watched, QEvent* event)
                                 }
                             }
                             // Sync left list selection
-                            if (m_leftScriptList) {
+                            if (m_leftScriptList && i < m_cardScriptLineNums.size()) {
+                                auto scriptLineNum = m_cardScriptLineNums[i];
                                 for (int r = 0; r < m_leftScriptList->count(); ++r) {
                                     auto* item = m_leftScriptList->item(r);
-                                    if (item && i < m_cardScriptLineNums.size() &&
-                                        item->data(Qt::UserRole).toInt() == m_cardScriptLineNums[i]) {
+                                    if (item &&
+                                        item->data(Qt::UserRole).toInt() == scriptLineNum) {
                                         m_leftScriptList->blockSignals(true);
                                         m_leftScriptList->setCurrentRow(r);
                                         m_leftScriptList->blockSignals(false);
@@ -950,13 +955,13 @@ void AudioSync::startTranscriptionForFile(size_t index)
 
     connect(m_workerThread, &QThread::started, m_worker, &TranscriptionWorker::process);
     connect(m_worker, &TranscriptionWorker::progressChanged,
-            this, &AudioSync::onTranscriptionProgress);
+            this, &AudioSync::onTranscriptionProgress, Qt::QueuedConnection);
     connect(m_worker, &TranscriptionWorker::finished,
-            this, &AudioSync::onTranscriptionFinished);
+            this, &AudioSync::onTranscriptionFinished, Qt::QueuedConnection);
     connect(m_worker, &TranscriptionWorker::errorOccurred,
-            this, &AudioSync::onTranscriptionError);
+            this, &AudioSync::onTranscriptionError, Qt::QueuedConnection);
     connect(m_worker, &TranscriptionWorker::finished,
-            m_workerThread, &QThread::quit);
+            m_workerThread, &QThread::quit, Qt::QueuedConnection);
 
     m_workerThread->start();
 }

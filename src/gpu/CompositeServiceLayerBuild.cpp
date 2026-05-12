@@ -33,7 +33,7 @@
 #include "stb_image.h"
 #endif
 
-#include "GpuTextureCache.h"
+#include "CompositeEngine.h"
 #include "GpuContext.h"
 #include "SpineRenderer.h"
 
@@ -449,8 +449,9 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
                 // the single biggest performance win: backgrounds and unchanged
                 // animation loops skip ALL CPU work (~60% of frames at 60fps when
                 // source is 24fps).
-                if (m_gpuTexCache && m_gpuCompositeState == 1) {
-                    auto gpuHit = m_gpuTexCache->get(handle, frameNum);
+                auto* texCache = m_engine ? m_engine->textureCache() : nullptr;
+                if (texCache && m_engine->isGpuCompositeEnabled()) {
+                    auto gpuHit = texCache->get(handle, frameNum);
                     if (gpuHit.found) {
                         LayerInfo layer;
                         layer.gpuTextureReady = true;
@@ -590,9 +591,10 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
                                 animFrame = std::clamp(animFrame, int64_t(0), totalFrames - 1);
                             }
 
-                            // Ã¢â€â‚¬Ã¢â€â‚¬ DIRTY TRACKING: Skip decode for pre-rendered spine Ã¢â€â‚¬Ã¢â€â‚¬
-                            if (m_gpuTexCache && m_gpuCompositeState == 1) {
-                                auto gpuHit = m_gpuTexCache->get(animHandle, animFrame);
+                            // Ã¢â€â‚¬Ã¢â€‚¬ DIRTY TRACKING: Skip decode for pre-rendered spine Ã¢â€â‚¬Ã¢â€â‚¬
+                            auto* texCache2 = m_engine ? m_engine->textureCache() : nullptr;
+                            if (texCache2 && m_engine->isGpuCompositeEnabled()) {
+                                auto gpuHit = texCache2->get(animHandle, animFrame);
                                 if (gpuHit.found) {
                                     LayerInfo layer;
                                     layer.gpuTextureReady = true;
@@ -1088,7 +1090,8 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
                 // GPU texture here (shared ownership with FrameCache) so
                 // future composites can hit the dirty-tracking early-out
                 // and skip the entire decode + FrameCache lookup.
-                if (m_gpuTexCache && m_gpuCompositeState == 1 &&
+                auto* texCache3 = m_engine ? m_engine->textureCache() : nullptr;
+                if (texCache3 && m_engine->isGpuCompositeEnabled() &&
                     frame->mediaId != 0 && frame->gpuTextureOwner) {
                     // Determine if CUDA frame is still packed-alpha
                     bool cudaPacked = false;
@@ -1096,7 +1099,7 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
                         auto* fInfo = m_mediaPool->getInfo(frame->mediaId);
                         cudaPacked = (fInfo && fInfo->packedAlpha);
                     }
-                    m_gpuTexCache->putShared(
+                    texCache3->putShared(
                         frame->mediaId, frame->frameNumber,
                         frame->gpuTextureOwner,
                         gpuInfo,

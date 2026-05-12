@@ -261,8 +261,14 @@ void ScopesPanel::onScopeImageReady(QImage image)
 
 // ─── paintEvent (UI thread — just blits the pre-rendered image, < 1ms) ──────
 
-void ScopesPanel::paintEvent(QPaintEvent* /*event*/)
+void ScopesPanel::paintEvent(QPaintEvent* event)
 {
+    static thread_local int s_paintDepth = 0;
+    if (++s_paintDepth > 5) {
+        --s_paintDepth;
+        QWidget::paintEvent(event);
+        return;
+    }
     const auto& tc = Theme::colors();
     QPainter p(this);
     p.fillRect(rect(), tc.surface0);
@@ -272,6 +278,7 @@ void ScopesPanel::paintEvent(QPaintEvent* /*event*/)
         QRect area(4, topMargin, width() - 8, height() - topMargin - 26);
         p.setPen(tc.textDisabled);
         p.drawText(area, Qt::AlignCenter, tr("No frame data"));
+        --s_paintDepth;
         return;
     }
 
@@ -279,6 +286,8 @@ void ScopesPanel::paintEvent(QPaintEvent* /*event*/)
     const int topMargin = 30;
     QRect area(4, topMargin, width() - 8, height() - topMargin - 26);
     p.drawImage(area, m_renderedScope);
+
+    --s_paintDepth;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

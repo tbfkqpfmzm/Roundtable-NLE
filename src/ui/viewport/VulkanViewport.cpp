@@ -660,14 +660,21 @@ void VulkanViewport::refresh()
 //  Qt Events
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
-void VulkanViewport::paintEvent(QPaintEvent* /*event*/)
+void VulkanViewport::paintEvent(QPaintEvent* event)
 {
-    if (m_gpuActive) return; // GPU path handles its own rendering
+    static thread_local int s_paintDepth = 0;
+    if (++s_paintDepth > 5) {
+        --s_paintDepth;
+        QWidget::paintEvent(event);
+        return;
+    }
+
+    if (m_gpuActive) { --s_paintDepth; return; } // GPU path handles its own rendering
 
     QPainter painter(this);
     painter.fillRect(rect(), Theme::colors().surface0);
 
-    if (m_cpuImage.isNull()) return;
+    if (m_cpuImage.isNull()) { --s_paintDepth; return; }
 
     // Aspect-ratio-correct fit
     QSizeF imgSize(m_cpuImage.width(), m_cpuImage.height());
@@ -680,6 +687,8 @@ void VulkanViewport::paintEvent(QPaintEvent* /*event*/)
         imgSize.width(), imgSize.height());
 
     painter.drawImage(drawRect, m_cpuImage);
+
+    --s_paintDepth;
 }
 
 QSize VulkanViewport::nativeSurfaceSize() const
@@ -702,6 +711,13 @@ QSize VulkanViewport::nativeSurfaceSize() const
 
 void VulkanViewport::resizeEvent(QResizeEvent* event)
 {
+    static thread_local bool s_inResize = false;
+    if (s_inResize) {
+        QWidget::resizeEvent(event);
+        return;
+    }
+    s_inResize = true;
+
     QWidget::resizeEvent(event);
 
     const QSize surfaceSize = nativeSurfaceSize();
@@ -720,6 +736,8 @@ void VulkanViewport::resizeEvent(QResizeEvent* event)
             presentClearFrame();
     }
     emit resized();
+
+    s_inResize = false;
 }
 
 QSize VulkanViewport::sizeHint() const

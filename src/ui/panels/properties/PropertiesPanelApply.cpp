@@ -794,205 +794,35 @@ void PropertiesPanel::applyTransform()
 
 // â”€â”€ Video â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-void PropertiesPanel::applyVideoVolume()
-{
-    if (m_updating || !m_clip || m_clip->clipType() != ClipType::Video) return;
-    auto* vc = static_cast<VideoClip*>(m_clip);
-    float newVal = static_cast<float>(m_volumeSpin->value());
-    if (newVal == vc->volume()) return;
-    float oldVal = vc->volume();
-    if (m_commandStack) {
-        m_commandStack->execute(std::make_unique<LambdaCommand>(
-            "Change video volume",
-            [vc, newVal, this]() { vc->setVolume(newVal); populateFromClip(); emit propertyChanged(); },
-            [vc, oldVal, this]() { vc->setVolume(oldVal); populateFromClip(); emit propertyChanged(); }));
-    } else {
-        vc->setVolume(newVal);
-        emit propertyChanged();
-    }
-}
+// -- Video methods are in PropertiesPanelVideo.cpp --
+// -- Audio methods are in PropertiesPanelAudio.cpp --
+
 
 // â”€â”€ Audio â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-void PropertiesPanel::applyAudioVolume()
-{
-    if (m_updating || !m_clip || m_clip->clipType() != ClipType::Audio) return;
-    auto* ac = static_cast<AudioClip*>(m_clip);
-    float newVal = static_cast<float>(m_audioVolumeSpin->value());
-    float oldVal = ac->volume().evaluate(0);
-    if (m_commandStack) {
-        m_commandStack->execute(std::make_unique<LambdaCommand>(
-            "Change audio volume",
-            [ac, newVal, this]() { ac->volume().addKeyframe(0, newVal); populateFromClip(); emit propertyChanged(); },
-            [ac, oldVal, this]() { ac->volume().addKeyframe(0, oldVal); populateFromClip(); emit propertyChanged(); }));
-    } else {
-        ac->volume().addKeyframe(0, newVal);
-        emit propertyChanged();
-    }
-}
 
-void PropertiesPanel::applyAudioPan()
-{
-    if (m_updating || !m_clip || m_clip->clipType() != ClipType::Audio) return;
-    auto* ac = static_cast<AudioClip*>(m_clip);
-    float newVal = static_cast<float>(m_panSpin->value());
-    float oldVal = ac->pan().evaluate(0);
-    if (m_commandStack) {
-        m_commandStack->execute(std::make_unique<LambdaCommand>(
-            "Change audio pan",
-            [ac, newVal, this]() { ac->pan().addKeyframe(0, newVal); populateFromClip(); emit propertyChanged(); },
-            [ac, oldVal, this]() { ac->pan().addKeyframe(0, oldVal); populateFromClip(); emit propertyChanged(); }));
-    } else {
-        ac->pan().addKeyframe(0, newVal);
-        emit propertyChanged();
-    }
-}
+// -- Audio methods are in PropertiesPanelAudio.cpp --
 
-void PropertiesPanel::applyAudioFadeIn()
-{
-    if (m_updating || !m_clip || m_clip->clipType() != ClipType::Audio) return;
-    auto* ac = static_cast<AudioClip*>(m_clip);
-    int64_t newVal = static_cast<int64_t>(m_fadeInSpin->value());
-    int64_t oldVal = ac->fadeInDuration();
-    if (newVal == oldVal) return;
-    if (m_commandStack) {
-        m_commandStack->execute(std::make_unique<LambdaCommand>(
-            "Change fade in",
-            [ac, newVal, this]() { ac->setFadeInDuration(newVal); populateFromClip(); emit propertyChanged(); },
-            [ac, oldVal, this]() { ac->setFadeInDuration(oldVal); populateFromClip(); emit propertyChanged(); }));
-    } else {
-        ac->setFadeInDuration(newVal);
-        emit propertyChanged();
-    }
-}
 
-void PropertiesPanel::applyAudioFadeOut()
-{
-    if (m_updating || !m_clip || m_clip->clipType() != ClipType::Audio) return;
-    auto* ac = static_cast<AudioClip*>(m_clip);
-    int64_t newVal = static_cast<int64_t>(m_fadeOutSpin->value());
-    int64_t oldVal = ac->fadeOutDuration();
-    if (newVal == oldVal) return;
-    if (m_commandStack) {
-        m_commandStack->execute(std::make_unique<LambdaCommand>(
-            "Change fade out",
-            [ac, newVal, this]() { ac->setFadeOutDuration(newVal); populateFromClip(); emit propertyChanged(); },
-            [ac, oldVal, this]() { ac->setFadeOutDuration(oldVal); populateFromClip(); emit propertyChanged(); }));
-    } else {
-        ac->setFadeOutDuration(newVal);
-        emit propertyChanged();
-    }
-}
+
+
+
+
 
 // â”€â”€ Title â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-void PropertiesPanel::applyTitleText()
-{
-    if (m_updating || !m_clip || m_clip->clipType() != ClipType::Title) return;
-    auto* tc = static_cast<TitleClip*>(m_clip);
-    auto newVal = m_textEdit->text().toStdString();
-    if (newVal == tc->text()) return;
-    auto oldVal = tc->text();
-    if (m_commandStack) {
-        m_commandStack->execute(std::make_unique<LambdaCommand>(
-            "Change title text",
-            [tc, newVal, this]() { tc->setText(newVal); populateFromClip(); emit propertyChanged(); },
-            [tc, oldVal, this]() { tc->setText(oldVal); populateFromClip(); emit propertyChanged(); }));
-    } else {
-        tc->setText(newVal);
-        emit propertyChanged();
-    }
-}
 
-void PropertiesPanel::applyTitleFontFamily()
-{
-    if (m_updating || !m_clip || m_clip->clipType() != ClipType::Title) return;
-    auto* tc = static_cast<TitleClip*>(m_clip);
-    auto newVal = m_fontFamilyEdit->text().toStdString();
-    if (newVal == tc->fontFamily()) return;
-    auto oldVal = tc->fontFamily();
-    if (m_commandStack) {
-        m_commandStack->execute(std::make_unique<LambdaCommand>(
-            "Change font family",
-            [tc, newVal, this]() { tc->setFontFamily(newVal); populateFromClip(); emit propertyChanged(); },
-            [tc, oldVal, this]() { tc->setFontFamily(oldVal); populateFromClip(); emit propertyChanged(); }));
-    } else {
-        tc->setFontFamily(newVal);
-        emit propertyChanged();
-    }
-}
+// -- Title methods are in PropertiesPanelTitle.cpp --
 
-void PropertiesPanel::applyTitleFontSize()
-{
-    if (m_updating || !m_clip || m_clip->clipType() != ClipType::Title) return;
-    auto* tc = static_cast<TitleClip*>(m_clip);
-    float newVal = static_cast<float>(m_fontSizeSpin->value());
-    if (newVal == tc->fontSize()) return;
-    float oldVal = tc->fontSize();
-    if (m_commandStack) {
-        m_commandStack->execute(std::make_unique<LambdaCommand>(
-            "Change font size",
-            [tc, newVal, this]() { tc->setFontSize(newVal); populateFromClip(); emit propertyChanged(); },
-            [tc, oldVal, this]() { tc->setFontSize(oldVal); populateFromClip(); emit propertyChanged(); }));
-    } else {
-        tc->setFontSize(newVal);
-        emit propertyChanged();
-    }
-}
 
-void PropertiesPanel::applyTitleBold()
-{
-    if (m_updating || !m_clip || m_clip->clipType() != ClipType::Title) return;
-    auto* tc = static_cast<TitleClip*>(m_clip);
-    bool newVal = m_boldCheck->isChecked();
-    if (newVal == tc->isBold()) return;
-    bool oldVal = tc->isBold();
-    if (m_commandStack) {
-        m_commandStack->execute(std::make_unique<LambdaCommand>(
-            "Toggle bold",
-            [tc, newVal, this]() { tc->setBold(newVal); populateFromClip(); emit propertyChanged(); },
-            [tc, oldVal, this]() { tc->setBold(oldVal); populateFromClip(); emit propertyChanged(); }));
-    } else {
-        tc->setBold(newVal);
-        emit propertyChanged();
-    }
-}
 
-void PropertiesPanel::applyTitleItalic()
-{
-    if (m_updating || !m_clip || m_clip->clipType() != ClipType::Title) return;
-    auto* tc = static_cast<TitleClip*>(m_clip);
-    bool newVal = m_italicCheck->isChecked();
-    if (newVal == tc->isItalic()) return;
-    bool oldVal = tc->isItalic();
-    if (m_commandStack) {
-        m_commandStack->execute(std::make_unique<LambdaCommand>(
-            "Toggle italic",
-            [tc, newVal, this]() { tc->setItalic(newVal); populateFromClip(); emit propertyChanged(); },
-            [tc, oldVal, this]() { tc->setItalic(oldVal); populateFromClip(); emit propertyChanged(); }));
-    } else {
-        tc->setItalic(newVal);
-        emit propertyChanged();
-    }
-}
 
-void PropertiesPanel::applyTitleAlign()
-{
-    if (m_updating || !m_clip || m_clip->clipType() != ClipType::Title) return;
-    auto* tc = static_cast<TitleClip*>(m_clip);
-    auto newVal = static_cast<TextAlign>(m_alignCombo->currentIndex());
-    if (newVal == tc->alignment()) return;
-    auto oldVal = tc->alignment();
-    if (m_commandStack) {
-        m_commandStack->execute(std::make_unique<LambdaCommand>(
-            "Change text alignment",
-            [tc, newVal, this]() { tc->setAlignment(newVal); populateFromClip(); emit propertyChanged(); },
-            [tc, oldVal, this]() { tc->setAlignment(oldVal); populateFromClip(); emit propertyChanged(); }));
-    } else {
-        tc->setAlignment(newVal);
-        emit propertyChanged();
-    }
-}
+
+
+
+
+
+
 
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 //  Graphic property changes
@@ -1006,186 +836,7 @@ static TextLayer* firstTextLayer(GraphicClip* gc)
     return nullptr;
 }
 
-void PropertiesPanel::applyGfxText()
-{
-    if (m_updating || !m_clip || m_clip->clipType() != ClipType::Graphic) return;
-    auto* tl = firstTextLayer(static_cast<GraphicClip*>(m_clip));
-    if (!tl) return;
-    std::string val = m_gfxTextEdit->text().toStdString();
-    if (val == tl->text()) return;
-    tl->setText(val);
-    emit propertyChanged();
-}
-
-void PropertiesPanel::applyGfxFontFamily()
-{
-    if (m_updating || !m_clip || m_clip->clipType() != ClipType::Graphic) return;
-    auto* tl = firstTextLayer(static_cast<GraphicClip*>(m_clip));
-    if (!tl) return;
-    std::string val = m_gfxFontFamilyEdit->text().toStdString();
-    if (val == tl->fontFamily()) return;
-    tl->setFontFamily(val);
-    emit propertyChanged();
-}
-
-void PropertiesPanel::applyGfxFontSize()
-{
-    if (m_updating || !m_clip || m_clip->clipType() != ClipType::Graphic) return;
-    auto* tl = firstTextLayer(static_cast<GraphicClip*>(m_clip));
-    if (!tl) return;
-    float val = static_cast<float>(m_gfxFontSizeSpin->value());
-    if (std::abs(val - tl->fontSize()) < 0.01f) return;
-    tl->setFontSize(val);
-    emit propertyChanged();
-}
-
-void PropertiesPanel::applyGfxFontWeight()
-{
-    if (m_updating || !m_clip || m_clip->clipType() != ClipType::Graphic) return;
-    auto* tl = firstTextLayer(static_cast<GraphicClip*>(m_clip));
-    if (!tl) return;
-    int val = static_cast<int>(m_gfxFontWeightSpin->value());
-    if (val == tl->fontWeight()) return;
-    tl->setFontWeight(val);
-    emit propertyChanged();
-}
-
-void PropertiesPanel::applyGfxItalic()
-{
-    if (m_updating || !m_clip || m_clip->clipType() != ClipType::Graphic) return;
-    auto* tl = firstTextLayer(static_cast<GraphicClip*>(m_clip));
-    if (!tl) return;
-    tl->setItalic(m_gfxItalicCheck->isChecked());
-    emit propertyChanged();
-}
-
-void PropertiesPanel::applyGfxAllCaps()
-{
-    if (m_updating || !m_clip || m_clip->clipType() != ClipType::Graphic) return;
-    auto* tl = firstTextLayer(static_cast<GraphicClip*>(m_clip));
-    if (!tl) return;
-    tl->setAllCaps(m_gfxAllCapsCheck->isChecked());
-    emit propertyChanged();
-}
-
-void PropertiesPanel::applyGfxAlign()
-{
-    if (m_updating || !m_clip || m_clip->clipType() != ClipType::Graphic) return;
-    auto* tl = firstTextLayer(static_cast<GraphicClip*>(m_clip));
-    if (!tl) return;
-    auto val = static_cast<GTextAlign>(m_gfxAlignCombo->currentIndex());
-    if (val == tl->alignment()) return;
-    tl->setAlignment(val);
-    emit propertyChanged();
-}
-
-void PropertiesPanel::applyGfxFillColor()
-{
-    if (m_updating || !m_clip || m_clip->clipType() != ClipType::Graphic) return;
-    auto* tl = firstTextLayer(static_cast<GraphicClip*>(m_clip));
-    if (!tl) return;
-
-    // Get current color
-    uint32_t current = 0xFFFFFFFF;
-    if (!tl->appearance().fills.empty())
-        current = tl->appearance().fills[0].color;
-    QColor curCol(static_cast<int>((current>>16)&0xFF),
-                  static_cast<int>((current>>8)&0xFF),
-                  static_cast<int>(current&0xFF),
-                  static_cast<int>((current>>24)&0xFF));
-
-    QColor chosen = QColorDialog::getColor(curCol, this, "Fill Color",
-        QColorDialog::ShowAlphaChannel);
-    if (!chosen.isValid()) return;
-
-    uint32_t packed = (static_cast<uint32_t>(chosen.alpha()) << 24)
-                    | (static_cast<uint32_t>(chosen.red())   << 16)
-                    | (static_cast<uint32_t>(chosen.green()) << 8)
-                    |  static_cast<uint32_t>(chosen.blue());
-
-    if (tl->appearance().fills.empty()) {
-        tl->appearance().fills.push_back({packed, true});
-    } else {
-        tl->appearance().fills[0].color = packed;
-        tl->appearance().fills[0].enabled = true;
-    }
-
-    m_gfxFillColorBtn->setStyleSheet(
-        QStringLiteral("QPushButton { background: %1; border: 1px solid #555; min-width: 40px; min-height: 18px; }")
-        .arg(chosen.name()));
-    emit propertyChanged();
-}
-
-void PropertiesPanel::applyGfxStrokeEnabled()
-{
-    if (m_updating || !m_clip || m_clip->clipType() != ClipType::Graphic) return;
-    auto* tl = firstTextLayer(static_cast<GraphicClip*>(m_clip));
-    if (!tl) return;
-    bool enabled = m_gfxStrokeCheck->isChecked();
-    if (tl->appearance().strokes.empty()) {
-        if (enabled)
-            tl->appearance().strokes.push_back({0xFF000000, 2.0f, StrokePosition::Outer, true});
-    } else {
-        tl->appearance().strokes[0].enabled = enabled;
-    }
-    emit propertyChanged();
-}
-
-void PropertiesPanel::applyGfxStrokeWidth()
-{
-    if (m_updating || !m_clip || m_clip->clipType() != ClipType::Graphic) return;
-    auto* tl = firstTextLayer(static_cast<GraphicClip*>(m_clip));
-    if (!tl || tl->appearance().strokes.empty()) return;
-    tl->appearance().strokes[0].width = static_cast<float>(m_gfxStrokeWidthSpin->value());
-    emit propertyChanged();
-}
-
-void PropertiesPanel::applyGfxStrokeColor()
-{
-    if (m_updating || !m_clip || m_clip->clipType() != ClipType::Graphic) return;
-    auto* tl = firstTextLayer(static_cast<GraphicClip*>(m_clip));
-    if (!tl) return;
-
-    uint32_t current = 0xFF000000;
-    if (!tl->appearance().strokes.empty())
-        current = tl->appearance().strokes[0].color;
-    QColor curCol(static_cast<int>((current>>16)&0xFF),
-                  static_cast<int>((current>>8)&0xFF),
-                  static_cast<int>(current&0xFF));
-
-    QColor chosen = QColorDialog::getColor(curCol, this, "Stroke Color");
-    if (!chosen.isValid()) return;
-
-    uint32_t packed = 0xFF000000
-                    | (static_cast<uint32_t>(chosen.red()) << 16)
-                    | (static_cast<uint32_t>(chosen.green()) << 8)
-                    |  static_cast<uint32_t>(chosen.blue());
-
-    if (tl->appearance().strokes.empty())
-        tl->appearance().strokes.push_back({packed, 2.0f, StrokePosition::Outer, true});
-    else
-        tl->appearance().strokes[0].color = packed;
-
-    m_gfxStrokeColorBtn->setStyleSheet(
-        QStringLiteral("QPushButton { background: %1; border: 1px solid #555; }")
-        .arg(chosen.name()));
-    emit propertyChanged();
-}
-
-void PropertiesPanel::applyGfxShadowEnabled()
-{
-    if (m_updating || !m_clip || m_clip->clipType() != ClipType::Graphic) return;
-    auto* tl = firstTextLayer(static_cast<GraphicClip*>(m_clip));
-    if (!tl) return;
-    bool enabled = m_gfxShadowCheck->isChecked();
-    if (tl->appearance().shadows.empty()) {
-        if (enabled)
-            tl->appearance().shadows.push_back({0x80000000, 135.0f, 4.0f, 0.0f, 0.6f, true});
-    } else {
-        tl->appearance().shadows[0].enabled = enabled;
-    }
-    emit propertyChanged();
-}
+// -- Graphic methods are in PropertiesPanelGraphic.cpp --
 
 } // namespace rt
 

@@ -174,6 +174,7 @@ static QWidget* createProjectThumb(const ProjectInfo& info, QWidget* parent,
 ProjectPanel::ProjectPanel(QWidget* parent)
     : QWidget(parent)
 {
+    setAttribute(Qt::WA_OpaquePaintEvent);
     setupUI();
     setFocusPolicy(Qt::StrongFocus);
 
@@ -185,6 +186,8 @@ ProjectPanel::ProjectPanel(QWidget* parent)
 
 ProjectPanel::~ProjectPanel()
 {
+    m_destroying.store(true);
+
     // Persist table header layout (column widths, order, hidden state)
     auto settings = rt::appSettings();
     if (m_projectTable) {
@@ -1018,10 +1021,15 @@ void ProjectPanel::showSidePanel(SidePanelMode mode)
     animMax->setEasingCurve(QEasingCurve::OutCubic);
     group->addAnimation(animMax);
 
-    // After animation finishes, lock to target width — prevents overshoot glitch
+    // After animation finishes, lock to target width — prevents overshoot glitch.
+    // Only lock if the side panel is still supposed to be open (the user may
+    // have triggered hideSidePanel during the animation, which would set the
+    // mode back to None and we must NOT re-lock to PANEL_WIDTH).
     connect(group, &QParallelAnimationGroup::finished, this, [this]() {
-        m_sidePanel->setMinimumWidth(PANEL_WIDTH);
-        m_sidePanel->setMaximumWidth(PANEL_WIDTH);
+        if (m_sidePanelMode != SidePanelMode::None) {
+            m_sidePanel->setMinimumWidth(PANEL_WIDTH);
+            m_sidePanel->setMaximumWidth(PANEL_WIDTH);
+        }
     });
 
     group->start(QAbstractAnimation::DeleteWhenStopped);
@@ -1634,9 +1642,16 @@ void ProjectPanel::applyResponsiveLayout()
 
 void ProjectPanel::resizeEvent(QResizeEvent* event)
 {
+    static thread_local bool s_inResize = false;
+    if (s_inResize) {
+        QWidget::resizeEvent(event);
+        return;
+    }
+    s_inResize = true;
     applyResponsiveLayout();
     applyNewPanelResponsiveLayout();
     QWidget::resizeEvent(event);
+    s_inResize = false;
 }
 
 // =============================================================================

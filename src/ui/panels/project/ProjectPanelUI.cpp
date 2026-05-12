@@ -1145,10 +1145,14 @@ void ProjectPanel::setupUI()
 
     // === Content Area (right side) =======================================
     m_contentArea = new QWidget;
+    m_contentArea->setObjectName("ContentArea");
+    m_contentArea->setStyleSheet(QStringLiteral(
+        "#ContentArea { background: %1; }")
+        .arg(Theme::rgb(c.surface1)));
     auto* contentLayout = new QVBoxLayout(m_contentArea);
-    contentLayout->setContentsMargins(m.spacingXxl, m.spacingXl,
-                                      m.spacingXxl, m.spacingXl);
-    contentLayout->setSpacing(m.spacingXl);
+    contentLayout->setContentsMargins(m.spacingMd, m.spacingMd,
+                                      m.spacingMd, m.spacingMd);
+    contentLayout->setSpacing(m.spacingMd);
 
     // -- Search + Sort bar ------------------------------------------------
     auto* searchBar = new QHBoxLayout;

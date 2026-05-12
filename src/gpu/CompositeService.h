@@ -1,21 +1,26 @@
 /*
- * CompositeService — Timeline video compositing pipeline.
+ * CompositeService — Timeline video compositing pipeline orchestration.
  *
  * Extracted from TimelineWorkspace to separate the rendering/compositing
  * subsystem from UI orchestration.  Lives in gpu/ — no Qt dependency.
  *
- * Owns: composite result LRU, GPU layer textures, GPU tex cache,
- *       composite GPU slot, staging ring, video fallback cache,
- *       open-media handle map, spine shared data + per-clip state,
- *       animation video cache.
+ * Owns: composite frame orchestration, layer building, prewarm, spine
+ *       rendering, safe mode, sticky frame fallback, and the
+ *       CompositeEngine (GPU compositing pipeline).
+ *
+ * GPU resources (command buffers, staging ring, texture cache, upload
+ * manager, layer pool) are owned by CompositeEngine, accessible via
+ * engine().
  */
 
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <future>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -28,20 +33,22 @@ struct VkDescriptorImageInfo_T;
 struct VkDescriptorImageInfo;
 
 #include "CompositeServiceLayerBuild.h"
-#include "StagingRing.h"
 #include "media/FrameCache.h"
 #include "media/MediaSourceService.h"  // ResolutionTier
 #ifdef ROUNDTABLE_HAS_SPINE
 #include "spine/SpineEngine.h"
 #endif
 
+// CompositeEngine is in global scope (not rt::) to work around a C2888
+// compiler issue with volk's Vulkan type redefinitions.
+class CompositeEngine;
+
 namespace rt {
 
 // Forward declarations
+class AnimationVideoCache;
 class AudioEngine;
 class Clip;
-class GpuWorkSubmission;
-class GpuTextureCache;
 class GraphicClip;
 class MediaPool;
 class ModelManager;
@@ -50,9 +57,7 @@ class ShotPresetManager;
 class SpineClip;
 class Timeline;
 class TitleClip;
-class Texture;
 struct CachedFrame;
-class AnimationVideoCache;
 
 class CompositeService {
 public:
@@ -103,6 +108,9 @@ public:
     // ── Core compositing ────────────────────────────────────────────────
     std::shared_ptr<CachedFrame> compositeFrame(int64_t tick, uint32_t outW, uint32_t outH,
                                                  bool scrubMode);
+
+    /// Enqueue a prewarm request on the background thread.
+    /// Returns immediately — the work runs asynchronously on m_prewarmThread.
     void prewarmPlaybackResources(int64_t tick, uint32_t outW, uint32_t outH);
 
     /// Scan the timeline window (tick, tick + lookaheadTicks] and pre-open
@@ -112,6 +120,11 @@ public:
     /// boundary during playback — the decoder is already warm by the time
     /// the playhead reaches the clip.
     void prewarmUpcomingShots(int64_t tick);
+
+    // ── Shutdown ─────────────────────────────────────────────────────────
+    /// Gracefully shut down GPU work.  Waits for all in-flight submissions,
+    /// destroys GPU resources, and prevents new work from starting.
+    void shutdown();
 
     // ── Cache management ────────────────────────────────────────────────
     /// Invalidate composite result LRU (thread-safe, lock-free flag).
@@ -192,9 +205,8 @@ public:
     std::shared_ptr<CachedFrame> renderGraphicClip(GraphicClip* clip, int64_t tick,
                                                     uint32_t outW, uint32_t outH);
 
-    // ── GPU resource cleanup ────────────────────────────────────────────
-    void destroyCompositeSlot();
-    void clearGpuTexCache();
+    // ── Composite engine access ─────────────────────────────────────────
+    [[nodiscard]] CompositeEngine* engine() const noexcept { return m_engine.get(); }
 
     /// VRAM usage percentage (0-100) from GPU texture cache, or 0 if none.
     [[nodiscard]] int vramUsagePercent() const;
@@ -290,6 +302,38 @@ public:
     void initAnimVideoCache(MediaPool* pool);
 #endif
 
+    // ── Safe mode (CPU compositor fallback) ─────────────────────────────
+    /// Enter safe mode after persistent GPU failure.  Produces one frame
+    /// at most every ~500ms for recovery purposes only — NOT for playback.
+    /// Safe mode composites the topmost visible video track using software
+    /// blend and displays via the CPU QWidget viewport.
+    void setSafeMode(bool on) { m_safeMode.store(on, std::memory_order_release); }
+    [[nodiscard]] bool isSafeMode() const noexcept {
+        return m_safeMode.load(std::memory_order_acquire);
+    }
+
+    /// Minimal safe-mode compositing: produces a single BGRA CachedFrame
+    /// from the topmost visible video track at the given tick.  Uses
+    /// blocking software decode + MemCpy blend.  Returns nullptr if no
+    /// video content is available.  Throttled internally to ~2 calls/sec.
+    std::shared_ptr<CachedFrame> compositeSafeMode(int64_t tick,
+                                                     uint32_t outW,
+                                                     uint32_t outH);
+
+    /// Attempt automatic recovery from safe mode.  Checks GPU health and
+    /// if the device is operational again, clears safe mode so the next
+    /// compositeFrame() uses the normal GPU path.  Callers should check
+    /// isSafeMode() afterward to see if recovery succeeded.
+    /// Returns true if recovery was attempted (success or fail); false
+    /// if it's too soon to retry (throttled).
+    bool tryAutoRecoverFromSafeMode();
+
+    /// Callback invoked when safe mode state changes (entered or exited).
+    /// The UI layer (ProgramMonitor) connects to this to show/hide the
+    /// safe mode banner.
+    using SafeModeCallback = std::function<void(bool safeModeActive)>;
+    void setSafeModeCallback(SafeModeCallback cb) { m_safeModeCallback = std::move(cb); }
+
     // ── Reset (new timeline / project close) ────────────────────────────
     void reset();
 
@@ -301,7 +345,7 @@ private:
                                                 std::unique_lock<std::mutex>& lock,
                                                 bool& gpuSpineUsedThisFrame);
 
-    // GPU compositing path
+    // GPU compositing path (delegates to CompositeEngine)
     std::shared_ptr<CachedFrame> tryCompositeOnGpu(const std::vector<LayerInfo>& layers,
                                                      uint32_t outW, uint32_t outH,
                                                      int64_t tick, bool scrubMode,
@@ -319,18 +363,12 @@ private:
     Project* m_project{nullptr};
     ShotPresetManager* m_shotPresetManager{nullptr};
 
+    // Composite engine (owns GPU compositing pipeline)
+    std::unique_ptr<CompositeEngine> m_engine;
+
     // Reusable composite buffer
     std::shared_ptr<CachedFrame> m_compositeBuffer;
 
-    // Composite result LRU cache
-    struct CompositeEntry {
-        int64_t  tick{-1};
-        uint32_t w{0}, h{0};
-        std::shared_ptr<CachedFrame> frame;
-    };
-    static constexpr size_t COMPOSITE_CACHE_SIZE = 8;
-    std::vector<CompositeEntry> m_compositeLru;
-    size_t m_compositeLruIdx{0};
     bool m_isCompositing{false};
 
     std::mutex m_compositeMutex;
@@ -376,35 +414,46 @@ private:
     // SpineClip video fallback cache
     std::unordered_map<uint64_t, VideoFallbackInfo> m_videoFallbackCache;
 
-    // GPU layer texture pool
-    struct PoolTexKey { uint64_t mediaId{0}; int64_t frameNumber{-1}; };
-    std::vector<std::unique_ptr<Texture>> m_gpuLayerTextures;
-    std::vector<PoolTexKey> m_gpuLayerTexKeys;
-    std::vector<std::unique_ptr<Texture>> m_gpuMaskTextures;
+    // ── Prewarm thread (Phase 2.A) ─────────────────────────────────────
+    struct PrewarmRequest {
+        int64_t  tick{0};
+        uint32_t outW{0};
+        uint32_t outH{0};
+    };
 
-    // GPU texture cache
-    std::unique_ptr<GpuTextureCache> m_gpuTexCache;
+    /// Background thread entry point — runs prewarm work off the UI thread.
+    void prewarmThreadLoop();
 
-    // GPU composite state
-    int m_gpuCompositeState{0};
-    std::unique_ptr<GpuWorkSubmission> m_gpuSubmission;
-    StagingRing m_stagingRing;
+    /// Actual prewarm implementation (moved to background thread).
+    void doPrewarmPlaybackResources(int64_t tick, uint32_t outW, uint32_t outH);
+
+    std::thread m_prewarmThread;
+    std::mutex              m_prewarmMutex;
+    std::condition_variable m_prewarmCv;
+    PrewarmRequest          m_prewarmRequest{};
+    bool                    m_prewarmPending{false};
+    std::atomic<bool> m_compositorReady{false};
+    std::atomic<bool> m_destroying{false};
+
+    // ── CPU Compositor Safe Mode (Phase 6) ────────────────────────────
+    // Set true when GPU compositing fails persistently and backoff is
+    // exhausted.  When active, compositeFrame() uses compositeSafeMode()
+    // which composites ONE track only at ~2 fps via software decode+blend.
+    // Cleared on reset() or when the user clicks "Reset GPU".
+    std::atomic<bool> m_safeMode{false};
+
+    // Throttle safe-mode compositing to at most once every 500ms.
+    // compositeSafeMode() checks this before doing heavy work.
+    std::chrono::steady_clock::time_point m_lastSafeModeComposite{};
+
+    // Callback invoked when safe mode is entered or exited.
+    SafeModeCallback m_safeModeCallback;
+
+    // Throttle auto-recovery checks to at most once every 5 seconds.
+    std::chrono::steady_clock::time_point m_lastRecoveryCheck{};
+
     bool m_gpuDisplayMode{false};
-
-    // GPU failure backoff — exponential cooldown with automatic retry.
-    // After a GPU submit failure we wait 100ms, then 500ms, 2s, 5s, 10s
-    // (doubling each time, capped at 10s).  After the cooldown expires,
-    // the next composite call retries GPU fresh.  No permanent disable.
-    static constexpr int kGpuBackoffInitialMs = 100;
-    static constexpr int kGpuBackoffMaxMs      = 10000;
-    std::chrono::steady_clock::time_point m_gpuBackoffUntil{};
-    int m_gpuBackoffAttempts{0};
-
-    // Inter-queue semaphore: signaled after compute queue composite work,
-    // waited on by graphics queue before VulkanViewport present.
-    // Prevents GPU-side data hazard between compositor output write (compute)
-    // and viewport read (graphics) — the root cause of scrub→play freeze.
-    VkSemaphore m_compositeSemaphore{VK_NULL_HANDLE};
+    std::atomic<bool> m_shutdown{false};
 
     // Playback resolution tier (set via setPlaybackTier, read in compositeFrame).
     // Default Half matches the dropdown default (1/2) and the source monitor.

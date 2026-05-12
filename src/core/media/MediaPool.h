@@ -305,6 +305,8 @@ public:
     [[nodiscard]] bool isFrameCached(MediaHandle handle, int64_t frameNumber,
                                      ResolutionTier tier = ResolutionTier::Full) const;
 
+    std::atomic<bool> m_destroying{false};
+
 private:
     MediaEntry* findEntry(MediaHandle handle);
     const MediaEntry* findEntry(MediaHandle handle) const;

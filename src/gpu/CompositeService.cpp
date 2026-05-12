@@ -49,14 +49,12 @@
 #include <unordered_set>
 
 // GPU compositing
-#include "GpuWorkSubmission.h"
+#include "CompositeEngine.h"
 #include "GpuContext.h"
 #include "Compositor.h"
-#include "GpuTextureCache.h"
 #include "EffectProcessor.h"
 #include "SpineRenderer.h"
 #include "TransitionRenderer.h"
-#include "vulkan/Texture.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -73,47 +71,36 @@ std::atomic<bool> CompositeService::s_modalDialogActive{false};
 
 CompositeService::CompositeService()
 {
-    m_compositeLru.resize(COMPOSITE_CACHE_SIZE);
-
-    // Create inter-queue binary semaphore for compute→graphics sync.
-    // Signaled after the compute queue finishes the compositor's output write;
-    // waited on by the graphics queue (VulkanViewport) before reading it.
-    // Without this, the two queues race on the compositor's single output
-    // texture, causing a GPU data hazard → display freeze on scrub→play.
+    // Create the composite engine (owns GPU compositing pipeline).
+    m_engine = std::make_unique<CompositeEngine>();
     if (GpuContext::get().isInitialized()) {
         VkDevice device = GpuContext::get().vkDevice();
-        if (device != VK_NULL_HANDLE) {
-            VkSemaphoreCreateInfo semInfo{};
-            semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-            if (vkCreateSemaphore(device, &semInfo, nullptr, &m_compositeSemaphore) != VK_SUCCESS) {
-                spdlog::warn("CompositeService: failed to create composite semaphore");
-                m_compositeSemaphore = VK_NULL_HANDLE;
-            }
-        }
+        if (device != VK_NULL_HANDLE)
+            m_engine->init(device);
     }
+
+    // ── Start the background prewarm thread ───────────────────────────
+    // prewarmPlaybackResources() now enqueues work on this thread instead
+    // of blocking the UI thread at play-start.  The thread loop waits on
+    // a condition variable and wakes up when a new prewarm request arrives
+    // or when m_destroying is set.
+    m_prewarmThread = std::thread(&CompositeService::prewarmThreadLoop, this);
 }
 
 CompositeService::~CompositeService()
 {
-    // Drain GPU queues before destroying any resources.  In GPU display mode,
-    // the VulkanViewport may have an in-flight present or descriptor set that
-    // references the compositor's output texture.  If we destroy the texture
-    // (via clearGpuTexCache / m_gpuLayerTextures.clear()) without waiting,
-    // the next VulkanViewport render pass reads freed memory → access violation.
-    if (GpuContext::get().isInitialized()) {
-        auto& ctx = GpuContext::get();
-        VkDevice device = ctx.vkDevice();
-        if (device != VK_NULL_HANDLE)
-            vkDeviceWaitIdle(device);
+    // ── Signal prewarm thread to exit ─────────────────────────────────
+    m_destroying.store(true);
+    {
+        std::lock_guard lock(m_prewarmMutex);
+        m_prewarmCv.notify_one();
     }
+    if (m_prewarmThread.joinable())
+        m_prewarmThread.join();
 
-    if (m_compositeSemaphore != VK_NULL_HANDLE && GpuContext::get().isInitialized()) {
-        vkDestroySemaphore(GpuContext::get().vkDevice(), m_compositeSemaphore, nullptr);
-        m_compositeSemaphore = VK_NULL_HANDLE;
-    }
-
-    destroyCompositeSlot();
-    clearGpuTexCache();
+    // Destroy the composite engine — it drains GPU queues and frees all
+    // GPU resources (submission, staging ring, texture cache, layers).
+    m_engine.reset();
 }
 
 void CompositeService::reset()
@@ -122,12 +109,12 @@ void CompositeService::reset()
     m_compositeBuffer.reset();
     m_openMediaHandles.clear();
     m_videoFallbackCache.clear();
-    m_gpuLayerTextures.clear();
-    m_gpuLayerTexKeys.clear();
-    m_gpuMaskTextures.clear();
-    m_gpuCompositeState = 0;
-    m_gpuBackoffAttempts = 0;
-    m_gpuBackoffUntil = {};
+    if (m_engine) {
+        m_engine->clearLru();
+        m_engine->resetBackoff();
+    }
+    m_safeMode.store(false, std::memory_order_release);
+    m_lastSafeModeComposite = {};
     m_lastActiveClipIds.clear();
     m_prewarmedClipIds.clear();
     m_lastLookaheadScan = {};
@@ -227,33 +214,32 @@ void CompositeService::purgeDeadSpineStates(const std::unordered_set<uint64_t>& 
 
 void CompositeService::invalidateCacheDirect()
 {
-    m_compositeLru.clear();
-    m_compositeLru.resize(COMPOSITE_CACHE_SIZE);
-    m_compositeLruIdx = 0;
+    if (m_engine) {
+        m_engine->clearLru();
+    }
     {
         std::lock_guard lg(m_lastCompositeMtx);
         m_lastGoodComposite.reset();
     }
-    m_gpuLayerTexKeys.clear();
     m_cacheInvalidateRequested.store(false, std::memory_order_release);
 }
 
-void CompositeService::destroyCompositeSlot()
+void CompositeService::shutdown()
 {
-    m_gpuSubmission.reset();
-    m_gpuCompositeState = 0;
-    m_gpuBackoffAttempts = 0;
-    m_gpuBackoffUntil = {};
-}
+    m_shutdown.store(true, std::memory_order_release);
 
-void CompositeService::clearGpuTexCache()
-{
-    m_gpuTexCache.reset();
+    // Shut down the composite engine — waits for GPU idle, destroys
+    // all GPU resources (submission, staging ring, texture cache, layers).
+    if (m_engine) {
+        m_engine->shutdown();
+    }
+
+    spdlog::info("CompositeService::shutdown() — complete");
 }
 
 int CompositeService::vramUsagePercent() const
 {
-    return m_gpuTexCache ? m_gpuTexCache->usagePercent() : 0;
+    return m_engine ? m_engine->vramUsagePercent() : 0;
 }
 
 #ifdef ROUNDTABLE_HAS_SPINE

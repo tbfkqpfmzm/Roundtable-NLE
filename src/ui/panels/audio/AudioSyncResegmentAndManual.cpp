@@ -523,7 +523,7 @@ void AudioSync::openManualMatch(int lineNumber)
                         // Update waveform widget if it exists
                         for (size_t wi = 0; wi < m_cardScriptLineNums.size(); ++wi) {
                             if (m_cardScriptLineNums[wi] == lineNumber && wi < m_cardWaveforms.size()) {
-                                if (auto* wv = m_cardWaveforms[wi]) {
+                                if (auto wv = m_cardWaveforms[wi]) {
                                     auto sit = m_audioSamples.find(m_clips[ci].sourceFile);
                                     if (sit != m_audioSamples.end()) {
                                         wv->setAudioShared(

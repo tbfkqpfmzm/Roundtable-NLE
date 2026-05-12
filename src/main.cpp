@@ -57,46 +57,54 @@ int main(int argc, char* argv[])
     _CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 #endif
 
-    // Crash handler — write crash dumps to LOCALAPPDATA so they survive
-    // when running from a read-only install directory (e.g. Program Files).
+    // ── Unified log root ──────────────────────────────────────────────
+    // All crash logs, minidumps, and spdlog output go to a single location:
+    //   logs/  (project root, resolved relative to the exe parent chain)
+    //
+    // Detection logic: walk up from argv[0]'s parent directory looking for
+    // CMakeLists.txt.  If found, use that directory as the log root (dev
+    // build).  Otherwise fall back to %LOCALAPPDATA%/ROUNDTABLE/logs/ so
+    // installed builds still work from read-only directories (Program Files).
+    std::filesystem::path logRoot = "logs";
     {
-        std::filesystem::path crashDir = "crash_logs";  // fallback
-#ifdef _WIN32
-        wchar_t appData[MAX_PATH];
-        DWORD len = GetEnvironmentVariableW(L"LOCALAPPDATA", appData, MAX_PATH);
-        if (len > 0 && len < MAX_PATH) {
-            crashDir = std::filesystem::path(appData) / "ROUNDTABLE" / "crash_logs";
+        auto exeDir = std::filesystem::path(argv[0]).parent_path();
+        // Walk up from exe dir, up to 5 levels, looking for CMakeLists.txt
+        auto probe = exeDir;
+        bool foundProjectRoot = false;
+        for (int i = 0; i < 5; ++i) {
+            if (std::filesystem::exists(probe / "CMakeLists.txt")) {
+                logRoot = probe / "logs";
+                foundProjectRoot = true;
+                break;
+            }
+            auto parent = probe.parent_path();
+            if (parent == probe) break;  // reached filesystem root
+            probe = parent;
         }
+        if (!foundProjectRoot) {
+#ifdef _WIN32
+            wchar_t appData[MAX_PATH];
+            DWORD len = GetEnvironmentVariableW(L"LOCALAPPDATA", appData, MAX_PATH);
+            if (len > 0 && len < MAX_PATH)
+                logRoot = std::filesystem::path(appData) / "ROUNDTABLE" / "logs";
 #endif
-        rt::CrashHandler::install(crashDir);
+        }
     }
+    std::filesystem::create_directories(logRoot);
 
-    // Logging: console + perf_log.txt (in LOCALAPPDATA when deployed,
-    // or project root when running from build tree)
+    // Crash handler — install with unified log root as crash directory
+    rt::CrashHandler::install(logRoot);
+    spdlog::info("Crash logs → {}", logRoot.string());
+
+    // Logging: console + perf_log.txt (in unified log root)
     {
         auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
         std::shared_ptr<spdlog::sinks::basic_file_sink_mt> file_sink;
         try {
-            std::filesystem::path logPath;
-#ifdef _WIN32
-            // Use LOCALAPPDATA for deployed builds (works from both
-            // Program Files and build tree without permission issues)
-            wchar_t appData[MAX_PATH];
-            DWORD len = GetEnvironmentVariableW(L"LOCALAPPDATA", appData, MAX_PATH);
-            if (len > 0 && len < MAX_PATH) {
-                logPath = std::filesystem::path(appData) / "ROUNDTABLE" / "perf_log.txt";
-                std::filesystem::create_directories(logPath.parent_path());
-            } else
-#endif
-            {
-                // Fallback: relative to exe (source tree)
-                auto exeDir = std::filesystem::path(argv[0]).parent_path();
-                logPath = exeDir / "perf_log.txt";
-            }
+            auto logPath = logRoot / "perf_log.txt";
             file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(
                 logPath.string(), /*truncate=*/true);
         } catch (const std::exception& e) {
-            // File logging unavailable — continue with console-only logger
             spdlog::warn("Could not create file logger: {}", e.what());
         }
         auto logger = std::make_shared<spdlog::logger>("multi",

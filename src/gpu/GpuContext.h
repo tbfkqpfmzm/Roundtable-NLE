@@ -27,6 +27,7 @@
 #include "vulkan/Allocator.h"
 #include "vulkan/CommandPool.h"
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -41,6 +42,14 @@ class TransitionRenderer;
 
 class CudaVulkanInterop;
 class GpuResourceManager;
+
+/// GPU device health state for device-lost recovery (Phase 2.B).
+enum class GpuState : uint8_t {
+    Healthy,      ///< Normal operation
+    DeviceLost,   ///< GPU device lost detected (e.g. VK_ERROR_DEVICE_LOST)
+    Recovering,   ///< Recovery in progress (tryRecover active)
+    Failed        ///< Recovery failed — fall back to CPU safe mode
+};
 
 class GpuContext
 {
@@ -65,6 +74,29 @@ public:
 
     /// Is the GPU context ready?
     [[nodiscard]] bool isInitialized() const noexcept { return m_initialized; }
+
+    // ── Device-lost recovery (Phase 2.B) ────────────────────────────────
+
+    /// Current GPU device health state.
+    [[nodiscard]] GpuState gpuState() const noexcept {
+        return m_gpuState.load(std::memory_order_acquire);
+    }
+
+    /// True when GPU is healthy and operational.
+    [[nodiscard]] bool isOperational() const noexcept {
+        return m_gpuState.load(std::memory_order_acquire) == GpuState::Healthy;
+    }
+
+    /// Attempt full GPU re-initialization after device lost.
+    /// Returns true on success, false if recovery failed.
+    bool tryRecover();
+
+    /// Signal that a GPU error (e.g. VK_ERROR_DEVICE_LOST) was detected.
+    /// Safe to call from any thread. Next composite call will attempt recovery.
+    void signalDeviceLost() noexcept {
+        GpuState expected = GpuState::Healthy;
+        m_gpuState.compare_exchange_strong(expected, GpuState::DeviceLost);
+    }
 
     // ── Accessors ───────────────────────────────────────────────────────
 
@@ -182,6 +214,7 @@ private:
     std::unique_ptr<GpuResourceManager>  m_resourceManager;
 
     bool m_initialized{false};
+    std::atomic<GpuState> m_gpuState{GpuState::Healthy};
     mutable std::mutex m_graphicsQueueMutex;  ///< Serialise graphics queue submits
     mutable std::mutex m_computeQueueMutex;   ///< Serialise compute queue submits
     mutable std::mutex m_subsystemMutex;      ///< Serialise lazy subsystem creation

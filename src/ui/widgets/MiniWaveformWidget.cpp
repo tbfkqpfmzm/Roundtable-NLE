@@ -224,8 +224,15 @@ void MiniWaveformWidget::detectSilences()
 
 // ── Paint ────────────────────────────────────────────────────────────────
 
-void MiniWaveformWidget::paintEvent(QPaintEvent*)
+void MiniWaveformWidget::paintEvent(QPaintEvent* event)
 {
+    static thread_local int s_paintDepth = 0;
+    if (++s_paintDepth > 5) {
+        --s_paintDepth;
+        QWidget::paintEvent(event);
+        return;
+    }
+
     // Lazy silence detection on first paint
     if (!m_silencesComputed)
         const_cast<MiniWaveformWidget*>(this)->detectSilences();
@@ -242,10 +249,10 @@ void MiniWaveformWidget::paintEvent(QPaintEvent*)
     p.fillRect(rect(), tc.waveformBg);
 
     const auto& samples = sam();
-    if (samples.empty() || m_sampleRate == 0 || w <= 0) return;
+    if (samples.empty() || m_sampleRate == 0 || w <= 0) { --s_paintDepth; return; }
 
     double viewDuration = m_viewEnd - m_viewStart;
-    if (viewDuration <= 0.0) return;
+    if (viewDuration <= 0.0) { --s_paintDepth; return; }
 
     int viewStartSample = static_cast<int>(m_viewStart * m_sampleRate);
     int viewEndSample   = static_cast<int>(m_viewEnd   * m_sampleRate);
@@ -370,6 +377,8 @@ void MiniWaveformWidget::paintEvent(QPaintEvent*)
             p.drawPolygon(tri);
         }
     }
+
+    --s_paintDepth;
 }
 
 // ── Mouse interaction ────────────────────────────────────────────────────

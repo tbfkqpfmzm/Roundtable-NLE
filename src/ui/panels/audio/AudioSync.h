@@ -47,6 +47,7 @@
 
 #include "ai/Transcriber.h"    // For TranscriptionResult
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <string>
@@ -504,9 +505,35 @@ private:
     QWidget*      m_rightScrollContent{nullptr};
     QVBoxLayout*  m_rightLayout{nullptr};
 
+    // ── Card widget pool (Phase 5.A: reuse instead of destroy+recreate) ─
+    struct CardWidgetPool {
+        std::vector<QFrame*> pool;  // pre-allocated, recycled
+        size_t activeCount = 0;
+
+        QFrame* acquire() {
+            if (activeCount < pool.size())
+                return pool[activeCount++];
+            return nullptr;  // caller must allocate
+        }
+
+        void releaseAll() {
+            for (auto* frame : pool)
+                frame->setVisible(false);
+            activeCount = 0;
+        }
+
+        void shrink(size_t targetSize) {
+            while (pool.size() > targetSize) {
+                delete pool.back();
+                pool.pop_back();
+            }
+        }
+    };
+    CardWidgetPool m_cardPool;
+
     // Card → waveform mapping (indexed by script line index in current view)
-    std::vector<MiniWaveformWidget*> m_cardWaveforms;
-    std::vector<QWidget*>            m_cardWidgets;      // card frames in right pane
+    std::vector<QPointer<MiniWaveformWidget>> m_cardWaveforms;
+    std::vector<QPointer<QWidget>>            m_cardWidgets;      // card frames in right pane
     std::vector<int>                 m_cardScriptLineNums; // script line number per card
     std::vector<int>                 m_cardClipIndices;    // clip index per card (-1 if unmatched)
     QPointer<QWidget>                m_highlightedCard;          // currently highlighted card (glow effect)
@@ -547,6 +574,9 @@ private:
     QLabel*       m_clipCountLabel{nullptr};
     QListWidget*  m_scriptList{nullptr};
     QComboBox*    m_scriptFilterCombo{nullptr};
+
+    // Use-after-free guard
+    std::atomic<bool> m_destroying{false};
 };
 
 } // namespace rt

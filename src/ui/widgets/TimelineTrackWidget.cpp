@@ -42,6 +42,7 @@ TimelineTrackWidget::TimelineTrackWidget(QWidget* parent)
 
 TimelineTrackWidget::~TimelineTrackWidget()
 {
+    m_destroying.store(true);
     spdlog::info("[LIFECYCLE] TimelineTrackWidget destructor entered: this={} (class={})", (void*)this, metaObject() ? metaObject()->className() : "null");
 }
 
@@ -215,6 +216,13 @@ bool TimelineTrackWidget::event(QEvent* event)
 
 void TimelineTrackWidget::paintEvent(QPaintEvent* event)
 {
+    static thread_local int s_paintDepth = 0;
+    if (++s_paintDepth > 5) {
+        --s_paintDepth;
+        QWidget::paintEvent(event);
+        return;
+    }
+
     // Unconditional one-shot diagnostic for every track widget
     static std::set<std::string> s_loggedTracks;
     if (m_track && s_loggedTracks.find(m_track->name()) == s_loggedTracks.end()) {
@@ -229,7 +237,7 @@ void TimelineTrackWidget::paintEvent(QPaintEvent* event)
                      (m_engine ? "yes" : "no"));
     }
 
-    if (!m_engine || !m_track) return;
+    if (!m_engine || !m_track) { --s_paintDepth; return; }
 
     auto paintT0 = std::chrono::steady_clock::now();
 
@@ -552,6 +560,8 @@ void TimelineTrackWidget::paintEvent(QPaintEvent* event)
                          m_track->name());
         }
     }
+
+    --s_paintDepth;
 }
 
 void TimelineTrackWidget::paintClip(QPainter& painter, size_t clipIndex)

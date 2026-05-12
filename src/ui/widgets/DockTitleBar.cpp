@@ -75,6 +75,13 @@ void DockTitleBar::updateTitleLayout()
 
 void DockTitleBar::resizeEvent(QResizeEvent* event)
 {
+    static thread_local bool s_inResize = false;
+    if (s_inResize) {
+        QWidget::resizeEvent(event);
+        return;
+    }
+    s_inResize = true;
+
     QWidget::resizeEvent(event);
 
     // For "Audio Meters", dynamically switch between single-line and stacked
@@ -98,6 +105,8 @@ void DockTitleBar::resizeEvent(QResizeEvent* event)
         }
         updateGeometry();
     }
+
+    s_inResize = false;
 }
 
 void DockTitleBar::setTitle(const QString& title)
@@ -148,8 +157,14 @@ void DockTitleBar::applyTheme()
             .arg(ty.sizeCaption));
 }
 
-void DockTitleBar::paintEvent(QPaintEvent* /*event*/)
+void DockTitleBar::paintEvent(QPaintEvent* event)
 {
+    static thread_local int s_paintDepth = 0;
+    if (++s_paintDepth > 5) {
+        --s_paintDepth;
+        QWidget::paintEvent(event);
+        return;
+    }
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing, false);
     const auto& tc = Theme::colors();
@@ -170,6 +185,8 @@ void DockTitleBar::paintEvent(QPaintEvent* /*event*/)
         p.setBrush(tc.accent);
         p.drawRect(0, 0, width(), 2);
     }
+
+    --s_paintDepth;
 }
 
 void DockTitleBar::mouseDoubleClickEvent(QMouseEvent* event)

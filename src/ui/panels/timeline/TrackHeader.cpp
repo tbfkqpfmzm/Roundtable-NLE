@@ -59,9 +59,16 @@ QSize TrackHeader::sizeHint() const
     return {w, static_cast<int>(m_height)};
 }
 
-void TrackHeader::paintEvent(QPaintEvent* /*event*/)
+void TrackHeader::paintEvent(QPaintEvent* event)
 {
-    if (!m_track) return;
+    static thread_local int s_paintDepth = 0;
+    if (++s_paintDepth > 5) {
+        --s_paintDepth;
+        QWidget::paintEvent(event);
+        return;
+    }
+
+    if (!m_track) { --s_paintDepth; return; }
 
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
@@ -109,6 +116,7 @@ void TrackHeader::paintEvent(QPaintEvent* /*event*/)
             painter.drawText(QRect(textX, 0, textW, h),
                              Qt::AlignVCenter | Qt::AlignHCenter, label);
         }
+        --s_paintDepth;
         return;
     }
 
@@ -182,6 +190,8 @@ void TrackHeader::paintEvent(QPaintEvent* /*event*/)
         drawButton(soloButtonRect(),     QStringLiteral("S"),  m_track->isSoloed(),    tc.success);
         drawButton(syncLockButtonRect(), QStringLiteral("SL"), m_track->isSyncLocked(), tc.accent);
     }
+
+    --s_paintDepth;
 }
 
 bool TrackHeader::event(QEvent* e)
@@ -215,10 +225,19 @@ bool TrackHeader::event(QEvent* e)
 
 void TrackHeader::resizeEvent(QResizeEvent* event)
 {
+    static thread_local bool s_inResize = false;
+    if (s_inResize) {
+        QWidget::resizeEvent(event);
+        return;
+    }
+    s_inResize = true;
+
     // Button positions are computed dynamically from width()/height(),
     // so any size change must trigger a repaint to reflow the layout.
     QWidget::resizeEvent(event);
     update();
+
+    s_inResize = false;
 }
 
 void TrackHeader::mousePressEvent(QMouseEvent* event)

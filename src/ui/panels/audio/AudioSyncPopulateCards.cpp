@@ -34,21 +34,22 @@ void AudioSync::populateCards()
     if (m_rightScrollArea && m_rightScrollArea->verticalScrollBar())
         savedScrollPos = m_rightScrollArea->verticalScrollBar()->value();
 
-    // Clear existing cards
+    // ── Card widget pool (Phase 5.A) ──────────────────────────────────
+    // Hide existing cards for reuse instead of destroy+recreate.
+    m_cardPool.releaseAll();
     m_cardWaveforms.clear();
     m_cardWidgets.clear();
     m_cardClipIndices.clear();
     m_highlightedCard = nullptr;
     m_selectedLeftCard = nullptr;
 
+    // Remove all widget items from layout (without deleting widgets)
     if (m_rightLayout) {
-        QLayoutItem* child;
-        while ((child = m_rightLayout->takeAt(0)) != nullptr) {
-            if (auto* w = child->widget()) {
-                w->setParent(nullptr);
-                delete w;
-            }
-            delete child;
+        while (m_rightLayout->count() > 0) {
+            auto* item = m_rightLayout->takeAt(0);
+            if (auto* w = item->widget())
+                w->setParent(nullptr);  // detach but don't delete
+            delete item;
         }
     }
 
@@ -163,7 +164,31 @@ void AudioSync::populateCards()
         default: hoverBg = Theme::hex(_tc.surface3); hoverBorder = Theme::hex(_tc.border); break;
         }
 
-        auto* card = new QFrame;
+        // Acquire card from pool or create new
+        auto* card = m_cardPool.acquire();
+        if (!card) {
+            card = new QFrame;
+            m_cardPool.pool.push_back(card);
+        } else {
+            // ── Clean up old layout and child widgets when reusing ─────
+            // Qt will NOT replace a non-empty layout on an existing widget
+            // (setLayout() returns early with a warning), so the new
+            // QHBoxLayout created below would be orphaned and the card
+            // would still show stale content from the previous populateCards
+            // call — causing "No audio assigned" to persist even after
+            // auto-sync has matched clips.
+            QLayout* oldLayout = card->layout();
+            if (oldLayout) {
+                while (auto* item = oldLayout->takeAt(0)) {
+                    if (auto* w = item->widget()) {
+                        w->setParent(nullptr);
+                        delete w;
+                    }
+                    delete item;
+                }
+                delete oldLayout;  // removes layout from card
+            }
+        }
         card->setObjectName(QString("scriptCard_%1").arg(line.lineNumber));
         card->setCursor(Qt::PointingHandCursor);
         card->setStyleSheet(
@@ -810,9 +835,15 @@ void AudioSync::populateCards()
                 continue;
             child->installEventFilter(this);
         }
+
+        // Show the card (pooled cards are hidden after releaseAll)
+        card->setVisible(true);
     }
 
     m_rightLayout->addStretch();
+
+    // Shrink pool to active count + headroom (Phase 5.A)
+    m_cardPool.shrink(m_cardPool.activeCount + 16);
 
     // Re-enable repaints after bulk creation
     if (m_rightScrollContent)

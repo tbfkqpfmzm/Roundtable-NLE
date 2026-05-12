@@ -324,6 +324,7 @@ AudioPlaybackService::AudioPlaybackService() = default;
 
 AudioPlaybackService::~AudioPlaybackService()
 {
+    m_destroying.store(true);
     cancelWarm();
     waitForWarm();
 }

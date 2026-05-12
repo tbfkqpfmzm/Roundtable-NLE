@@ -26,7 +26,17 @@ PlaybackScheduler::PlaybackScheduler()
     m_presenter.setProducer(&m_producer);
 
     // Wire FrameClock to push tick requests to FrameProducer's queue.
+    // When the producer is backlogged (compositor slower than clock),
+    // skip the tick to let the producer catch up.  Without this check,
+    // the clock fires at 60fps regardless of compositor throughput,
+    // and the producer wastes CPU replacing its queue entry with every
+    // tick instead of compositing.  The skipped frame is counted so
+    // diagnostics and A/V sync can react.
     m_clock.setFrameCallback([this](int64_t tick, int64_t /*frame*/) {
+        if (m_producer.isBacklogged()) {
+            m_backpressureSkippedFrames.fetch_add(1, std::memory_order_relaxed);
+            return; // skip — compositor can't keep up
+        }
         m_producer.requestFrame(tick);
     });
 
@@ -130,12 +140,14 @@ std::shared_ptr<CachedFrame> PlaybackScheduler::lastDisplayedFrame() const
 
 int PlaybackScheduler::droppedFrames() const noexcept
 {
-    return m_clock.droppedFrames();
+    return m_clock.droppedFrames()
+         + static_cast<int>(m_backpressureSkippedFrames.load(std::memory_order_relaxed));
 }
 
 void PlaybackScheduler::resetDroppedFrames() noexcept
 {
     m_clock.resetDroppedFrames();
+    m_backpressureSkippedFrames.store(0, std::memory_order_relaxed);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

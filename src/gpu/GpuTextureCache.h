@@ -71,9 +71,24 @@ public:
                    bool isPacked = false, bool isPMA = false,
                    bool isLoopFrame = false);
 
+    // ── Pinning ─────────────────────────────────────────────────────────
+
+    /// Pin a cached texture to prevent eviction.
+    /// Call during command buffer recording to protect textures that are
+    /// still referenced by in-flight GPU work.  After the fence signals,
+    /// unpin() or unpinAll() to release the pin.
+    void pin(uint64_t mediaId, int64_t frameNumber);
+
+    /// Unpin a previously pinned texture.
+    void unpin(uint64_t mediaId, int64_t frameNumber);
+
+    /// Unpin ALL entries (safe to call after fence signals since the GPU
+    /// is done with all previously-submitted work).
+    void unpinAll();
+
     // ── Maintenance ─────────────────────────────────────────────────────
 
-    /// Evict all entries.
+    /// Evict all entries (skips pinned entries).
     void clear();
 
     /// Evict all entries for a specific media.
@@ -131,6 +146,7 @@ private:
         bool                     isPacked{false}; // Packed-alpha (2× height, UV split)
         bool                     isPMA{false};    // Premultiplied-alpha (native alpha video)
         bool                     isLoopFrame{false}; // Belongs to a short looping clip
+        int                      pinCount{0};    // >0 prevents eviction
         LruIter                  lruIt;
     };
 

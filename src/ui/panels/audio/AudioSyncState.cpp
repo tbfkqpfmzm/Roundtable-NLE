@@ -596,16 +596,18 @@ void AudioSync::scrollToCard(int scriptLineNumber)
     }
 
     // Find the card for this script line
-    for (size_t i = 0; i < m_cardWidgets.size(); ++i) {
+    auto widgets = m_cardWidgets;  // local copy — protect against vector modification
+    for (size_t i = 0; i < widgets.size(); ++i) {
         if (i < m_cardScriptLineNums.size() &&
             m_cardScriptLineNums[i] == scriptLineNumber)
         {
-            auto* widget = m_cardWidgets[i];
-            if (widget) {
+            auto widget = widgets[i];
+            QWidget* rawWidget = widget;
+            if (rawWidget) {
                 // Apply highlight: accent glow that preserves match-state colors
                 m_highlightedCard = widget;
 
-                auto* frame = qobject_cast<QFrame*>(widget);
+                auto* frame = qobject_cast<QFrame*>(rawWidget);
                 if (frame) {
                     auto* glow = new QGraphicsDropShadowEffect(frame);
                     glow->setBlurRadius(18);
@@ -644,8 +646,9 @@ void AudioSync::syncLeftListFromScroll()
 
     int bestRow = -1;
     int bestDist = INT_MAX;
-    for (size_t i = 0; i < m_cardWidgets.size(); ++i) {
-        auto* w = m_cardWidgets[i];
+    auto widgets = m_cardWidgets;  // local copy — protect against vector modification
+    for (size_t i = 0; i < widgets.size(); ++i) {
+        auto w = widgets[i];
         if (!w) continue;
         QPoint cardTop = w->mapToGlobal(QPoint(0, 0));
         int dist = std::abs(cardTop.y() - viewportTop.y());

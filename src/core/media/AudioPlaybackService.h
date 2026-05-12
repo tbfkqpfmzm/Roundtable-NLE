@@ -78,6 +78,8 @@ public:
     [[nodiscard]] bool sourcesLoaded()   const noexcept { return m_sourcesLoaded; }
     [[nodiscard]] bool isTopologyDirty() const noexcept { return m_topologyDirty; }
 
+    std::atomic<bool> m_destroying{false};
+
 private:
     // Dependencies (non-owning)
     Timeline*            m_timeline{nullptr};

@@ -356,8 +356,15 @@ int ThumbnailGrid::hitTest(const QPoint& pos) const
 //  Events
 // ═════════════════════════════════════════════════════════════════════════════
 
-void ThumbnailGrid::paintEvent(QPaintEvent* /*event*/)
+void ThumbnailGrid::paintEvent(QPaintEvent* event)
 {
+    static thread_local int s_paintDepth = 0;
+    if (++s_paintDepth > 5) {
+        --s_paintDepth;
+        QWidget::paintEvent(event);
+        return;
+    }
+
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
 
@@ -550,6 +557,8 @@ void ThumbnailGrid::paintEvent(QPaintEvent* /*event*/)
             x += cw + pad;
         }
     }
+
+    --s_paintDepth;
 }
 
 void ThumbnailGrid::mousePressEvent(QMouseEvent* event)
@@ -691,9 +700,17 @@ void ThumbnailGrid::leaveEvent(QEvent* event)
     QWidget::leaveEvent(event);
 }
 
-void ThumbnailGrid::resizeEvent(QResizeEvent* /*event*/)
+void ThumbnailGrid::resizeEvent(QResizeEvent* event)
 {
+    static thread_local bool s_inResize = false;
+    if (s_inResize) {
+        QWidget::resizeEvent(event);
+        return;
+    }
+    s_inResize = true;
     recalcLayout();
+    QWidget::resizeEvent(event);
+    s_inResize = false;
 }
 
 } // namespace rt

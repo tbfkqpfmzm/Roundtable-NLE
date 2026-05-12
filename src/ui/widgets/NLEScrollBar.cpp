@@ -44,8 +44,14 @@ QSize NLEScrollBar::minimumSizeHint() const
     return {100, kBarHeight};
 }
 
-void NLEScrollBar::paintEvent(QPaintEvent* /*event*/)
+void NLEScrollBar::paintEvent(QPaintEvent* event)
 {
+    static thread_local int s_paintDepth = 0;
+    if (++s_paintDepth > 5) {
+        --s_paintDepth;
+        QWidget::paintEvent(event);
+        return;
+    }
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, false);
 
@@ -82,6 +88,7 @@ void NLEScrollBar::paintEvent(QPaintEvent* /*event*/)
     // Right grip lines
     painter.drawLine(handleRight - 4, midY - 3, handleRight - 4, midY + 3);
     painter.drawLine(handleRight - 6, midY - 3, handleRight - 6, midY + 3);
+    --s_paintDepth;
 }
 
 void NLEScrollBar::mousePressEvent(QMouseEvent* event)

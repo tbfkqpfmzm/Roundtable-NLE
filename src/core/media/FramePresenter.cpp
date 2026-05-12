@@ -36,6 +36,7 @@ void FramePresenter::start()
 void FramePresenter::stop()
 {
     if (!m_running.load()) return;
+    m_destroying.store(true);
     m_running.store(false);
     if (m_producer) m_producer->notifyPresenter();  // wake if blocked
     if (m_thread.joinable()) m_thread.join();
@@ -80,7 +81,7 @@ void FramePresenter::presentLoop()
     SteadyClock::time_point nextDeadline{};
     bool pacingActive = false;
 
-    while (m_running.load(std::memory_order_relaxed)) {
+    while (m_running.load(std::memory_order_relaxed) && !m_destroying.load(std::memory_order_acquire)) {
 
         const bool playing = m_controller && m_controller->isPlaying();
 

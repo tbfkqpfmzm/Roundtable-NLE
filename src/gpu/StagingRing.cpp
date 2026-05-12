@@ -57,6 +57,8 @@ void StagingRing::destroy()
 
 StagingRing::Alloc StagingRing::alloc(const void* data, VkDeviceSize size)
 {
+    std::lock_guard lock(m_ringMutex);
+
     // Align to 256 bytes (safe for any Vulkan buffer-image copy alignment)
     constexpr VkDeviceSize ALIGN = 256;
     VkDeviceSize aligned = (m_offset + ALIGN - 1) & ~(ALIGN - 1);

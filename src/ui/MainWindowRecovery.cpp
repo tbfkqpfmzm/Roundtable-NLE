@@ -34,6 +34,7 @@
 #include "panels/timeline/TimelinePanel.h"
 
 // Core
+#include "CrashHandler.h"
 #include "command/CommandStack.h"
 #include "media/AudioEngine.h"
 #include "media/FrameCache.h"
@@ -257,11 +258,77 @@ void MainWindow::checkCrashRecovery()
 {
     auto settings = rt::appSettings();
     QString lastPath = settings.value("LastProjectPath").toString();
+
+    // ── Phase 7.A: Crash marker recovery ───────────────────────────────
+    // Check if ROUNDTABLE crashed on the previous launch.  If so, show a
+    // dialog offering to reset dock layout and workspace to safe defaults.
+    if (CrashHandler::hasCrashMarker()) {
+        auto crashInfo = CrashHandler::readCrashMarker();
+        spdlog::warn("Crash marker detected: {}", crashInfo.summary);
+
+        QString crashMsg =
+            QStringLiteral("ROUNDTABLE crashed on the last launch.\n\n"
+                           "Crash details: %1\n\n"
+                           "Would you like to reset the dock layout and workspace "
+                           "to safe defaults?\n\n"
+                           "• Reset & Continue — clears GPU cache, resets layout,\n"
+                           "  and starts with GPU acceleration disabled.\n"
+                           "• Continue — tries to restore your previous session.\n")
+                .arg(QString::fromStdString(crashInfo.summary));
+
+        auto reply = QMessageBox::question(
+            this, QStringLiteral("Crash Recovery"),
+            crashMsg,
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+
+        if (reply == QMessageBox::Yes) {
+            spdlog::info("Crash recovery: user chose to reset layout");
+
+            // ── Reset dock layout to defaults ──────────────────────────
+            applyDefaultLayout();
+
+            // ── Clear GPU cache settings ──────────────────────────────
+            // Force safe mode on next composite by clearing GPU state
+            // in the settings, so the compositor starts fresh.
+            settings.setValue("GpuEnabled", false);
+
+            // ── Reset workspace to default ────────────────────────────
+            settings.remove("WorkspaceState");
+            settings.remove("WorkspaceGeometry");
+
+            // ── Clear any stored GPU cache paths ──────────────────────
+            settings.remove("GpuCachePath");
+
+            statusBar()->showMessage(
+                QStringLiteral("Layout reset to defaults (previous crash detected)"), 5000);
+
+            // ── Shortcut config diagnostic ────────────────────────────
+            // Store a hash of the current shortcut config so unexpected
+            // changes between launches (could indicate corruption from
+            // crash) can be detected.
+            {
+                QStringList shortcuts = settings.value("Shortcuts").toStringList();
+                size_t hash = 0;
+                for (const auto& s : shortcuts) {
+                    hash ^= std::hash<std::string>{}(s.toStdString()) + 0x9e3779b9
+                          + (hash << 6) + (hash >> 2);
+                }
+                settings.setValue("ShortcutConfigHash",
+                                  QVariant::fromValue(static_cast<quint64>(hash)));
+            }
+        } else {
+            spdlog::info("Crash recovery: user chose to continue without reset");
+        }
+
+        // Clear the marker regardless — we've handled it
+        CrashHandler::clearCrashMarker();
+    }
+
+    // ── Auto-save recovery (existing) ──────────────────────────────────
     if (lastPath.isEmpty()) return;
 
     auto projPath = std::filesystem::path(lastPath.toStdWString());
 
-    // Check for auto-saves in the "Roundtable Auto-Save" folder
     bool recovered = false;
     if (AutoSave::hasRecoverableAutoSave(projPath)) {
         auto newestAutoSave = AutoSave::findNewestAutoSave(projPath);

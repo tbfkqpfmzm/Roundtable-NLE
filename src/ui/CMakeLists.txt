@@ -28,19 +28,35 @@ add_library(roundtable_ui STATIC
     panels/timeline/TimelinePanelMouse.cpp
     panels/timeline/TimelinePanelMouseDrag.cpp
     panels/timeline/TimelinePanelDragDrop.cpp
+    panels/timeline/TimelinePanelLayout.cpp
+    panels/timeline/TimelinePanelTracks.cpp
+    panels/timeline/TimelinePanelZoomScroll.cpp
+    panels/timeline/TimelinePanelPaintEvents.cpp
+    panels/timeline/TimelinePanelHitTest.cpp
+    panels/timeline/TimelinePanelCommands.cpp
     panels/monitors/SourceMonitor.cpp
     panels/monitors/SourceMonitorUI.cpp
     panels/monitors/ProgramMonitor.cpp
     panels/monitors/ProgramMonitorUI.cpp
     panels/project/ProjectBin.cpp
+    panels/project/ProjectBinConfig.cpp
     panels/project/ProjectBinUI.cpp
     panels/project/ProjectBinSync.cpp
     panels/project/ProjectBinDragDrop.cpp
+    panels/project/ProjectBinImport.cpp
+    panels/project/ProjectBinQueries.cpp
+    panels/project/ProjectBinEvents.cpp
+    panels/project/ProjectBinSlots.cpp
+    panels/project/ProjectBinSequence.cpp
     panels/properties/PropertiesPanel.cpp
     panels/properties/PropertiesPanelUI.cpp
     panels/properties/PropertiesPanelApply.cpp
     panels/properties/PropertiesPanelSpine.cpp
     panels/properties/PropertiesPanelTransitions.cpp
+    panels/properties/PropertiesPanelVideo.cpp
+    panels/properties/PropertiesPanelAudio.cpp
+    panels/properties/PropertiesPanelTitle.cpp
+    panels/properties/PropertiesPanelGraphic.cpp
     panels/effects/EffectControlsPanel.cpp
     panels/effects/EffectControlsPanelUI.cpp
     panels/effects/EffectControlsPanelTree.cpp
@@ -143,6 +159,27 @@ add_library(roundtable_ui STATIC
     viewport/TransformOverlayDraw.cpp
     viewport/TransformOverlayMask.cpp
     viewport/TransformOverlayInput.cpp
+)
+
+# Newly-extracted TUs — skip unity batch to avoid MSVC heap exhaustion
+set_source_files_properties(
+    panels/project/ProjectBinConfig.cpp
+    panels/project/ProjectBinImport.cpp
+    panels/project/ProjectBinQueries.cpp
+    panels/project/ProjectBinEvents.cpp
+    panels/project/ProjectBinSlots.cpp
+    panels/project/ProjectBinSequence.cpp
+    panels/timeline/TimelinePanelLayout.cpp
+    panels/timeline/TimelinePanelTracks.cpp
+    panels/timeline/TimelinePanelZoomScroll.cpp
+    panels/timeline/TimelinePanelPaintEvents.cpp
+    panels/timeline/TimelinePanelHitTest.cpp
+    panels/timeline/TimelinePanelCommands.cpp
+    panels/properties/PropertiesPanelVideo.cpp
+    panels/properties/PropertiesPanelAudio.cpp
+    panels/properties/PropertiesPanelTitle.cpp
+    panels/properties/PropertiesPanelGraphic.cpp
+    PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON
 )
 
 target_include_directories(roundtable_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

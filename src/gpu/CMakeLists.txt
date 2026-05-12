@@ -30,6 +30,9 @@ add_library(roundtable_gpu STATIC
     StagingRing.cpp
     GpuResourceManager.cpp
 
+    # Composite engine (extracted from CompositeService)
+    CompositeEngine.cpp
+
     # Composite service (extracted from TimelineWorkspaceComposite.cpp)
     CompositeService.cpp
     CompositeServiceFrame.cpp
@@ -40,8 +43,14 @@ add_library(roundtable_gpu STATIC
     # GPU abstraction layer
     GpuWorkSubmission.cpp
 
-    # GPU composite orchestration (extracted from CompositeServiceFrame.cpp)
+    # GPU upload manager
+    GpuUploadManager.cpp
+
+    # GPU composite orchestration (delegates to CompositeEngine)
     CompositeServiceGpuOrchestration.cpp
+
+    # CPU Compositor Safe Mode (Phase 6)
+    CompositeServiceCpuFallback.cpp
 )
 
 target_include_directories(roundtable_gpu PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

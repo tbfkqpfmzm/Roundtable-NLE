@@ -43,6 +43,8 @@
 #include <QComboBox>
 #include <QGroupBox>
 #include <QImage>
+
+#include <atomic>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -163,6 +165,8 @@ protected:
     void keyPressEvent(QKeyEvent* event) override;
 
 private:
+    std::atomic<bool> m_destroying{false};
+
     void setupUI();
 
     /// Check for offline media in the timeline. Returns false if the user

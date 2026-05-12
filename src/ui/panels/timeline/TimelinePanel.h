@@ -14,12 +14,14 @@
 #include <QVBoxLayout>
 #include <QSplitter>
 #include <QRubberBand>
+#include <QPointer>
 #include <QPushButton>
 #include <QPixmap>
 
 #include "timeline/TimelineLayoutEngine.h"
 #include "timeline/EditOperations.h"
 
+#include <atomic>
 #include <memory>
 #include <optional>
 #include <unordered_map>
@@ -336,6 +338,9 @@ private:
     CommandStack*         m_commandStack{nullptr};
     ShortcutManager*      m_shortcuts{nullptr};
 
+    // Use-after-free guard
+    std::atomic<bool> m_destroying{false};
+
     // Child widgets
     TimelineRuler*   m_ruler{nullptr};
     QWidget*         m_trackHeaderArea{nullptr};
@@ -348,8 +353,8 @@ private:
     QWidget*         m_headerSpacer{nullptr};
     QWidget*         m_scrollSpacer{nullptr};
 
-    std::vector<TrackHeader*>          m_trackHeaders;
-    std::vector<TimelineTrackWidget*>  m_trackWidgets;
+    std::vector<QPointer<TrackHeader>>          m_trackHeaders;
+    std::vector<QPointer<TimelineTrackWidget>>  m_trackWidgets;
 
     // Playhead overlay — lightweight transparent widget that draws only the
     // playhead line, avoiding full track widget repaints on every tick.

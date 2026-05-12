@@ -270,12 +270,25 @@ void SpinePreviewWidget::clearDragOverlay()
 
 void SpinePreviewWidget::resizeEvent(QResizeEvent* event)
 {
+    static thread_local bool s_inResize = false;
+    if (s_inResize) {
+        QWidget::resizeEvent(event);
+        return;
+    }
+    s_inResize = true;
     QWidget::resizeEvent(event);
     update();
+    s_inResize = false;
 }
 
-void SpinePreviewWidget::paintEvent(QPaintEvent* /*event*/)
+void SpinePreviewWidget::paintEvent(QPaintEvent* event)
 {
+    static thread_local int s_paintDepth = 0;
+    if (++s_paintDepth > 5) {
+        --s_paintDepth;
+        QWidget::paintEvent(event);
+        return;
+    }
     QPainter painter(this);
 
     if (!m_layers.empty() || !m_bgImage.isNull()) {
@@ -303,6 +316,8 @@ void SpinePreviewWidget::paintEvent(QPaintEvent* /*event*/)
         painter.drawPixmap(dx, dy, m_dragOverlayPixmap);
         painter.setOpacity(1.0);
     }
+
+    --s_paintDepth;
 }
 } // namespace rt
 

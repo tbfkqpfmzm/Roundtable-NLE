@@ -263,8 +263,14 @@ QSize Viewport::minimumSizeHint() const
 //  Painting
 // ═════════════════════════════════════════════════════════════════════════════
 
-void Viewport::paintEvent(QPaintEvent* /*event*/)
+void Viewport::paintEvent(QPaintEvent* event)
 {
+    static thread_local int s_paintDepth = 0;
+    if (++s_paintDepth > 5) {
+        --s_paintDepth;
+        QWidget::paintEvent(event);
+        return;
+    }
     QPainter painter(this);
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
 
@@ -314,11 +320,21 @@ void Viewport::paintEvent(QPaintEvent* /*event*/)
         painter.setFont(font);
         painter.drawText(10, 20, m_overlayText);
     }
+
+    --s_paintDepth;
 }
 
-void Viewport::resizeEvent(QResizeEvent* /*event*/)
+void Viewport::resizeEvent(QResizeEvent* event)
 {
+    static thread_local bool s_inResize = false;
+    if (s_inResize) {
+        QWidget::resizeEvent(event);
+        return;
+    }
+    s_inResize = true;
     recalcLayout();
+    QWidget::resizeEvent(event);
+    s_inResize = false;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

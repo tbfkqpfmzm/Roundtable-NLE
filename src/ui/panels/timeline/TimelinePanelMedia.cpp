@@ -185,7 +185,7 @@ void TimelinePanel::applyWaveformPeaks(uint64_t generation,
         }
     }
 
-    for (auto* tw : m_trackWidgets) {
+    for (auto tw : m_trackWidgets) {
         tw->update();
     }
 

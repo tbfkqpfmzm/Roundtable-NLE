@@ -59,6 +59,8 @@ ExportPanel::ExportPanel(QWidget* parent)
 
 ExportPanel::~ExportPanel()
 {
+    m_destroying.store(true);
+
     // Stop the render queue and join the worker thread so the process
     // can exit cleanly when the main window is closed during an export.
     m_renderQueue->cancelAll();
@@ -97,7 +99,10 @@ void ExportPanel::setTimeline(Timeline* timeline)
     // Calling compositeFrame synchronously during setCurrentProject can
     // crash because GPU resources (VMA allocator / readback buffer) may
     // not be fully initialised when the timeline is wired to panels.
-    QTimer::singleShot(0, this, [this]() { refreshPreview(); });
+    QTimer::singleShot(0, this, [this]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
+        refreshPreview();
+    });
 }
 
 void ExportPanel::setPlaybackController(PlaybackController* controller)
@@ -267,7 +272,10 @@ void ExportPanel::showEvent(QShowEvent* event)
     // Defer refreshPreview to the next event-loop iteration to avoid
     // triggering GPU composition + widget state changes synchronously
     // during a show event (which can happen during QDialog::exec event loops).
-    QTimer::singleShot(0, this, [this]() { refreshPreview(); });
+    QTimer::singleShot(0, this, [this]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
+        refreshPreview();
+    });
     // Grab keyboard focus so Space/Left/Right/I/O work immediately
     // without requiring the user to click in the panel first.
     setFocus(Qt::OtherFocusReason);
@@ -995,6 +1003,7 @@ void ExportPanel::onCancelExport()
 
 void ExportPanel::onPollProgress()
 {
+    if (m_destroying.load(std::memory_order_acquire)) return;
     if (!m_renderQueue->isRunning()) return;
 
     const auto* j = m_renderQueue->job(m_activeJobId);

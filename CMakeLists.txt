@@ -47,7 +47,7 @@ endif()
 # Groups multiple .cpp files into single TUs to reduce header re-parsing.
 # Enable with -DCMAKE_UNITY_BUILD=ON for faster full rebuilds.
 # Default OFF — incremental builds are faster without it.
-option(CMAKE_UNITY_BUILD "Enable unity (jumbo) build" OFF)
+option(CMAKE_UNITY_BUILD "Enable unity (jumbo) build" ON)
 if(CMAKE_UNITY_BUILD)
     set(CMAKE_UNITY_BUILD_BATCH_SIZE 8)
 endif()
@@ -75,7 +75,7 @@ if(MSVC)
         $<$<CONFIG:Release>:/OPT:ICF>
     )
     # Link-Time Code Generation (very slow — only for final distribution builds)
-    option(ROUNDTABLE_LTO "Enable /GL + /LTCG for whole-program optimization (slow)" OFF)
+    option(ROUNDTABLE_LTO "Enable /GL + /LTCG for whole-program optimization (slow)" ON)
     if(ROUNDTABLE_LTO)
         add_compile_options($<$<CONFIG:Release>:/GL>)
         add_link_options($<$<CONFIG:Release>:/LTCG>)

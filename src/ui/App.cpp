@@ -25,6 +25,7 @@
 #endif
 
 #include "GpuContext.h"
+#include "ShutdownPhases.h"
 
 #include "QtHelpers.h"
 
@@ -91,22 +92,35 @@ App::App()
 
 App::~App()
 {
-    // Destroy UI before subsystems
-    m_mainWindow.reset();
+    auto& sm = ShutdownManager::instance();
 
-    // Shut down GPU context after UI but before other subsystems
-    GpuContext::get().shutdown();
-
-    m_playbackController.reset();
+    // Phase 1: Stop all background threads
+    sm.advanceTo(ShutdownPhase::Phase1_StopThreads);
     if (m_audioEngine) m_audioEngine->shutdown();
     m_audioEngine.reset();
+    if (m_scanThread.joinable()) m_scanThread.join();
+
+    // Phase 2: Disconnect cross-component signals
+    sm.advanceTo(ShutdownPhase::Phase2_Disconnect);
+    m_playbackController.reset();
     m_syncClock.reset();
     m_mediaPool.reset();
-    if (m_scanThread.joinable()) m_scanThread.join();
+
+    // Phase 3: Destroy Qt widget tree
+    sm.advanceTo(ShutdownPhase::Phase3_DestroyQt);
+    m_mainWindow.reset();
+
+    // Phase 4: Destroy GPU resources
+    sm.advanceTo(ShutdownPhase::Phase4_DestroyGpu);
+    GpuContext::get().shutdown();
+
+    // Final cleanup
     m_modelManager.reset();
     m_shortcutManager.reset();
     m_commandStack.reset();
     m_timeline.reset();
+
+    sm.advanceTo(ShutdownPhase::Phase5_Done);
 
     if (s_instance == this)
         s_instance = nullptr;

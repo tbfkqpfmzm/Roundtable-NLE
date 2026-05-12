@@ -343,6 +343,7 @@ DockEdgeOverlay::DockEdgeOverlay(QWidget* parent)
     setAttribute(Qt::WA_TransparentForMouseEvents);
     setAttribute(Qt::WA_NoSystemBackground);
     setAttribute(Qt::WA_ShowWithoutActivating);
+    setAttribute(Qt::WA_OpaquePaintEvent);
     hide();
 }
 
@@ -359,8 +360,15 @@ void DockEdgeOverlay::showZone(const QRect& zone, bool isTab)
 
 void DockEdgeOverlay::hideOverlay() { hide(); }
 
-void DockEdgeOverlay::paintEvent(QPaintEvent*)
+void DockEdgeOverlay::paintEvent(QPaintEvent* event)
 {
+    static thread_local int s_paintDepth = 0;
+    if (++s_paintDepth > 5) {
+        --s_paintDepth;
+        QWidget::paintEvent(event);
+        return;
+    }
+
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing, false);
     if (m_isTab) {
@@ -371,6 +379,8 @@ void DockEdgeOverlay::paintEvent(QPaintEvent*)
         p.setPen(QPen(QColor(60, 130, 220, 220), 2));
     }
     p.drawRect(rect().adjusted(1, 1, -2, -2));
+
+    --s_paintDepth;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

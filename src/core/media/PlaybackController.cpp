@@ -70,7 +70,10 @@ int64_t timecodeToTick(const Timecode& tc, double fps) noexcept
 // ═════════════════════════════════════════════════════════════════════════════
 
 PlaybackController::PlaybackController() = default;
-PlaybackController::~PlaybackController() = default;
+PlaybackController::~PlaybackController()
+{
+    m_destroying.store(true);
+}
 
 // ── Dependencies ────────────────────────────────────────────────────────────
 
@@ -104,6 +107,8 @@ void PlaybackController::setStandaloneDuration(int64_t ticks) noexcept
 
 void PlaybackController::play()
 {
+    if (m_destroying.load(std::memory_order_acquire))
+        return;
     if (m_state == PlayState::Playing)
         return;
 
@@ -127,7 +132,7 @@ void PlaybackController::play()
     // for 100-500ms on H.264.  By starting prefetch first, the workers
     // have that entire blocking window to decode upcoming frames,
     // significantly reducing cold-start cache misses at play start.
-    if (onPlayStarting)
+    if (onPlayStarting && !m_destroying.load(std::memory_order_acquire))
         onPlayStarting(startTick);
 
     // Set state — fires onStateChanged → loadAudioSources().
@@ -171,6 +176,8 @@ void PlaybackController::play()
 
 void PlaybackController::pause()
 {
+    if (m_destroying.load(std::memory_order_acquire))
+        return;
     if (m_state == PlayState::Paused || m_state == PlayState::Stopped)
         return;
 
@@ -213,6 +220,8 @@ void PlaybackController::togglePlayPause()
 
 void PlaybackController::stop()
 {
+    if (m_destroying.load(std::memory_order_acquire))
+        return;
     m_shuttleSpeed = 0.0;
     m_jShuttleLevel = 0;
     m_lShuttleLevel = 0;
@@ -238,6 +247,8 @@ void PlaybackController::stop()
 
 void PlaybackController::seekTo(int64_t tick)
 {
+    if (m_destroying.load(std::memory_order_acquire))
+        return;
     tick = std::max<int64_t>(0, tick);
 
     // Reset shuttle speed so next L press starts at 1×
@@ -300,6 +311,8 @@ void PlaybackController::stepBackward()
 
 void PlaybackController::shuttleReverse()
 {
+    if (m_destroying.load(std::memory_order_acquire))
+        return;
     // If currently moving forward, first stop, then go reverse
     if (m_lShuttleLevel > 0)
     {
@@ -360,6 +373,8 @@ void PlaybackController::shuttlePause()
 
 void PlaybackController::shuttleForward()
 {
+    if (m_destroying.load(std::memory_order_acquire))
+        return;
     // If currently moving reverse, first stop, then go forward
     if (m_jShuttleLevel > 0)
     {
@@ -507,6 +522,8 @@ int64_t PlaybackController::durationTicks() const noexcept
 
 int64_t PlaybackController::pollPosition()
 {
+    if (m_destroying.load(std::memory_order_acquire))
+        return currentTick();
     int64_t tick = currentTick();
 
     // Standalone time advancement (no sync clock / no timeline)
@@ -618,6 +635,7 @@ int64_t PlaybackController::applyLoopBounds(int64_t tick) const
 void PlaybackController::setState(PlayState newState)
 {
     if (m_state == newState) return;
+    if (m_destroying.load(std::memory_order_acquire)) return;
     m_state = newState;
     if (onStateChanged)
         onStateChanged(newState);

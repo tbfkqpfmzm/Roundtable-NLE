@@ -23,6 +23,8 @@
 #include <Windows.h>
 #include <DbgHelp.h>
 #pragma comment(lib, "dbghelp.lib")
+#include <excpt.h>   // _resetstkoflw()
+#include <stdlib.h>  // _set_purecall_handler, _set_invalid_parameter_handler
 #endif
 
 namespace rt {
@@ -201,9 +203,45 @@ inline void sehCall(Fn&& fn)
     __try { fn(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
+// ── Vectored Exception Handler (VEH) for stack overflow ──────────────────
+// SetUnhandledExceptionFilter runs on the faulting thread's remaining stack.
+// When the fault is STACK_OVERFLOW, there is practically NO stack left —
+// even the SEH handler cannot run.  A VEH fires before that, while the
+// guard page is still present, giving us a chance to call _resetstkoflw()
+// and restore a usable stack BEFORE the SEH handler is invoked.
+//
+// Hooking this as a VEH (first-chance) ensures _resetstkoflw() runs on
+// the stack-overflowed thread with just enough stack to make the call.
+// After reset, the exception continues to the SEH handler (which now has
+// a usable stack) and everything works normally.
+static LONG WINAPI stackOverflowVectoredHandler(EXCEPTION_POINTERS* exInfo)
+{
+    if (exInfo && exInfo->ExceptionRecord &&
+        exInfo->ExceptionRecord->ExceptionCode == EXCEPTION_STACK_OVERFLOW)
+    {
+        // Reset the stack — this must be called on the faulting thread
+        // while the guard page is still accessible.
+        _resetstkoflw();
+        // Continue searching for the next handler (the SEH filter).
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 LONG WINAPI crashExceptionFilter(EXCEPTION_POINTERS* exInfo)
 {
     auto& s = state();
+
+    // ── STACK_OVERFLOW recovery ──────────────────────────────────────
+    // The VEH above should have reset the stack already, but as a safety
+    // net, call _resetstkoflw() again here if this is a stack overflow.
+    // This ensures the crash handler has a usable stack even if the VEH
+    // wasn't installed or didn't fire for some reason.
+    if (exInfo && exInfo->ExceptionRecord &&
+        exInfo->ExceptionRecord->ExceptionCode == EXCEPTION_STACK_OVERFLOW)
+    {
+        _resetstkoflw();
+    }
 
     // Build crash info
     CrashInfo info;
@@ -309,6 +347,11 @@ LONG WINAPI crashExceptionFilter(EXCEPTION_POINTERS* exInfo)
 
     s.lastCrashInfo = info;
 
+    // ── Crash marker (Phase 7.A) ──────────────────────────────────────
+    // Write a marker file so the next launch can detect this crash and
+    // offer recovery options (reset dock layout, workspace, etc.).
+    sehCall([&] { CrashHandler::writeCrashMarker(info); });
+
     // 5. Post-crash callback (SEH-protected via helper)
     if (s.postCrash) {
         sehCall([&] { s.postCrash(info); });
@@ -369,6 +412,9 @@ void crashSignalHandler(int sig, siginfo_t* info, void* /*context*/)
 
     s.lastCrashInfo = ci;
 
+    // Crash marker (Phase 7.A)
+    try { CrashHandler::writeCrashMarker(ci); } catch (...) {}
+
     if (s.postCrash) {
         try { s.postCrash(ci); } catch (...) {}
     }
@@ -407,6 +453,72 @@ void CrashHandler::install(const std::filesystem::path& crashDir)
 
     installPlatformHandler();
     s.installed = true;
+
+    // ── Non-SEH crash handlers ─────────────────────────────────────────
+    // These catch termination paths that bypass SetUnhandledExceptionFilter.
+
+    // 1. Pure virtual function call (e.g. calling virtual methods on a
+    //    partially-destroyed object).  The default handler calls abort()
+    //    which terminates without SEH, leaving NO crash log.
+    //    Use raw Win32 calls to avoid ANY heap/stack allocation.
+#ifdef _WIN32
+    _set_purecall_handler([]() {
+        auto logPath = crashLogPath();
+        std::string msg = "PURE VIRTUAL FUNCTION CALL — likely use-after-free "
+                          "on a partially-destroyed object";
+        appendCrashLog(logPath, msg);
+        // Write marker using raw Win32 (avoid std::ofstream which allocates)
+        auto markerPath = logPath.parent_path() / "crash_marker.txt";
+        appendCrashLogRaw(markerPath, "summary=" + msg + "\n");
+        // Terminate immediately — nothing safe to do after a purecall
+        TerminateProcess(GetCurrentProcess(), 0xC0000005);
+    });
+
+    // 2. CRT invalid parameter handler (catches assertions from CRT
+    //    functions like isdigit() or fgets() with invalid args).
+    _set_invalid_parameter_handler([](
+        const wchar_t* expr, const wchar_t* func,
+        const wchar_t* file, unsigned int line, uintptr_t /*reserved*/)
+    {
+        // Convert wchar_t to narrow using Win32 API (stack-safe, no alloc)
+        auto toNarrow = [](const wchar_t* ws) -> std::string {
+            if (!ws || !*ws) return {};
+            int len = WideCharToMultiByte(CP_UTF8, 0, ws, -1, nullptr, 0,
+                                           nullptr, nullptr);
+            if (len <= 0) return {};
+            std::string result(static_cast<size_t>(len) - 1, '\0');
+            WideCharToMultiByte(CP_UTF8, 0, ws, -1, result.data(), len,
+                                nullptr, nullptr);
+            return result;
+        };
+        std::ostringstream oss;
+        oss << "CRT INVALID PARAMETER:";
+        if (expr) oss << " expr=" << toNarrow(expr);
+        if (func) oss << " func=" << toNarrow(func);
+        if (file) oss << " file=" << toNarrow(file) << ":" << line;
+        appendCrashLog(crashLogPath(), oss.str());
+    });
+#endif
+
+    // 3. std::terminate handler (catches unhandled C++ exceptions that
+    //    escape main(), or exceptions thrown during stack unwinding).
+    std::set_terminate([]() {
+        appendCrashLog(crashLogPath(),
+            "std::terminate called — unhandled C++ exception or "
+            "exception during stack unwinding");
+        // Attempt to re-throw and capture the active exception's type
+        try {
+            throw;
+        } catch (const std::exception& e) {
+            appendCrashLog(crashLogPath(),
+                std::string("  Active exception: ") + e.what());
+        } catch (...) {
+            appendCrashLog(crashLogPath(),
+                "  Active exception: unknown type (not std::exception)");
+        }
+        // Re-abort so the OS can generate a crash dump
+        abort();
+    });
 
     spdlog::info("CrashHandler installed — crash dir: {}", crashDir.string());
 }
@@ -492,9 +604,81 @@ bool CrashHandler::hasPreviousCrashLog()
 
 // ── Platform handler install / uninstall ────────────────────────────────────
 
+// ── Crash marker (Phase 7.A) ────────────────────────────────────────────────
+
+std::filesystem::path CrashHandler::crashMarkerPath()
+{
+    return state().crashDir / "crash_marker.txt";
+}
+
+void CrashHandler::writeCrashMarker(const CrashInfo& info)
+{
+    try {
+        auto path = crashMarkerPath();
+        std::ofstream marker(path);
+        if (!marker.is_open()) return;
+
+        marker << "crash_time=" << timestamp() << "\n";
+        marker << "exception=0x" << std::hex << info.exceptionCode << "\n";
+        marker << "address=0x" << std::hex
+               << reinterpret_cast<uintptr_t>(info.exceptionAddress) << "\n";
+        marker << "summary=" << info.summary << "\n";
+        marker << "dump=" << info.dumpFilePath.string() << "\n";
+        marker << "log=" << info.logFilePath.string() << "\n";
+        marker.close();
+    } catch (...) {
+        // Best-effort — marker is non-critical
+    }
+}
+
+bool CrashHandler::hasCrashMarker()
+{
+    return std::filesystem::exists(crashMarkerPath());
+}
+
+CrashInfo CrashHandler::readCrashMarker()
+{
+    CrashInfo info;
+    try {
+        auto path = crashMarkerPath();
+        if (!std::filesystem::exists(path)) return info;
+
+        std::ifstream marker(path);
+        if (!marker.is_open()) return info;
+
+        std::string line;
+        while (std::getline(marker, line)) {
+            if (line.rfind("summary=", 0) == 0)
+                info.summary = line.substr(8);
+            else if (line.rfind("exception=0x", 0) == 0)
+                info.exceptionCode =
+                    static_cast<uint32_t>(std::stoul(line.substr(11), nullptr, 16));
+            else if (line.rfind("dump=", 0) == 0)
+                info.dumpFilePath = line.substr(5);
+            else if (line.rfind("log=", 0) == 0)
+                info.logFilePath = line.substr(4);
+        }
+        marker.close();
+    } catch (...) {
+    }
+    return info;
+}
+
+void CrashHandler::clearCrashMarker()
+{
+    std::error_code ec;
+    std::filesystem::remove(crashMarkerPath(), ec);
+}
+
 void CrashHandler::installPlatformHandler()
 {
 #ifdef _WIN32
+    // Install VEH first (catches stack overflow before the stack is gone)
+    // so _resetstkoflw() can be called to restore a usable stack before
+    // the SEH filter runs.  The handler function is a free function so
+    // MSVC won't complain about mixing SEH with C++ EH.
+    AddVectoredExceptionHandler(/*FirstHandler=*/1, stackOverflowVectoredHandler);
+
     state().previousFilter = SetUnhandledExceptionFilter(crashExceptionFilter);
 #else
     struct sigaction sa{};

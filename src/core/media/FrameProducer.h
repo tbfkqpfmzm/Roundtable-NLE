@@ -95,6 +95,20 @@ public:
 
     [[nodiscard]] std::shared_ptr<CachedFrame> lastProducedFrame() const;
 
+    /// Returns true if the producer is backlogged — more frames are
+    /// requested than the compositor can produce in real time.
+    /// FrameClock calls this before requestFrame() to decide whether
+    /// to skip a clock tick, preventing unbounded queue growth and
+    /// keeping the compositor focused on the latest frame.
+    [[nodiscard]] bool isBacklogged() const noexcept {
+        return m_backpressure.load(std::memory_order_acquire);
+    }
+
+    /// Maximum pending frames before backpressure engages.
+    /// Beyond this, requestFrame() will signal backpressure instead
+    /// of enqueuing, and FrameClock should skip its composite tick.
+    static constexpr size_t kMaxPendingFrames = 3;
+
 private:
     struct ScrubRequest {
         int64_t  tick;
@@ -132,6 +146,13 @@ private:
 
     // Last good frame (for re-publish on cache miss)
     std::shared_ptr<CachedFrame> m_lastGoodFrame;
+
+    // Backpressure: true when kMaxPendingFrames or more are queued.
+    // FrameClock checks this to skip ticks the compositor can't keep up with.
+    std::atomic<bool> m_backpressure{false};
+
+    // Use-after-free guard
+    std::atomic<bool> m_destroying{false};
 };
 
 } // namespace rt

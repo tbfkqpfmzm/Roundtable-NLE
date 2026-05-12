@@ -172,6 +172,45 @@ void ProgramMonitor::setupUI()
 
     mainLayout->addWidget(viewContainer, 1); // stretch=1
 
+    // ── Safe mode banner (Phase 6) ────────────────────────────────────
+    // Yellow warning banner shown when GPU compositing has failed and the
+    // app has fallen back to CPU safe mode.  Includes a "Reset GPU" button.
+    m_safeModeBanner = new QWidget(this);
+    m_safeModeBanner->setObjectName(QStringLiteral("SafeModeBanner"));
+    rt::UiScale::setScaledFixedHeight(m_safeModeBanner, 32);
+    m_safeModeBanner->setStyleSheet(rt::UiScale::scaleStyleSheet(QStringLiteral(
+        "#SafeModeBanner { background: #554433; border-bottom: 2px solid #FF8800; }")));
+    m_safeModeBanner->hide(); // Hidden by default — shown when safe mode activates
+
+    auto* bannerLayout = new QHBoxLayout(m_safeModeBanner);
+    bannerLayout->setContentsMargins(rt::UiScale::px(8), 0, rt::UiScale::px(8), 0);
+    bannerLayout->setSpacing(rt::UiScale::px(8));
+
+    m_safeModeLabel = new QLabel(
+        QStringLiteral("\u26A0 Safe Mode — GPU pipeline stalled. "
+                       "Rendering at reduced quality (~2 fps). "
+                       "Restart to restore GPU acceleration."),
+        m_safeModeBanner);
+    m_safeModeLabel->setStyleSheet(rt::UiScale::scaleStyleSheet(QStringLiteral(
+        "QLabel { font-size: 11px; font-weight: bold; color: #FFD700; "
+        "background: transparent; }")));
+    bannerLayout->addWidget(m_safeModeLabel, 1);
+
+    m_btnResetGpu = new QPushButton(QStringLiteral("Reset GPU"), m_safeModeBanner);
+    m_btnResetGpu->setToolTip(tr("Attempt to re-initialize the GPU and exit safe mode"));
+    m_btnResetGpu->setStyleSheet(rt::UiScale::scaleStyleSheet(QStringLiteral(
+        "QPushButton { background: #FF8800; border: none; border-radius: 4px; "
+        "color: #111111; font-size: 11px; font-weight: bold; padding: 4px 12px; }"
+        "QPushButton:hover { background: #FFAA33; }")));
+    rt::UiScale::setScaledFixedHeight(m_btnResetGpu, 24);
+    bannerLayout->addWidget(m_btnResetGpu, 0, Qt::AlignVCenter);
+
+    connect(m_btnResetGpu, &QPushButton::clicked, this, [this]() {
+        resetGpuAndExitSafeMode();
+    });
+
+    mainLayout->addWidget(m_safeModeBanner);
+
     // Spacer between viewport and controls — prevents video spill
     auto* viewSpacer = new QWidget(this);
     rt::UiScale::setScaledFixedHeight(viewSpacer, 8);
