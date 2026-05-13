@@ -9,7 +9,6 @@
 
 #include <QDesktopServices>
 #include <QDir>
-#include <QFileInfo>
 #include <QFileSystemWatcher>
 #include <QIcon>
 #include <QImageReader>
@@ -45,15 +44,16 @@ QMimeData* BackgroundGridWidget::mimeData(const QList<QListWidgetItem*>& items) 
     const QString filePath = item->data(Qt::UserRole).toString();
     if (filePath.isEmpty()) return nullptr;
 
-    QFileInfo fi(filePath);
-    const QString baseName = fi.completeBaseName();
-
     auto* md = new QMimeData;
 
     // Provide application/x-roundtable-asset for ShotComposer compatibility
+    // Use the full file path (e.g. "assets/NikkeBKG/NikkeRoom.png") instead of
+    // just the basename, so the drop handler can resolve the file correctly.
+    // This matches how the normal backgrounds panel passes the relative path
+    // and how the double-click handler emits the full path.
     QByteArray payload;
     QDataStream ds(&payload, QIODevice::WriteOnly);
-    ds << QStringLiteral("background") << baseName;
+    ds << QStringLiteral("background") << filePath;
     md->setData("application/x-roundtable-asset", payload);
 
     // Provide file URLs for Timeline / universal drop support
