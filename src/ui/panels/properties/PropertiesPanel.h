@@ -47,6 +47,7 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -397,6 +398,8 @@ private:
     QVBoxLayout*    m_fxParamsLayout{nullptr};   ///< Dynamic layout for per-effect groups
     QListWidget*    m_fxList{nullptr};            // kept for programmatic access
     QPushButton*    m_fxRemoveBtn{nullptr};
+
+    std::atomic<bool> m_destroying{false};
 };
 
 } // namespace rt

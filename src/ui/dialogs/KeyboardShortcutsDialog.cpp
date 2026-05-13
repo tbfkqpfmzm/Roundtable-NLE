@@ -77,6 +77,10 @@ void KeyboardShortcutsDialog::buildUI()
             "JSON Files (*.json);;All Files (*)");
         if (path.isEmpty()) return;
         if (m_manager.importFromFile(path)) {
+            // PopulateTree destroys all tree items — clear the capture
+            // pointer so finishCapture() doesn't dereference freed memory.
+            m_capturingItem = nullptr;
+            m_capturing = false;
             populateTree();
             m_manager.saveToSettings();
         } else {
@@ -251,6 +255,11 @@ void KeyboardShortcutsDialog::resetAll()
         "Reset all keyboard shortcuts to their defaults?",
         QMessageBox::Yes | QMessageBox::No);
     if (reply != QMessageBox::Yes) return;
+
+    // PopulateTree destroys all tree items — clear the capture
+    // pointer so finishCapture() doesn't dereference freed memory.
+    m_capturingItem = nullptr;
+    m_capturing = false;
 
     m_manager.resetAllToDefaults();
     m_manager.saveToSettings();

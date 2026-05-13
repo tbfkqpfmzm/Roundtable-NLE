@@ -353,16 +353,6 @@ private:
     std::atomic<bool> m_newFrameAvailable{false};
     std::shared_ptr<CachedFrame> m_pendingFrame;
 
-    // ── Wall-clock playback tick (matches Source Monitor architecture) ──
-    // During playback, ticks are driven by steady_clock from a captured
-    // start point, just like the Source Monitor.  This avoids all
-    // AVSyncClock extrapolation issues (torn anchor reads, jitter, etc.).
-    bool                                    m_wallClockActive{false};
-    std::chrono::steady_clock::time_point   m_wallClockStart{};
-    int64_t                                 m_wallClockStartTick{0};
-    double                                  m_wallClockSpeed{1.0};
-    int                                     m_wallClockFrameCount{0};
-
     // ── Safe mode banner (Phase 6) ──────────────────────────────────
     QWidget*  m_safeModeBanner{nullptr};
     QLabel*   m_safeModeLabel{nullptr};

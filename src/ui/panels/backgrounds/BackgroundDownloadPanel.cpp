@@ -85,6 +85,15 @@ BackgroundDownloadPanel::BackgroundDownloadPanel(QWidget* parent)
     // to the NikkeBKG tab.
 }
 
+BackgroundDownloadPanel::~BackgroundDownloadPanel()
+{
+    m_destroying.store(true, std::memory_order_release);
+
+    // Stop timers — prevents them firing during destruction
+    if (m_batchTimer) m_batchTimer->stop();
+    if (m_scanDebounce) m_scanDebounce->stop();
+}
+
 void BackgroundDownloadPanel::showEvent(QShowEvent* event)
 {
     QWidget::showEvent(event);
@@ -250,6 +259,7 @@ void BackgroundDownloadPanel::startWatching()
     m_scanDebounce->setInterval(500);
 
     connect(m_scanDebounce, &QTimer::timeout, this, [this]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         QSet<QString> before = m_localFileNames;
         s_scanDone = false; // force re-scan on next call
         scanLocalFiles();
@@ -262,7 +272,7 @@ void BackgroundDownloadPanel::startWatching()
     });
 
     connect(m_fileWatcher, &QFileSystemWatcher::directoryChanged,
-            this, [this]() { m_scanDebounce->start(); });
+            this, [this]() { if (m_destroying.load(std::memory_order_acquire)) return; m_scanDebounce->start(); });
 
     // Watch the target directory (create it first if needed)
     QString dirPath = QString::fromLatin1(kTargetDir);

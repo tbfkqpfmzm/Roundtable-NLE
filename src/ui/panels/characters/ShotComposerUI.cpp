@@ -383,6 +383,7 @@ QWidget* ShotComposer::createShotsColumn()
     // Shot thumbnail strip selection -> load preset
     connect(m_shotList, &QListWidget::currentItemChanged,
             this, [this](QListWidgetItem* current, QListWidgetItem* /*previous*/) {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         if (!current) return;
         auto name = current->data(Qt::UserRole).toString().toStdString();
         if (name.empty()) return;
@@ -392,13 +393,15 @@ QWidget* ShotComposer::createShotsColumn()
             setCurrentShot(*preset);
     });
 
-    connect(m_newShotBtn, &QPushButton::clicked, this, [this]() { newShot(); });
+    connect(m_newShotBtn, &QPushButton::clicked, this, [this]() { if (m_destroying.load(std::memory_order_acquire)) return; newShot(); });
 
     connect(m_saveShotBtn, &QPushButton::clicked, this, [this]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         saveCurrentShot();
     });
 
     connect(m_deleteShotBtn, &QPushButton::clicked, this, [this]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         auto* current = m_shotList->currentItem();
         if (!current) return;
         auto name = current->data(Qt::UserRole).toString();
@@ -426,6 +429,7 @@ QWidget* ShotComposer::createShotsColumn()
     // Shot list context menu (right-click) -> Delete / Duplicate / Rename
     connect(m_shotList, &QListWidget::customContextMenuRequested,
             this, [this](const QPoint& pos) {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         auto* item = m_shotList->itemAt(pos);
         if (!item) return;
         QString shotName = item->data(Qt::UserRole).toString();
@@ -511,11 +515,11 @@ QWidget* ShotComposer::createShotsColumn()
 
     // Shot search -> refresh shot list
     connect(m_shotSearchEdit, &QLineEdit::textChanged,
-            this, [this]() { refreshShotList(); });
+            this, [this]() { if (m_destroying.load(std::memory_order_acquire)) return; refreshShotList(); });
 
     // Sort combo -> refresh shot list
     connect(m_shotSortCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, [this](int) { refreshShotList(); });
+            this, [this](int) { if (m_destroying.load(std::memory_order_acquire)) return; refreshShotList(); });
 
     return column;
 }
@@ -682,9 +686,9 @@ QWidget* ShotComposer::createCharFilterColumn()
 
     // Connect filter list and search to refresh shot list
     connect(m_charFilterList, &QListWidget::currentItemChanged,
-            this, [this]() { refreshShotList(); });
+            this, [this]() { if (m_destroying.load(std::memory_order_acquire)) return; refreshShotList(); });
     connect(m_filterSearchEdit, &QLineEdit::textChanged,
-            this, [this]() { refreshShotList(); });
+            this, [this]() { if (m_destroying.load(std::memory_order_acquire)) return; refreshShotList(); });
 
     return column;
 }
@@ -784,6 +788,7 @@ QWidget* ShotComposer::createLeftPanel()
     // m_selectedLayer stays consistent.
     connect(m_spinePreview, &SpinePreviewWidget::layerClicked,
             this, [this](int layerIndex) {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         if (layerIndex < 0 || layerIndex >= m_layerList->count()) return;
         if (layerIndex == m_selectedLayer) return; // already synced
         m_layerList->blockSignals(true);
@@ -795,6 +800,7 @@ QWidget* ShotComposer::createLeftPanel()
 
     connect(m_spinePreview, &SpinePreviewWidget::layerTransformChanged,
             this, [this](int layerIndex, float posX, float posY, float scale) {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         if (m_updating) return;
         if (layerIndex < 0 || layerIndex >= m_currentShot.layerCount()) return;
         const auto& ref = m_currentShot.layerOrder()[static_cast<size_t>(layerIndex)];
@@ -832,6 +838,7 @@ QWidget* ShotComposer::createLeftPanel()
 
     connect(m_spinePreview, &SpinePreviewWidget::layerCropChanged,
             this, [this](int layerIndex, float cropL, float cropR, float cropT, float cropB) {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         if (m_updating) return;
         if (layerIndex < 0 || layerIndex >= m_currentShot.layerCount()) return;
         const auto& ref = m_currentShot.layerOrder()[static_cast<size_t>(layerIndex)];
@@ -884,6 +891,7 @@ QWidget* ShotComposer::createLeftPanel()
 
 #ifdef ROUNDTABLE_HAS_SPINE
     connect(resetViewBtn, &QPushButton::clicked, this, [this]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         if (m_spinePreview) {
             m_spinePreview->resetViewport();
             m_updating = true;
@@ -916,6 +924,7 @@ QWidget* ShotComposer::createLeftPanel()
     tbLayout->addWidget(safeAreasBtn);
 #ifdef ROUNDTABLE_HAS_SPINE
     connect(safeAreasBtn, &QPushButton::toggled, this, [this](bool on) {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         if (m_spinePreview) m_spinePreview->setSafeAreasVisible(on);
     });
 #endif
@@ -1015,6 +1024,7 @@ QWidget* ShotComposer::createLeftPanel()
     m_characterLibrary->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_characterLibrary, &QWidget::customContextMenuRequested,
             this, [this](const QPoint& pos) {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         auto* item = m_characterLibrary->itemAt(pos);
         if (!item) return;
         const QString itemType = item->data(Qt::UserRole).toString();
@@ -1109,6 +1119,7 @@ QWidget* ShotComposer::createLeftPanel()
     m_backgroundLibrary->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_backgroundLibrary, &QWidget::customContextMenuRequested,
             this, [this](const QPoint& pos) {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         auto* item = m_backgroundLibrary->itemAt(pos);
 
         QMenu menu(m_backgroundLibrary);
@@ -1255,6 +1266,7 @@ QWidget* ShotComposer::createLeftPanel()
     m_videoLibrary->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_videoLibrary, &QWidget::customContextMenuRequested,
             this, [this](const QPoint& pos) {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         auto* item = m_videoLibrary->itemAt(pos);
 
         QMenu menu(m_videoLibrary);
@@ -1377,12 +1389,13 @@ QWidget* ShotComposer::createLeftPanel()
 
     // Character library
     connect(m_charSearchEdit, &QLineEdit::textChanged,
-            this, [this]() { refreshCharacterLibrary(); });
+            this, [this]() { if (m_destroying.load(std::memory_order_acquire)) return; refreshCharacterLibrary(); });
     connect(m_namedOnlyCheck, &QCheckBox::toggled,
-            this, [this]() { refreshCharacterLibrary(); });
+            this, [this]() { if (m_destroying.load(std::memory_order_acquire)) return; refreshCharacterLibrary(); });
 
     connect(m_characterLibrary, &QListWidget::itemDoubleClicked,
             this, [this](QListWidgetItem* item) {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         if (!item) return;
         if (item->data(Qt::UserRole).toString() == QStringLiteral("video")) {
             addCharacter(item->text().toStdString(),
@@ -1393,6 +1406,7 @@ QWidget* ShotComposer::createLeftPanel()
         }
     });
     connect(btnAddChar, &QPushButton::clicked, this, [this]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         auto items = m_characterLibrary->selectedItems();
         if (items.isEmpty()) return;
         auto* item = items.first();
@@ -1413,16 +1427,18 @@ QWidget* ShotComposer::createLeftPanel()
     };
     connect(m_backgroundLibrary, &QListWidget::itemDoubleClicked,
             this, [this, bgItemPath](QListWidgetItem* item) {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         if (item) addBackground(bgItemPath(item));
     });
     connect(btnAddBg, &QPushButton::clicked, this, [this, bgItemPath]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         auto items = m_backgroundLibrary->selectedItems();
         if (!items.isEmpty()) addBackground(bgItemPath(items.first()));
     });
 
     // Video library
     auto addVideoOrChar = [this](QListWidgetItem* item) {
-        if (!item) return;
+        if (!item || m_destroying.load(std::memory_order_acquire)) return;
         std::string filename = item->text().toStdString();
         if (item->data(Qt::UserRole).toString() == QStringLiteral("videoChar")) {
             addCharacter(item->data(Qt::UserRole + 1).toString().toStdString(),
@@ -1435,6 +1451,7 @@ QWidget* ShotComposer::createLeftPanel()
     connect(m_videoLibrary, &QListWidget::itemDoubleClicked,
             this, addVideoOrChar);
     connect(btnAddVideo, &QPushButton::clicked, this, [this, addVideoOrChar]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         auto items = m_videoLibrary->selectedItems();
         if (!items.isEmpty()) addVideoOrChar(items.first());
     });

@@ -228,6 +228,13 @@ public:
     /// Evict all frames for a specific media file.
     void evictMedia(uint64_t mediaId);
 
+    /// Evict frames that co-own GPU textures (CachedFrame::gpuTextureOwner set).
+    /// This releases shared_ptr references so the GPU memory can be freed when
+    /// GpuTextureCache's shared entries are also released.
+    /// @param minBytes  Try to free at least this many bytes of CPU memory.
+    /// @return Actual bytes freed.
+    size_t evictGpuCoOwned(size_t minBytes);
+
     /// Remove a stale playhead entry (e.g. when a media handle is closed).
     void removePlayhead(uint64_t mediaId);
 

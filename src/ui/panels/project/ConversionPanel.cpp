@@ -45,7 +45,15 @@ ConversionPanel::ConversionPanel(QWidget* parent)
     connect(m_refreshTimer, &QTimer::timeout, this, &ConversionPanel::onTimerTick);
 }
 
-ConversionPanel::~ConversionPanel() = default;
+ConversionPanel::~ConversionPanel()
+{
+    m_destroying.store(true, std::memory_order_release);
+
+    // Stop the refresh timer — prevents it firing during destruction
+    if (m_refreshTimer) {
+        m_refreshTimer->stop();
+    }
+}
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Configuration
@@ -173,6 +181,7 @@ void ConversionPanel::setupUI()
         "ProRes 4444: Native alpha channel, large files, perfect quality, CPU encode.");
     connect(m_encoderCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int index) {
+        if (m_destroying.load(std::memory_order_acquire)) return;
 #ifdef ROUNDTABLE_HAS_SPINE
         if (m_animVideoCache) {
             auto fmt = static_cast<SpineCacheFormat>(m_encoderCombo->itemData(index).toInt());
@@ -333,6 +342,7 @@ void ConversionPanel::setupUI()
     convertSelectedBtn->setToolTip(
         "Convert only the selected characters in the table");
     connect(convertSelectedBtn, &QPushButton::clicked, this, [this]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         auto selected = m_table->selectedItems();
         if (selected.isEmpty()) return;
         // Snapshot (charName, outfit) pairs BEFORE calling onConvertCharacter,
@@ -395,6 +405,7 @@ void ConversionPanel::setupUI()
         "Delete the converted video cache for the selected character outfits.\n"
         "Source Spine / Live2D assets are NOT touched.");
     connect(deleteSelectedBtn, &QPushButton::clicked, this, [this]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
 #ifdef ROUNDTABLE_HAS_SPINE
         if (!m_animVideoCache) return;
         auto selected = m_table->selectedItems();
@@ -823,34 +834,26 @@ void ConversionPanel::onTableContextMenu(const QPoint& pos)
     // "Reveal converted files in Explorer" action
     menu.addAction(QStringLiteral("\xF0\x9F\x93\x82  Reveal Converted in Explorer"), this,
         [this, charName, outfit]() {
-            QString cachePath;
-            if (m_animVideoCache) {
-                // Use the actual cache directory from AnimationVideoCache
-                // (may be %LOCALAPPDATA%/ROUNDTABLE/cache/animations/ in installed builds)
-                auto cacheDirPath = m_animVideoCache->cacheDirectory();
-                cachePath = QString::fromStdString(
-                    (cacheDirPath / charName.toStdString() / outfit.toStdString()).string());
-            } else {
-                // Fallback: project-relative path
-                cachePath = rt::findProjectRoot()
-                    + "/assets/Converted/" + charName + "/" + outfit;
-            }
-            QDir cacheDir(cachePath);
-            if (cacheDir.exists()) {
-                // Find the first cached video file to select
-                QDirIterator it(cachePath,
+            if (m_destroying.load(std::memory_order_acquire)) return;
+            // Always point to the Converted folder (not the animation cache)
+            QString convPath = rt::findProjectRoot()
+                + "/assets/Converted/" + charName + "/" + outfit;
+            QDir convDir(convPath);
+            if (convDir.exists()) {
+                // Find the first converted video file to select
+                QDirIterator it(convPath,
                     QStringList() << "*.webm" << "*.mp4" << "*.mov",
                     QDir::Files, QDirIterator::Subdirectories);
                 QString selectPath;
                 if (it.hasNext()) {
                     selectPath = QDir::toNativeSeparators(it.next());
                 } else {
-                    selectPath = QDir::toNativeSeparators(cachePath);
+                    selectPath = QDir::toNativeSeparators(convPath);
                 }
                 QProcess::startDetached("explorer.exe",
                     {"/select,", selectPath});
             } else {
-                // If no cache folder exists, open the character's source folder
+                // If no Converted folder exists, open the character's source folder
                 QString charPath = rt::findProjectRoot()
                     + "/assets/characters/" + charName;
                 if (QDir(charPath).exists()) {

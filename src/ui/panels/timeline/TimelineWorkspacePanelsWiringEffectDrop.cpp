@@ -86,6 +86,7 @@ void TimelineWorkspace::wireEffectDropSignals()
     if (m_timelinePanel) {
         connect(m_timelinePanel, &TimelinePanel::effectDroppedOnClip,
                 this, [this](size_t trackIdx, uint64_t clipId, int effectType) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (!m_timeline) return;
             auto* track = m_timeline->track(trackIdx);
             if (!track) return;
@@ -134,6 +135,7 @@ void TimelineWorkspace::wireEffectDropSignals()
                 this, [this](size_t trackIdx, uint64_t leftClipId,
                              uint64_t rightClipId, int64_t editPointTick,
                              int transitionType) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (!m_timeline) return;
             auto* track = m_timeline->track(trackIdx);
             if (!track) return;

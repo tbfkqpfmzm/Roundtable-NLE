@@ -280,6 +280,7 @@ void AudioPlaybackService::warmCacheAsync()
 
     m_warmFuture = std::async(std::launch::async,
         [this, pages = std::move(uncachedPages)]() {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             AudioFile file;
             std::string openPath;
             bool fileReady = false;

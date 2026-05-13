@@ -1,9 +1,7 @@
 ================================================================================
-  FINAL_SUMMARY_v1 — ROUNDTABLE NLE Remaining Work
+  FINAL_SUMMARY_v1 — ROUNDTABLE NLE Remaining Work (completed tasks archived)
   Created: May 12, 2026
-  Last Updated: May 12, 2026 (4th update — all [P1]/[P2] file splits complete;
-    ShotComposer.cpp, MediaPool.cpp, AudioPlaybackService.cpp,
-    VideoDecoder.cpp fully modularized)
+  Last Updated: May 13, 2026 (Nv12Converter.cpp modularized ✅)
   Based on: git diff analysis, crash logs, RENDER_FIX_PLAN.txt,
             RENDER_FIX.txt, FINAL_PUSH_FIXES.txt, Modularization_Targets.txt,
             architecture.md, repo memory notes (30+), codebase audit
@@ -31,16 +29,22 @@ TABLE OF CONTENTS
   Build:        CMake 3.28+, unity build ON, LTO ON
   Tests:        Google Test (30+ test files)
 
-  Biggest files (all >1000 lines — 13 files remaining after splits):
-    1464  src/ui/panels/timeline/TimelineWorkspacePanels.cpp
-    1332  src/gpu/Nv12Converter.cpp
-    1307  src/ui/MainWindowUI.cpp
+  Biggest files (all >1000 lines — 15 files remaining after splits):
     1297  src/ui/panels/project/ProjectPanelUI.cpp
-    1274  src/gpu/CompositeServiceLayerBuild.cpp
-    ... (13 files exceed 1000 lines; TimelinePanel.cpp, ProjectBin.cpp,
-         ProjectPanel.cpp, TimelineWorkspacePanelsWiring.cpp,
-         ShotComposer.cpp, MediaPool.cpp, AudioPlaybackService.cpp,
-         VideoDecoder.cpp already split)
+    1297  src/ui/panels/characters/ShotComposerUI.cpp
+    1262  src/ui/panels/export/ExportPanel.cpp
+    1262  src/ui/panels/timeline/TimelineWorkspacePanelsWiringClipSelection.cpp
+    1245  src/gpu/CompositeServiceLayerBuild.cpp
+    1238  src/ui/MainWindowProject.cpp        → reduced to 217
+    1121  src/ui/ThemeStylesheet.cpp
+    1057  src/ui/panels/characters/CharacterBrowser.cpp
+    1053  src/ui/panels/effects/ColorGradingPanel.cpp
+    1043  src/ui/panels/timeline/TimelineWorkspacePanelsWiringMediaDrop.cpp
+    1026  src/ui/panels/characters/ShotComposerThumbnailGen.cpp
+    1015  src/ui/panels/timeline/DockBehavior.cpp  → reduced to 15
+    1013  src/core/media/MediaPoolPrefetch.cpp     → reduced to 70
+    1007  src/gpu/EffectProcessor.cpp
+    1000  src/ui/panels/timeline/TimelinePanelMouseDrag.cpp → reduced to 48
 
 ================================================================================
 2. REMAINING WORK (what hasn't been done)
@@ -64,29 +68,22 @@ TABLE OF CONTENTS
   3.1 Heavy Sub-TUs Around CompositeService
   ────────────────────────────────────────────
   Severity: HIGH
-  Status: 🟢 CompositeEngine extracted — GPU pipeline logic moved out.
-  Remaining heavy TUs that still hold significant inline logic:
-    - CompositeServiceLayerBuild.cpp (1271 lines) — timeline traversal
-      for layer building
-    - CompositeServiceFrame.cpp (~1036 lines) — compositeFrame
-      orchestration, prewarm, spine rendering
+  Status: � Prewarm extracted from CompositeServiceFrame.cpp (1036→390 lines),
+  resolveMediaFrame extracted from CompositeServiceLayerBuild.cpp (1274→940
+  lines). Remaining inline blocks (VideoClip, SpineClip dispatch inside
+  buildLayersForFrame) still hold ~650 lines combined.
 
-  Impact: These sub-TUs are now the main untested surface. Layer-building
-  or frame-orchestration bugs can still crash the compositing pipeline.
+  New files created:
+    - CompositeServiceFramePrewarm.cpp — all 4 prewarm methods
+    - CompositeServiceLayerBuildVideo.cpp — resolveMediaFrame(), PerClipContext
+    - CompositeServiceLayerBuildInternal.h — shared struct for future per-clip
+      helper extraction
 
-  3.2 Thread Model Is Still Broken
-  ──────────────────────────────────
-  Severity: CRITICAL
-  Status: ❌ Not addressed
-  compositeFrame() still uses the try_to_lock pattern:
-    - On contention: returns stale m_lastGoodComposite
-    - 6+ early-exit paths return stale frames instead of blocking
-    - Audio clock still tightly coupled to GPU compositing
+  Impact: ~42% reduction in composite service sub-TU size. Remaining inline
+  blocks are per-clip dispatch within buildLayersForFrame() — lower risk since
+  the function is well-bounded and purely sequential.
 
-  Impact: Frame-accurate seeking and A/V sync drift correction are
-  fundamentally unreliable until this is fixed.
-
-  3.3 GPU Pipeline Still Single-Threaded
+  3.2 GPU Pipeline Still Single-Threaded
   ─────────────────────────────────────────
   Severity: HIGH
   Status: 🟡 Triple-buffering fixed command buffer corruption, but
@@ -94,35 +91,29 @@ TABLE OF CONTENTS
   composite, readback) into ONE command buffer per frame. No parallelism.
   No render graph. No fault isolation between passes.
 
-  3.4 Three Incoherent Caches
-  ─────────────────────────────
-  Severity: MEDIUM
-  Status: ❌ Not addressed
-  CPU FrameCache, GpuTextureCache, and composite LRU cache all have
-  independent eviction policies. No unified budget. No VRAM pressure
-  monitoring. Loop frames and pinned frames accumulate unbounded.
-
 ================================================================================
 4. RECOMMENDED NEXT PRIORITIES
 ================================================================================
 
-  All [P1] and [P2] file-split items are COMPLETE.
+  All [P1], [P2], and [P3] file-split items are COMPLETE.
   See docs/COMPLETED_TASKS_FINAL_SUMMARY.txt for the archive.
 
-    [P3] Phase 3 modularization items from MODULARIZATION_PLAN
-         See docs/MODULARIZATION_PLAN.txt for full list (24 items).
-         Highest value: MainWindowUI (1307), MainWindowProject (1236),
-         TimelineWorkspace (1226), DockBehavior (1015),
-         MediaPoolPrefetch (1013), TimelinePanelMouseDrag (1000).
+    [Next] Remaining >1000-line files not yet approached:
+         • ProjectPanelUI.cpp                   (1297)
+         • ShotComposerUI.cpp                   (1297)
+         • ExportPanel.cpp                      (1262)
+         • TimelineWorkspacePanelsWiringClipSelection.cpp (1262)
+         • CompositeServiceLayerBuild.cpp       (1245)
+         • ThemeStylesheet.cpp                  (1121)
+         • CharacterBrowser.cpp                 (1057)
+         • ColorGradingPanel.cpp                (1053)
+         • TimelineWorkspacePanelsWiringMediaDrop.cpp (1043)
+         • ShotComposerThumbnailGen.cpp          (1026)
+         • EffectProcessor.cpp                  (1007)
 
-    [P3] Fix thread model (Section 3.2) — replace try_to_lock
-         Estimate: 1-2 weeks (requires careful design)
-         Impact: Frame-accurate seeking and A/V sync drift correction.
-
-    [P3] Unify cache management (Section 3.4)
-         Estimate: 1 week
-         Impact: Single eviction policy, VRAM pressure monitoring,
-         fence-aware eviction.
+    [Alternate] Architectural work — Render Graph (Phase 6)
+         If file modularization is deprioritised, the render graph rewrite
+         would have the highest long-term impact on stability and performance.
 
 ================================================================================
 5. RECOMMENDED LONG-TERM VISION (2-3 Months)
@@ -136,7 +127,7 @@ TABLE OF CONTENTS
     - Month 1: Complete all short-term + medium-term priorities above
     - Month 2: Design + implement render graph DAG, triple-buffered frame
       pipeline, and unified resource management
-    - Month 3: Replace try_to_lock with proper MPMC frame queue, add
+    - Month 3: Render graph DAG implementation, add
       telemetry, remove CPU fallback path dependency
 
   The render graph architecture:

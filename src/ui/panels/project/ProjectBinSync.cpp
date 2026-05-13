@@ -40,6 +40,7 @@ void ProjectBin::syncListView()
     const auto savedFolders = binFolderState();
 
     m_listWidget->clear();
+    m_dropHighlightItem = nullptr;  // tree items destroyed by clear()
     int count = 0;
 
     // -- Sequences (shown at top, like Premiere Pro) ---------------------

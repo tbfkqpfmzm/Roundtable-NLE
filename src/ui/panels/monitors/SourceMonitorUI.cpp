@@ -63,6 +63,7 @@ SourceMonitor::SourceMonitor(QWidget* parent)
     // Manage poll timer and audio from controller state changes
     // (covers both button clicks and keyboard shortcuts)
     m_controller->onStateChanged = [this](PlayState state) {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         if (state == PlayState::Playing || state == PlayState::Shuttling) {
             m_pollTimer->start();
             startSourceAudio();
@@ -75,6 +76,7 @@ SourceMonitor::SourceMonitor(QWidget* parent)
 
     // Update audio engine speed when shuttle speed changes mid-playback
     m_controller->onSpeedChanged = [this](double speed) {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         if (m_sourceAudioActive && m_audioEngine) {
             m_audioEngine->setPlaybackSpeed(speed);
             if (m_audioEngine->transportState() != TransportState::Playing)
@@ -96,7 +98,15 @@ SourceMonitor::SourceMonitor(QWidget* parent)
     m_waveformWidget->installEventFilter(this);
 }
 
-SourceMonitor::~SourceMonitor() = default;
+SourceMonitor::~SourceMonitor()
+{
+    m_destroying.store(true, std::memory_order_release);
+
+    // Stop the poll timer — prevents it firing during destruction
+    if (m_pollTimer) {
+        m_pollTimer->stop();
+    }
+}
 
 void SourceMonitor::setAudioEngine(AudioEngine* engine)
 {
@@ -145,6 +155,7 @@ void SourceMonitor::setupUI()
 
     // Waveform click-to-scrub
     m_waveformWidget->setScrubCallback([this](double ratio) {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         if (!m_hasClip || m_clipDuration <= 0) return;
         int64_t tick = static_cast<int64_t>(ratio * m_clipDuration);
         m_controller->seekTo(tick);

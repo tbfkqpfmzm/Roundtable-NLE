@@ -86,6 +86,7 @@ void TimelineWorkspace::wireTrackSignals()
     if (m_timelinePanel && m_timeline) {
         connect(m_timelinePanel, &TimelinePanel::addTrackAbove,
                 this, [this](size_t nearIndex, bool video) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (!m_timeline) return;
             auto t = std::make_unique<Track>(video ? TrackType::Video : TrackType::Audio, "");
             size_t idx = nearIndex < m_timeline->trackCount() ? nearIndex : 0;
@@ -95,6 +96,7 @@ void TimelineWorkspace::wireTrackSignals()
         });
         connect(m_timelinePanel, &TimelinePanel::addTrackBelow,
                 this, [this](size_t nearIndex, bool video) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (!m_timeline) return;
             auto t = std::make_unique<Track>(video ? TrackType::Video : TrackType::Audio, "");
             size_t idx = nearIndex < m_timeline->trackCount() ? nearIndex + 1 : m_timeline->trackCount();
@@ -104,6 +106,7 @@ void TimelineWorkspace::wireTrackSignals()
         });
         connect(m_timelinePanel, &TimelinePanel::deleteTrack,
                 this, [this](size_t trackIndex) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (!m_timeline || m_timeline->trackCount() <= 1) return;
             if (trackIndex >= m_timeline->trackCount()) return;
 
@@ -124,6 +127,7 @@ void TimelineWorkspace::wireTrackSignals()
 
         connect(m_timelinePanel, &TimelinePanel::clipContextAction,
                 this, [this](const QString& action, size_t trackIndex, uint64_t clipId) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             Q_UNUSED(action); Q_UNUSED(trackIndex); Q_UNUSED(clipId);
         });
     }

@@ -36,6 +36,7 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -258,6 +259,8 @@ private:
     static constexpr int kPanMin       = -100;
     static constexpr int kPanMax       = 100;
     static constexpr int kMeterRefreshMs = 30;   ///< ~33 Hz meter updates
+
+    std::atomic<bool> m_destroying{false};
 };
 
 } // namespace rt

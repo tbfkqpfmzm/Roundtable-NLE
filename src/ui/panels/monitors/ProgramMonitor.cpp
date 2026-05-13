@@ -162,7 +162,6 @@ void ProgramMonitor::resetViewState()
     m_scrubSettleCounter = 0;
     m_editSettleCounter = 15;
     m_scrubSkipCounter = 0;
-    m_wallClockActive = false;
 
     // 2. Re-verify the view stack index is correct for the active display path.
     if (m_viewStack) {
@@ -190,6 +189,7 @@ void ProgramMonitor::resetViewState()
     // 5. Re-sync overlay geometry to ensure native HWND clipping is correct.
     // This must happen AFTER the viewport is visible and has valid geometry.
     QTimer::singleShot(0, this, [this]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         syncOverlayGeometry();
     });
 
@@ -268,12 +268,11 @@ void ProgramMonitor::setGpuDisplayEnabled(bool enabled)
     if (!m_gpuDisplay && m_transformOverlay)
         m_transformOverlay->hide();
 
-    // When GPU display mode is active, the poll timer composites directly on
-    // the UI thread — the async pipeline must NOT run, or its producer thread
-    // will race with the UI thread for m_compositeMutex, causing the poll
-    // timer to get stale m_lastGoodComposite frames (visible freeze).
-    if (m_gpuDisplay && m_pipeline && m_pipeline->isRunning())
-        m_pipeline->stop();
+    // The async pipeline runs in all display modes now.  FrameProducer is the
+    // sole compositor — the UI thread never calls compositeFrame() directly.
+    // This eliminates the try_to_lock contention that returned stale frames.
+    if (m_pipeline && !m_pipeline->isRunning())
+        m_pipeline->start();
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -369,7 +368,12 @@ void ProgramMonitor::resetGpuAndExitSafeMode()
 
 bool ProgramMonitor::usesAsyncPipelinePath() const noexcept
 {
-    return !m_gpuDisplay;
+    // Always use the async pipeline — FrameProducer is the sole compositor.
+    // GPU display mode previously ran compositing on the UI thread via
+    // QTimer poll, causing try_to_lock contention.  Now the FrameProducer
+    // thread handles all compositing, and FramePresenter calls presentFrame()
+    // on its own thread (Vulkan is thread-safe for queue submission).
+    return true;
 }
 
 void ProgramMonitor::ensurePipelineStarted()
@@ -404,12 +408,11 @@ void ProgramMonitor::initPipeline()
             if (m_destroying.load(std::memory_order_acquire))
                 return false;
 
-            if (m_controller && m_controller->isPlaying() && !usesAsyncPipelinePath())
-                return true;  // UI thread handles display during playback
-
             // All QWidget/QImage display work must happen on the GUI thread.
             // Calling presentFrame from the pipeline present thread can crash
             // in QtGui/QtWidgets under load.
+            // GPU-direct present (VulkanViewport::displayGpuImage) is safe
+            // from any thread since Vulkan queue submission is thread-safe.
             if (QThread::currentThread() == thread())
                 return presentFrame(frame);
 
@@ -440,8 +443,6 @@ void ProgramMonitor::initPipeline()
     m_pipeline->setPresentNotify(
         [this](int64_t tick) {
             if (m_destroying.load(std::memory_order_acquire))
-                return;
-            if (m_controller && m_controller->isPlaying() && !usesAsyncPipelinePath())
                 return;
             emit frameDisplayed(tick);
         });
@@ -640,8 +641,7 @@ void ProgramMonitor::onPollTimer()
     updateDisplay();
 
     if (m_droppedFrameLabel) {
-        const bool asyncPlayback = usesAsyncPipelinePath() && m_pipeline
-            && m_controller->isPlaying();
+        const bool asyncPlayback = m_pipeline && m_controller->isPlaying();
         const int dropped = asyncPlayback ? m_pipeline->droppedFrames() : 0;
         if (dropped > 0) {
             m_droppedFrameLabel->setText(QStringLiteral("Dropped %1").arg(dropped));
@@ -767,52 +767,7 @@ void ProgramMonitor::updateDisplay()
     }
 
     const bool playing = m_controller->isPlaying();
-    const bool asyncPipeline = usesAsyncPipelinePath();
     int64_t tick = m_controller->currentTick();
-
-    // ── Wall-clock tick during playback ─────────────────────────────
-    // During playback, derive the display tick from steady_clock
-    // elapsed time instead of the AVSyncClock.  This matches the
-    // Source Monitor architecture (which stays perfectly in sync).
-    // Audio also advances at real-time from the same start-point,
-    // so both audio and video stay locked together.
-    if (playing && !asyncPipeline) {
-        // Determine effective playback speed (shuttle may be 2x/4x/etc.).
-        double speed = m_controller->shuttleSpeed();
-        if (speed == 0.0) speed = 1.0;
-
-        if (!m_wallClockActive || speed != m_wallClockSpeed) {
-            // (Re-)anchor whenever playback starts OR speed changes,
-            // so elapsed-time extrapolation uses the correct speed.
-            m_wallClockActive    = true;
-            m_wallClockStart     = std::chrono::steady_clock::now();
-            m_wallClockStartTick = tick;   // snapshot controller tick
-            m_wallClockSpeed     = speed;
-            m_wallClockFrameCount = 0;
-        }
-        const auto now = std::chrono::steady_clock::now();
-        const double elapsedSec =
-            std::chrono::duration<double>(now - m_wallClockStart).count();
-        tick = m_wallClockStartTick
-             + static_cast<int64_t>(elapsedSec * 48000.0 * m_wallClockSpeed);
-
-        // Periodically re-anchor wall clock to audio clock to prevent
-        // long-term drift (steady_clock vs audio device clock).
-        ++m_wallClockFrameCount;
-        if (m_wallClockFrameCount >= 30) { // every ~0.5 seconds at 60fps poll
-            m_wallClockFrameCount = 0;
-            int64_t audioTick = m_controller->currentTick();
-            int64_t drift = tick - audioTick;
-            constexpr int64_t kDriftThreshold = 48000 / 24; // 1 frame at 24fps
-            if (std::abs(drift) > kDriftThreshold) {
-                m_wallClockStart     = now;
-                m_wallClockStartTick = audioTick;
-                tick = audioTick;
-            }
-        }
-    } else {
-        m_wallClockActive = false;
-    }
 
     // ── Lightweight UI updates (always, regardless of mode) ──────────
     m_miniTimeline->setPlayhead(tick);
@@ -848,12 +803,12 @@ void ProgramMonitor::updateDisplay()
         }
     };
 
-    // ── During playback: direct composite + present on UI thread ────
-    // Composite the frame for the CURRENT wall-clock tick and display
-    // it immediately — zero pipeline latency.
-    //
-    // compositeFrame with playbackNonBlocking=true uses only tryGetFrame
-    // (non-blocking), so this won't stall the UI thread.
+    // ── During playback: pipeline handles composite + present ──────
+    // The FrameClock drives FrameProducer (compositor thread) and
+    // FramePresenter (present thread).  The UI thread only updates
+    // lightweight UI elements (timecode, playhead, shuttle label).
+    // This eliminates the try_to_lock contention that occurred when
+    // the UI thread called compositeFrame() directly.
     if (playing) {
         const double fps = m_controller->frameRate();
         if (m_pool && fps > 0.0)
@@ -863,41 +818,7 @@ void ProgramMonitor::updateDisplay()
         if (m_pollTimer->interval() != 16)
             m_pollTimer->setInterval(16);
 
-        if (asyncPipeline) {
-            ensurePipelineStarted();
-            updateTimecodeDisplay();
-            updateShuttleLabel();
-            return;
-        }
-
-        if (m_compositeCallback) {
-            uint32_t vpW = m_outputWidth  / static_cast<uint32_t>(m_playbackResDivisor);
-            uint32_t vpH = m_outputHeight / static_cast<uint32_t>(m_playbackResDivisor);
-            vpW = std::clamp(vpW, 64u, 3840u);
-            vpH = std::clamp(vpH, 36u, 2160u);
-
-            auto compT0 = std::chrono::steady_clock::now();
-            auto frame = m_compositeCallback(tick, vpW, vpH, /*scrubMode=*/false);
-            double compMs = std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - compT0).count();
-
-            if (frame && frame->width > 0) {
-                auto presT0 = std::chrono::steady_clock::now();
-                presentFrame(frame);
-                double presMs = std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - presT0).count();
-
-                if (compMs + presMs > 12.0) {
-                    spdlog::info("[PERF] updateDisplay(play): composite={:.1f}ms  present={:.1f}ms  total={:.1f}ms  res={}x{}",
-                                 compMs, presMs, compMs + presMs, vpW, vpH);
-                }
-
-                emit frameDisplayed(tick);
-            } else if (frame && frame->width == 0) {
-                presentFrame(frame);  // clear stale viewport contents
-            }
-        }
-
+        ensurePipelineStarted();
         updateTimecodeDisplay();
         updateShuttleLabel();
         return;
@@ -968,7 +889,9 @@ void ProgramMonitor::updateDisplay()
     }
 
     // ── SYNC PATH: scrub / seek / paused ─────────────────────────────
-    if (m_compositeCallback) {
+    // All composite requests go through the pipeline.  FrameProducer is
+    // the sole compositor — never call compositeFrame() from the UI thread.
+    {
         const int resDivisor = m_isScrubbing
             ? std::min(m_playbackResDivisor * 2, 8)
             : m_playbackResDivisor;
@@ -980,27 +903,9 @@ void ProgramMonitor::updateDisplay()
         // but full resolution (m_isScrubbing stays false above).
         const bool useScrub = m_isScrubbing || editSettleActive;
 
-        if (asyncPipeline) {
-            ensurePipelineStarted();
-            if (m_pipeline)
-                m_pipeline->requestFrame(tick, vpW, vpH, useScrub);
-        } else {
-            auto frame = m_compositeCallback(tick, vpW, vpH, useScrub);
-            if (frame) {
-                presentFrame(frame);
-                if (frame->width > 0) {
-                    m_lastRenderedTick = tick;
-                    emit frameDisplayed(tick);
-                }
-                // width==0 means "clear viewport" — still lock tick so
-                // we don't spin trying to composite an empty position.
-                else {
-                    m_lastRenderedTick = tick;
-                }
-            }
-            // frame == nullptr → do NOT update m_lastRenderedTick so the
-            // next poll cycle retries (fixes stale freeze after scrub).
-        }
+        ensurePipelineStarted();
+        if (m_pipeline)
+            m_pipeline->requestFrame(tick, vpW, vpH, useScrub);
     }
 
     m_isScrubbing = false;
@@ -1032,6 +937,7 @@ void ProgramMonitor::showEvent(QShowEvent* event)
         // Defer additional setup until the event loop settles so the
         // VulkanViewport has its swapchain and HWNDs fully created.
         QTimer::singleShot(50, this, [this]() {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             syncOverlayGeometry();
             refresh();
         });
@@ -1041,6 +947,7 @@ void ProgramMonitor::showEvent(QShowEvent* event)
         // geometry, and native HWND clipping may be stale.  Recover by
         // resetting the view state once the widget has valid geometry.
         QTimer::singleShot(50, this, [this]() {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             resetViewState();
         });
     }

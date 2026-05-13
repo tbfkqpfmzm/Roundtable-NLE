@@ -24,6 +24,9 @@ add_library(roundtable_gpu STATIC
     TransitionRenderer.cpp
     EffectProcessor.cpp
     Nv12Converter.cpp
+    Nv12ConverterPipeline.cpp
+    Nv12ConverterYuv420p.cpp
+    Nv12ConverterConvert.cpp
     GpuTextureCache.cpp
     VideoUploader.cpp
     ViewportLayout.cpp
@@ -36,9 +39,11 @@ add_library(roundtable_gpu STATIC
     # Composite service (extracted from TimelineWorkspaceComposite.cpp)
     CompositeService.cpp
     CompositeServiceFrame.cpp
+    CompositeServiceFramePrewarm.cpp
     CompositeServiceBlend.cpp
     CompositeServiceSpine.cpp
     CompositeServiceLayerBuild.cpp
+    CompositeServiceLayerBuildVideo.cpp
 
     # GPU abstraction layer
     GpuWorkSubmission.cpp

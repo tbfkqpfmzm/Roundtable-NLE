@@ -271,6 +271,7 @@ AudioSync::AudioSync(QWidget* parent)
                 m_commandStack->pushWithoutExecute(std::make_unique<LambdaCommand>(
                     "Trim audio clip",
                     [this, ci, nS, nE, nM]() {
+                        if (m_destroying.load(std::memory_order_acquire)) return;
                         if (ci < m_clips.size()) {
                             m_clips[ci].start = nS; m_clips[ci].end = nE;
                             m_clips[ci].matchState = nM;
@@ -282,6 +283,7 @@ AudioSync::AudioSync(QWidget* parent)
                         }
                     },
                     [this, ci, oS, oE, oM]() {
+                        if (m_destroying.load(std::memory_order_acquire)) return;
                         if (ci < m_clips.size()) {
                             m_clips[ci].start = oS; m_clips[ci].end = oE;
                             m_clips[ci].matchState = oM;

@@ -7,6 +7,8 @@
 #include "App.h"
 #include "MainWindow.h"
 #include "ShortcutManager.h"
+#include "panels/timeline/TimelineWorkspace.h"
+#include "CompositeService.h"
 #include "Theme.h"
 
 #include "command/CommandStack.h"
@@ -15,6 +17,7 @@
 #include "media/AVSyncClock.h"
 #include "media/MediaPool.h"
 #include "media/MediaSourceService.h"
+#include "media/CacheCoordinator.h"
 #include "media/FrameCache.h"
 #include "media/DiskFrameCache.h"
 #include "media/PlaybackController.h"
@@ -159,27 +162,27 @@ bool App::init()
         spdlog::warn("App: AudioEngine failed to initialize — playback disabled");
     }
 
+    // ── Cache coordinator (system-adaptive budgets) ─────────────────
+    m_cacheCoordinator = std::make_unique<CacheCoordinator>();
+
     // ── AV sync clock (audio-driven master clock) ────────────────────
     m_syncClock = std::make_unique<AVSyncClock>();
     m_audioEngine->setSyncClock(m_syncClock.get());
     // ── Media pool (shared video decoders + frame cache) ────────
     {
-        const size_t frameCacheBudget = computeFrameCacheBudget();
-        const size_t totalRam = queryTotalPhysicalRam();
-        spdlog::info("App: installed RAM = {:.1f} GB, FrameCache budget = {:.1f} GB",
-                     totalRam / (1024.0 * 1024.0 * 1024.0),
-                     frameCacheBudget / (1024.0 * 1024.0 * 1024.0));
-        auto frameCache = std::make_shared<FrameCache>(frameCacheBudget);
+        // Create FrameCache with a reasonable initial budget; the
+        // CacheCoordinator will override it with a system-adaptive budget.
+        auto frameCache = std::make_shared<FrameCache>(8ull * 1024 * 1024 * 1024);
+        m_cacheCoordinator->setFrameCache(frameCache.get());
         m_mediaPool = std::make_unique<MediaPool>(std::move(frameCache));
     }
 
     // ── Disk frame cache (persistent second-level cache) ────────
     {
-        const size_t diskBudget = computeDiskFrameCacheBudget();
-        spdlog::info("App: DiskFrameCache budget = {:.1f} GB",
-                     diskBudget / (1024.0 * 1024.0 * 1024.0));
         auto diskCache = std::make_shared<DiskFrameCache>(
-            std::filesystem::path(rt::userDataDir().toStdString()) / "cache/frames", diskBudget);
+            std::filesystem::path(rt::userDataDir().toStdString()) / "cache/frames",
+            8ull * 1024 * 1024 * 1024);  // initial budget, coordinator will adjust
+        m_cacheCoordinator->setDiskCache(diskCache.get());
         m_mediaPool->setDiskCache(std::move(diskCache));
     }
 
@@ -208,6 +211,10 @@ bool App::init()
     if (!GpuContext::get().init()) {
         spdlog::warn("App: GPU context failed — falling back to software compositor");
     }
+
+    // System-adaptive FrameCache budget has been applied by
+    // CacheCoordinator::setFrameCache().  Log it.
+    m_cacheCoordinator->logBudgets();
 
     // Register NLE keyboard defaults
     m_shortcutManager->registerNLEDefaults();
@@ -288,6 +295,20 @@ bool App::createMainWindow()
             m_mainWindow->setModelManager(m_modelManager.get());
     }
 #endif
+
+    // ── Wire CacheCoordinator into CompositeService ─────────────────
+    // Must happen after MainWindow builds panels (which creates
+    // TimelineWorkspace → CompositeService → CompositeEngine).
+    {
+        auto* tw = m_mainWindow->timelineWorkspace();
+        if (tw) {
+            auto* cs = tw->compositeService();
+            if (cs) {
+                cs->setCacheCoordinator(m_cacheCoordinator.get());
+            }
+        }
+        m_cacheCoordinator->logBudgets();
+    }
 
     spdlog::info("App::createMainWindow() — UI ready");
     return true;

@@ -10,6 +10,7 @@
 #include <volk.h>
 
 #include "CompositeEngine.h"
+#include "media/CacheCoordinator.h"
 #include "StagingRing.h"
 #include "CompositeServiceLayerBuild.h"  // rt::LayerInfo
 #include "CompositeServiceBlend.h"       // rasterizeMasks
@@ -332,10 +333,31 @@ std::shared_ptr<CachedFrame> CompositeEngine::composite(
     if (!m_gpuTexCache) {
         const auto memStats = ctx.allocator().queryStats();
         const size_t gpuVram = memStats.deviceLocalBudgetBytes;
-        const size_t budget = std::clamp<size_t>(
-            gpuVram / 4, 512ull * 1024 * 1024, 8ull * 1024 * 1024 * 1024);
+
+        // Use CacheCoordinator for system-adaptive budget if available,
+        // otherwise fall back to a reasonable default.
+        size_t budget;
+        if (m_cacheCoordinator) {
+            budget = m_cacheCoordinator->recommendedGpuTexCacheBudget(gpuVram);
+            m_cacheCoordinator->onGpuAvailable(gpuVram);
+        } else {
+            budget = std::clamp<size_t>(
+                gpuVram / 4, 512ull * 1024 * 1024, 8ull * 1024 * 1024 * 1024);
+        }
+
         m_gpuTexCache = std::make_unique<GpuTextureCache>(budget);
         m_uploadManager->setTextureCache(m_gpuTexCache.get());
+
+        // Register VRAM pressure callback with the coordinator
+        if (m_cacheCoordinator) {
+            m_cacheCoordinator->setVramPressureFn(
+                [this](size_t* budgetOut) -> bool {
+                    if (!m_gpuTexCache) return false;
+                    *budgetOut = m_gpuTexCache->budget();
+                    return m_gpuTexCache->isUnderPressure();
+                });
+        }
+
         spdlog::info("[PERF] GpuTexCache budget: {:.0f} MB (GPU VRAM: {:.0f} MB)",
                      budget / 1048576.0, gpuVram / 1048576.0);
     }
@@ -714,6 +736,10 @@ std::shared_ptr<CachedFrame> CompositeEngine::composite(
                              m_gpuTexCache->hits(), m_gpuTexCache->misses());
             }
         }
+
+        // Notify CacheCoordinator for VRAM pressure check
+        if (m_cacheCoordinator)
+            m_cacheCoordinator->onFrameCompleted();
 
         return result;
     }

@@ -389,6 +389,7 @@ private:
     std::deque<UndoState> m_undoStack;
     std::deque<UndoState> m_redoStack;
     static constexpr int MAX_UNDO = 50;    bool               m_undoPropertyPushed = false;  ///< Coalesced undo for property edits
+    std::atomic<bool>  m_destroying{false};
     QTimer*            m_undoCoalesceTimer  = nullptr; ///< Resets m_undoPropertyPushed
     // ── Library panel ───────────────────────────────────────────────────
     QWidget*      m_shotsColumn        = nullptr;   ///< Standalone shots sidebar column

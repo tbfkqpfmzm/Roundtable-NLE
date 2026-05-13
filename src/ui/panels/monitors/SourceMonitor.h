@@ -34,6 +34,7 @@
 #include <QTimer>
 #include <QWidget>
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -247,6 +248,8 @@ private:
     QPushButton*      m_btnSafeArea{nullptr};
 
     QTimer*           m_pollTimer{nullptr};
+
+    std::atomic<bool> m_destroying{false};
 
     // Scrub coalescing — store the latest pending scrub tick and only
     // decode it on the next poll tick.  Without this, every mouse-move

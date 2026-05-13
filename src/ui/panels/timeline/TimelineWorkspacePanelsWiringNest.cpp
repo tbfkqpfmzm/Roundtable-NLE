@@ -86,6 +86,7 @@ void TimelineWorkspace::wireNestSignals()
     if (m_timelinePanel && m_timeline) {
         connect(m_timelinePanel, &TimelinePanel::nestSelectedClips,
                 this, [this](const std::vector<ClipRef>& clips, const QString& nestName) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (!m_timeline || !m_project || !m_commandStack || clips.empty()) return;
 
             // Find the time range spanned by selected clips
@@ -139,6 +140,7 @@ void TimelineWorkspace::wireNestSignals()
             auto name       = nestName.toStdString();
 
             auto refreshAfter = [this]() {
+                if (m_destroying.load(std::memory_order_acquire)) return;
                 m_selectedClip = nullptr;
                 m_selectedGraphicLayerIdx = -1;
                 m_timelinePanel->selection().clear();
@@ -257,6 +259,7 @@ void TimelineWorkspace::wireNestSignals()
         connect(m_timelinePanel, &TimelinePanel::sequenceDropped,
                 this, [this](size_t sequenceIndex, int64_t atTick, size_t trackIndex,
                              int64_t sourceIn, int64_t sourceOut) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (!m_timeline || !m_project || !m_commandStack) return;
             if (sequenceIndex >= m_project->sequenceCount()) return;
 
@@ -307,6 +310,7 @@ void TimelineWorkspace::wireNestSignals()
             std::string seqName = nestedTimeline->name();
 
             auto refreshAfter = [this](bool trackStructureChanged = false) {
+                if (m_destroying.load(std::memory_order_acquire)) return;
                 if (trackStructureChanged)
                     m_timelinePanel->rebuildTracks();
                 else
@@ -385,6 +389,7 @@ void TimelineWorkspace::wireNestSignals()
         // -- Open nested sequence (from context menu) --------------------
         connect(m_timelinePanel, &TimelinePanel::openNestedSequence,
                 this, [this](size_t sequenceIndex) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (!m_project || sequenceIndex >= m_project->sequenceCount()) return;
             auto* mw = qobject_cast<MainWindow*>(window());
             if (mw) mw->switchSequence(sequenceIndex);
@@ -393,6 +398,7 @@ void TimelineWorkspace::wireNestSignals()
         // -- Reveal in Project Bin (from clip context menu) --------------
         connect(m_timelinePanel, &TimelinePanel::revealInProjectBin,
                 this, [this](const QString& filePath) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (m_projectBin) {
                 m_projectBin->revealByPath(filePath);
                 // Raise the Project Bin dock so the user sees the selection

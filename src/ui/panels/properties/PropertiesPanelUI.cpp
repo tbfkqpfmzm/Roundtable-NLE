@@ -55,7 +55,15 @@ PropertiesPanel::PropertiesPanel(QWidget* parent)
     setupUI();
 }
 
-PropertiesPanel::~PropertiesPanel() = default;
+PropertiesPanel::~PropertiesPanel()
+{
+    m_destroying.store(true, std::memory_order_release);
+
+    // Stop the search debounce timer — prevents it firing during destruction
+    if (m_searchDebounce) {
+        m_searchDebounce->stop();
+    }
+}
 
 // ═════════════════════════════════════════════════════════════════════════════
 //  UI Setup

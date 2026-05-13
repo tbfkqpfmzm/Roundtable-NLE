@@ -29,7 +29,15 @@ TransportBar::TransportBar(QWidget* parent)
     connect(m_pollTimer, &QTimer::timeout, this, &TransportBar::onPollTimer);
 }
 
-TransportBar::~TransportBar() = default;
+TransportBar::~TransportBar()
+{
+    m_destroying.store(true, std::memory_order_release);
+
+    // Stop the poll timer — prevents it firing during destruction
+    if (m_pollTimer) {
+        m_pollTimer->stop();
+    }
+}
 
 // ═════════════════════════════════════════════════════════════════════════════
 //  Setup
@@ -127,24 +135,31 @@ void TransportBar::setupUI()
 
     // ── Connect buttons ─────────────────────────────────────────────────
     connect(m_btnGoStart,     &QPushButton::clicked, this, [this]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         if (m_controller) m_controller->goToStart();
     });
     connect(m_btnStepBack,    &QPushButton::clicked, this, [this]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         if (m_controller) m_controller->stepBackward();
     });
     connect(m_btnStop,        &QPushButton::clicked, this, [this]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         if (m_controller) m_controller->stop();
     });
     connect(m_btnPlayPause,   &QPushButton::clicked, this, [this]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         if (m_controller) m_controller->togglePlayPause();
     });
     connect(m_btnStepForward, &QPushButton::clicked, this, [this]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         if (m_controller) m_controller->stepForward();
     });
     connect(m_btnGoEnd,       &QPushButton::clicked, this, [this]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         if (m_controller) m_controller->goToEnd();
     });
     connect(m_btnLoop,        &QPushButton::toggled, this, [this](bool checked) {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         if (m_controller) m_controller->setLoopEnabled(checked);
     });
 }
@@ -180,14 +195,17 @@ void TransportBar::setController(PlaybackController* controller)
     {
         // Wire callbacks
         m_controller->onPositionChanged = [this](int64_t tick) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             emit playheadChanged(tick);
         };
 
         m_controller->onStateChanged = [this](PlayState /*state*/) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             updateButtonStates();
         };
 
         m_controller->onSpeedChanged = [this](double /*speed*/) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             updateDisplay();
         };
     }

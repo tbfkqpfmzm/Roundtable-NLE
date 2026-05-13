@@ -1,0 +1,335 @@
+/*
+ * Nv12ConverterPipeline.cpp — Pipeline creation for Nv12Converter.
+ *
+ * Extracted from Nv12Converter.cpp to reduce translation unit size.
+ * Contains: findShader(), createDescriptorResources(), createPipeline(),
+ *           createYuv420pPipeline()
+ */
+
+#include <volk.h>
+#include "Nv12Converter.h"
+
+#define VMA_STATIC_VULKAN_FUNCTIONS 0
+#define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
+#include <vk_mem_alloc.h>
+
+#include <spdlog/spdlog.h>
+#include <fstream>
+#include <filesystem>
+
+namespace fs = std::filesystem;
+
+namespace rt {
+
+//══════════════════════════════════════════════════════════════════════════
+//  Helper: locate SPIR-V shader file
+//══════════════════════════════════════════════════════════════════════════
+
+static fs::path findShader(const char* name)
+{
+    fs::path candidates[] = {
+        fs::path(__FILE__).parent_path().parent_path().parent_path() / "build" / "shaders" / name,
+        fs::current_path() / "shaders" / name,
+        fs::current_path().parent_path() / "shaders" / name,
+        fs::current_path().parent_path() / "build" / "shaders" / name,
+    };
+    for (auto& p : candidates)
+        if (fs::exists(p)) return p;
+    return {};
+}
+
+//══════════════════════════════════════════════════════════════════════════
+//  Internal — create descriptor resources
+//══════════════════════════════════════════════════════════════════════════
+
+bool Nv12Converter::createDescriptorResources()
+{
+    VkDevice dev = m_device->handle();
+
+    // Layout: binding 0 = Y sampler, binding 1 = UV sampler, binding 2 = output storage
+    VkDescriptorSetLayoutBinding bindings[3]{};
+
+    bindings[0].binding         = 0;
+    bindings[0].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[0].descriptorCount = 1;
+    bindings[0].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    bindings[1].binding         = 1;
+    bindings[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[1].descriptorCount = 1;
+    bindings[1].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    bindings[2].binding         = 2;
+    bindings[2].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[2].descriptorCount = 1;
+    bindings[2].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    VkDescriptorSetLayoutCreateInfo layoutCI{};
+    layoutCI.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutCI.bindingCount = 3;
+    layoutCI.pBindings    = bindings;
+
+    if (vkCreateDescriptorSetLayout(dev, &layoutCI, nullptr,
+                                     &m_descriptorSetLayout) != VK_SUCCESS)
+    {
+        spdlog::error("Nv12Converter: failed to create descriptor set layout");
+        return false;
+    }
+
+    // Pool
+    VkDescriptorPoolSize poolSizes[2]{};
+    poolSizes[0].type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    poolSizes[0].descriptorCount = 2;
+    poolSizes[1].type            = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    poolSizes[1].descriptorCount = 1;
+
+    VkDescriptorPoolCreateInfo poolCI{};
+    poolCI.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolCI.flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    poolCI.maxSets       = 1;
+    poolCI.poolSizeCount = 2;
+    poolCI.pPoolSizes    = poolSizes;
+
+    if (vkCreateDescriptorPool(dev, &poolCI, nullptr,
+                                &m_descriptorPool) != VK_SUCCESS)
+    {
+        spdlog::error("Nv12Converter: failed to create descriptor pool");
+        return false;
+    }
+
+    // Allocate set
+    VkDescriptorSetAllocateInfo allocInfo{};
+    allocInfo.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocInfo.descriptorPool     = m_descriptorPool;
+    allocInfo.descriptorSetCount = 1;
+    allocInfo.pSetLayouts        = &m_descriptorSetLayout;
+
+    if (vkAllocateDescriptorSets(dev, &allocInfo, &m_descriptorSet) != VK_SUCCESS) {
+        spdlog::error("Nv12Converter: failed to allocate descriptor set");
+        return false;
+    }
+
+    return true;
+}
+
+//══════════════════════════════════════════════════════════════════════════
+//  Internal — create compute pipeline
+//══════════════════════════════════════════════════════════════════════════
+
+bool Nv12Converter::createPipeline()
+{
+    VkDevice dev = m_device->handle();
+
+    // Pipeline layout
+    VkPushConstantRange pushRange{};
+    pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pushRange.offset     = 0;
+    pushRange.size       = sizeof(int32_t) * 2; // width, height
+
+    VkPipelineLayoutCreateInfo layoutCI{};
+    layoutCI.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layoutCI.setLayoutCount         = 1;
+    layoutCI.pSetLayouts            = &m_descriptorSetLayout;
+    layoutCI.pushConstantRangeCount = 1;
+    layoutCI.pPushConstantRanges    = &pushRange;
+
+    if (vkCreatePipelineLayout(dev, &layoutCI, nullptr,
+                                &m_pipelineLayout) != VK_SUCCESS)
+    {
+        spdlog::error("Nv12Converter: failed to create pipeline layout");
+        return false;
+    }
+
+    // Load shader
+    fs::path spvPath = findShader("nv12_to_bgra.comp.spv");
+    if (spvPath.empty()) {
+        spdlog::warn("Nv12Converter: nv12_to_bgra.comp.spv not found — "
+                     "shader not compiled yet, conversion will be unavailable");
+        return false;
+    }
+
+    // Read SPIR-V binary
+    std::ifstream file(spvPath, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) {
+        spdlog::error("Nv12Converter: failed to open {}", spvPath.string());
+        return false;
+    }
+    size_t fileSize = static_cast<size_t>(file.tellg());
+    std::vector<char> spirv(fileSize);
+    file.seekg(0);
+    file.read(spirv.data(), static_cast<std::streamsize>(fileSize));
+
+    VkShaderModuleCreateInfo smCI{};
+    smCI.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    smCI.codeSize = spirv.size();
+    smCI.pCode    = reinterpret_cast<const uint32_t*>(spirv.data());
+
+    if (vkCreateShaderModule(dev, &smCI, nullptr, &m_shaderModule) != VK_SUCCESS) {
+        spdlog::error("Nv12Converter: failed to create shader module");
+        return false;
+    }
+
+    // Compute pipeline
+    VkComputePipelineCreateInfo pci{};
+    pci.sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    pci.stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    pci.stage.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
+    pci.stage.module = m_shaderModule;
+    pci.stage.pName  = "main";
+    pci.layout = m_pipelineLayout;
+
+    if (vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &pci, nullptr,
+                                  &m_pipeline) != VK_SUCCESS)
+    {
+        spdlog::error("Nv12Converter: failed to create compute pipeline");
+        return false;
+    }
+
+    spdlog::info("Nv12Converter: compute pipeline created");
+    return true;
+}
+
+//══════════════════════════════════════════════════════════════════════════
+//  Internal — create YUV420P pipeline (lazy, called on first use)
+//══════════════════════════════════════════════════════════════════════════
+
+bool Nv12Converter::createYuv420pPipeline()
+{
+    VkDevice dev = m_device->handle();
+
+    // Descriptor set layout: 3 samplers (Y, U, V) + 1 storage image (output)
+    VkDescriptorSetLayoutBinding bindings[4]{};
+    bindings[0].binding         = 0;
+    bindings[0].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[0].descriptorCount = 1;
+    bindings[0].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    bindings[1].binding         = 1;
+    bindings[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[1].descriptorCount = 1;
+    bindings[1].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    bindings[2].binding         = 2;
+    bindings[2].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[2].descriptorCount = 1;
+    bindings[2].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    bindings[3].binding         = 3;
+    bindings[3].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[3].descriptorCount = 1;
+    bindings[3].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    VkDescriptorSetLayoutCreateInfo layoutCI{};
+    layoutCI.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutCI.bindingCount = 4;
+    layoutCI.pBindings    = bindings;
+
+    if (vkCreateDescriptorSetLayout(dev, &layoutCI, nullptr,
+                                     &m_yuv420pDescSetLayout) != VK_SUCCESS)
+    {
+        spdlog::error("Nv12Converter: failed to create YUV420P descriptor set layout");
+        return false;
+    }
+
+    // Descriptor pool
+    VkDescriptorPoolSize poolSizes[2]{};
+    poolSizes[0].type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    poolSizes[0].descriptorCount = 3;
+    poolSizes[1].type            = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    poolSizes[1].descriptorCount = 1;
+
+    VkDescriptorPoolCreateInfo poolCI{};
+    poolCI.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolCI.flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    poolCI.maxSets       = 1;
+    poolCI.poolSizeCount = 2;
+    poolCI.pPoolSizes    = poolSizes;
+
+    if (vkCreateDescriptorPool(dev, &poolCI, nullptr,
+                                &m_yuv420pDescPool) != VK_SUCCESS)
+    {
+        spdlog::error("Nv12Converter: failed to create YUV420P descriptor pool");
+        return false;
+    }
+
+    // Allocate descriptor set
+    VkDescriptorSetAllocateInfo allocInfo{};
+    allocInfo.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocInfo.descriptorPool     = m_yuv420pDescPool;
+    allocInfo.descriptorSetCount = 1;
+    allocInfo.pSetLayouts        = &m_yuv420pDescSetLayout;
+
+    if (vkAllocateDescriptorSets(dev, &allocInfo, &m_yuv420pDescSet) != VK_SUCCESS) {
+        spdlog::error("Nv12Converter: failed to allocate YUV420P descriptor set");
+        return false;
+    }
+
+    // Pipeline layout
+    VkPushConstantRange pushRange{};
+    pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pushRange.offset     = 0;
+    pushRange.size       = sizeof(int32_t) * 2; // width, height
+
+    VkPipelineLayoutCreateInfo pipeLayoutCI{};
+    pipeLayoutCI.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipeLayoutCI.setLayoutCount         = 1;
+    pipeLayoutCI.pSetLayouts            = &m_yuv420pDescSetLayout;
+    pipeLayoutCI.pushConstantRangeCount = 1;
+    pipeLayoutCI.pPushConstantRanges    = &pushRange;
+
+    if (vkCreatePipelineLayout(dev, &pipeLayoutCI, nullptr,
+                                &m_yuv420pPipeLayout) != VK_SUCCESS)
+    {
+        spdlog::error("Nv12Converter: failed to create YUV420P pipeline layout");
+        return false;
+    }
+
+    // Load shader
+    fs::path spvPath = findShader("yuv420p_to_bgra.comp.spv");
+    if (spvPath.empty()) {
+        spdlog::warn("Nv12Converter: yuv420p_to_bgra.comp.spv not found — "
+                     "YUV420P GPU conversion unavailable");
+        return false;
+    }
+
+    std::ifstream file(spvPath, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) {
+        spdlog::error("Nv12Converter: failed to open {}", spvPath.string());
+        return false;
+    }
+    size_t fileSize = static_cast<size_t>(file.tellg());
+    std::vector<char> spirv(fileSize);
+    file.seekg(0);
+    file.read(spirv.data(), static_cast<std::streamsize>(fileSize));
+
+    VkShaderModuleCreateInfo smCI{};
+    smCI.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    smCI.codeSize = spirv.size();
+    smCI.pCode    = reinterpret_cast<const uint32_t*>(spirv.data());
+
+    if (vkCreateShaderModule(dev, &smCI, nullptr, &m_yuv420pShaderModule) != VK_SUCCESS) {
+        spdlog::error("Nv12Converter: failed to create YUV420P shader module");
+        return false;
+    }
+
+    // Compute pipeline
+    VkComputePipelineCreateInfo pci{};
+    pci.sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    pci.stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    pci.stage.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
+    pci.stage.module = m_yuv420pShaderModule;
+    pci.stage.pName  = "main";
+    pci.layout = m_yuv420pPipeLayout;
+
+    if (vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &pci, nullptr,
+                                  &m_yuv420pPipeline) != VK_SUCCESS)
+    {
+        spdlog::error("Nv12Converter: failed to create YUV420P compute pipeline");
+        return false;
+    }
+
+    spdlog::info("Nv12Converter: YUV420P compute pipeline created");
+    return true;
+}
+
+} // namespace rt

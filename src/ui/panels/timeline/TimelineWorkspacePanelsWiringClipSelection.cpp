@@ -85,6 +85,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
     if (m_timelinePanel) {
         connect(m_timelinePanel, &TimelinePanel::clipSelected,
                 this, [this](size_t trackIdx, size_t clipIdx) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (!m_timeline) return;
             // NOTE: Do NOT early-return when selection count > 1.
             // Linked clips (groupId) cause multiple clips to be selected,
@@ -173,6 +174,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
         });
         connect(m_timelinePanel, &TimelinePanel::clipDoubleClicked,
                 this, [this](size_t trackIdx, size_t clipIdx) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (!m_timeline || !m_sourceMonitor || !m_mediaPool) return;
             auto* track = m_timeline->track(trackIdx);
             if (!track) return;
@@ -233,6 +235,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
         });
         connect(m_timelinePanel, &TimelinePanel::transitionSelected,
                 this, [this](size_t trackIdx, size_t transIdx) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (!m_timeline) return;
             auto* track = m_timeline->track(trackIdx);
             if (!track || transIdx >= track->transitionCount()) return;
@@ -247,6 +250,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
         });
         connect(m_timelinePanel, &TimelinePanel::selectionChanged,
                 this, [this]() {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             const auto& sel = m_timelinePanel->selection();
             if (sel.empty()) {
                 if (m_effectControlsPanel) m_effectControlsPanel->clearClip();
@@ -333,6 +337,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
         auto* vp = m_programMonitor->viewport();
         connect(vp, &Viewport::transformPositionChanged,
                 this, [this](float posX, float posY) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (!m_selectedClip) return;
             const int64_t relTick = m_playbackController
                 ? std::max<int64_t>(0, m_playbackController->currentTick() - m_selectedClip->timelineIn())
@@ -354,6 +359,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
         });
         connect(vp, &Viewport::transformScaleChanged,
                 this, [this](float scX, float scY) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (!m_selectedClip) return;
             const int64_t relTick = m_playbackController
                 ? std::max<int64_t>(0, m_playbackController->currentTick() - m_selectedClip->timelineIn())
@@ -395,6 +401,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
         connect(vp, &Viewport::transformDragFinished,
                 this, [this](float oldPosX, float oldPosY, float oldScX, float oldScY, float oldRot,
                              float newPosX, float newPosY, float newScX, float newScY, float newRot) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             // Capture pre-drag static state before resetting
             bool sxWasStatic = m_scaleXWasStaticAtDragStart;
             bool syWasStatic = m_scaleYWasStaticAtDragStart;
@@ -559,6 +566,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
         auto* ov = m_programMonitor->transformOverlay();
         connect(ov, &TransformOverlayWidget::transformPositionChanged,
                 this, [this](float posX, float posY) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (!m_selectedClip) return;
             const int64_t relTick = m_playbackController
                 ? std::max<int64_t>(0, m_playbackController->currentTick() - m_selectedClip->timelineIn())
@@ -579,6 +587,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
         });
         connect(ov, &TransformOverlayWidget::transformScaleChanged,
                 this, [this](float scX, float scY) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (!m_selectedClip) return;
             const int64_t relTick = m_playbackController
                 ? std::max<int64_t>(0, m_playbackController->currentTick() - m_selectedClip->timelineIn())
@@ -619,6 +628,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
         });
         connect(ov, &TransformOverlayWidget::transformRotationChanged,
                 this, [this](float rot) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (!m_selectedClip) return;
             const int64_t relTick = m_playbackController
                 ? std::max<int64_t>(0, m_playbackController->currentTick() - m_selectedClip->timelineIn())
@@ -638,6 +648,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
         connect(ov, &TransformOverlayWidget::transformDragFinished,
                 this, [this](float oldPosX, float oldPosY, float oldScX, float oldScY, float oldRot,
                              float newPosX, float newPosY, float newScX, float newScY, float newRot) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             // Capture pre-drag static state before resetting
             bool sxWasStatic = m_scaleXWasStaticAtDragStart;
             bool syWasStatic = m_scaleYWasStaticAtDragStart;
@@ -799,6 +810,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
         // -- Mask live update: refresh composite during drag --
         connect(ov, &TransformOverlayWidget::maskLiveUpdate,
                 this, [this]() {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             invalidateCompositeCache();
             if (m_programMonitor) m_programMonitor->requestRefresh();
         });
@@ -806,6 +818,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
         // -- Mask drag finished: undo support for mask manipulation in Program Monitor --
         connect(ov, &TransformOverlayWidget::maskDragFinished,
                 this, [this](int maskIndex, OpacityMask oldMask, OpacityMask newMask) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (!m_selectedClip || !m_commandStack) return;
             invalidateCompositeCache();
             if (m_programMonitor) m_programMonitor->requestRefresh();
@@ -831,6 +844,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
         // -- Click on empty area: layer selection (Selection tool) or text creation (Text tool) --
         connect(ov, &TransformOverlayWidget::emptyAreaClicked,
                 this, [this](float frameX, float frameY) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (!m_timelinePanel || !m_timeline) return;
 
             // -- Selection/Text tool: hit-test layers across all GraphicClips at playhead --
@@ -1085,6 +1099,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
     if (m_timelinePanel && m_programMonitor) {
         connect(m_timelinePanel, &TimelinePanel::contentChanged,
                 this, [this]() {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             invalidateCompositeCache();
             if (m_programMonitor) m_programMonitor->requestRefresh();
             // Defer spine warm-up + audio reload to next event-loop iteration
@@ -1096,6 +1111,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
         // Also refresh when a new clip is created via tools (Text tool, etc.)
         connect(m_timelinePanel, &TimelinePanel::clipCreated,
                 this, [this]() {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             invalidateCompositeCache();
             if (m_programMonitor) m_programMonitor->requestRefresh();
         });
@@ -1109,6 +1125,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
     if (dockProgramMonitor && m_programMonitor) {
         connect(dockProgramMonitor, &QDockWidget::visibilityChanged,
                 this, [this](bool visible) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (visible && m_programMonitor) {
                 // Flush composite cache so we re-render from current state
                 invalidateCompositeCache();
@@ -1121,6 +1138,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
     if (m_propertiesPanel && m_programMonitor) {
         connect(m_propertiesPanel, &PropertiesPanel::propertyChanged,
                 this, [this]() {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             invalidateCompositeCache();
 #ifdef ROUNDTABLE_HAS_SPINE
             // Refresh timeline track widgets so clip label changes are visible
@@ -1150,6 +1168,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
         });
         connect(m_propertiesPanel, &PropertiesPanel::shotSwitchRequested,
                 this, [this](uint64_t groupId, const std::string& newShotName) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             applyShotSwitch(groupId, newShotName);
         });
     }
@@ -1158,14 +1177,17 @@ void TimelineWorkspace::wireClipSelectionSignals() {
     if (m_effectControlsPanel && m_programMonitor) {
         connect(m_effectControlsPanel, &EffectControlsPanel::propertyChanged,
                 this, [this]() {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             scheduleOverlayRefresh();
         });
         connect(m_effectControlsPanel, &EffectControlsPanel::maskChanged,
                 this, [this]() {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             scheduleOverlayRefresh();
         });
         connect(m_effectControlsPanel, &EffectControlsPanel::maskSelected,
                 this, [this](int maskIndex) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (m_programMonitor) {
                 auto* ov = m_programMonitor->transformOverlay();
                 if (ov) ov->setActiveMaskIndex(maskIndex);
@@ -1179,6 +1201,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
     if (m_effectControlsPanel) {
         connect(m_effectControlsPanel, &EffectControlsPanel::audioLevelsChanged,
                 this, [this](uint64_t clipId, float vol, float pan) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (!m_timeline) return;
             // Resolve track mute state so the mixer sees the effective
             // muted flag (otherwise updateSourceLevels would re-enable
@@ -1205,6 +1228,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
     if (m_programMonitor) {
         connect(m_programMonitor, &ProgramMonitor::frameDisplayed,
                 this, [this](int64_t) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (m_selectedClip && m_selectedGraphicLayerIdx >= 0)
                 updateTransformOverlay();
         });
@@ -1214,6 +1238,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
     if (m_effectControlsPanel && m_playbackController) {
         connect(m_effectControlsPanel, &EffectControlsPanel::seekRequested,
                 this, [this](int64_t tick) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             m_playbackController->seekTo(tick);
             if (m_audioEngine && !m_playbackController->isPlaying()) {
                 const uint32_t sr = m_audioEngine->sampleRate();
@@ -1279,6 +1304,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
     if (m_GraphicsEditorPanel && m_programMonitor) {
         connect(m_GraphicsEditorPanel, &GraphicsEditorPanel::propertyChanged,
                 this, [this]() {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             invalidateCompositeCache();
             scheduleOverlayRefresh();
             if (m_programMonitor) m_programMonitor->requestRefresh();
@@ -1286,6 +1312,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
         // Track which graphic layer is selected for per-layer transform overlay
         connect(m_GraphicsEditorPanel, &GraphicsEditorPanel::layerSelected,
                 this, [this](GraphicLayer* /*layer*/, int layerIdx) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             m_selectedGraphicLayerIdx = layerIdx;
             scheduleOverlayRefresh();
         });

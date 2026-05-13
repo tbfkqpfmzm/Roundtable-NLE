@@ -54,6 +54,10 @@ add_library(roundtable_core STATIC
     media/MediaPoolQueries.cpp
     media/MediaPoolDecode.cpp
     media/MediaPoolPrefetch.cpp
+    media/MediaPoolPrefetchLoop.cpp
+    media/MediaPoolPrefetchSchedule.cpp
+    media/MediaPoolPrefetchConvert.cpp
+    media/MediaPoolPrefetchDecode.cpp
     media/VideoDecoder.cpp
     media/VideoDecoderInit.cpp
     media/VideoDecoderDecode.cpp
@@ -61,6 +65,7 @@ add_library(roundtable_core STATIC
     media/TimeStretch.cpp
     media/AudioFile.cpp
     media/FrameCache.cpp
+    media/CacheCoordinator.cpp
     media/DiskFrameCache.cpp
     media/WaveformCache.cpp
     media/AVSyncClock.cpp

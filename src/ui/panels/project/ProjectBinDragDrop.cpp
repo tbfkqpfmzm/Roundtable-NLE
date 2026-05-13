@@ -37,6 +37,7 @@ ProjectBin::BinSnapshot ProjectBin::captureBinSnapshot()
 
 void ProjectBin::applyBinSnapshot(const BinSnapshot& s)
 {
+    m_dropHighlightItem = nullptr;  // tree will be cleared
     clearAll();
     m_listWidget->clear();
 
@@ -136,8 +137,8 @@ bool ProjectBin::handleDropEvent(QEvent* ev)
             auto after = std::make_shared<BinSnapshot>(captureBinSnapshot());
             m_commandStack->pushWithoutExecute(std::make_unique<LambdaCommand>(
                 "Move Bin Items",
-                [this, after]() { applyBinSnapshot(*after); },
-                [this, before]() { applyBinSnapshot(*before); }));
+                [this, after]() { if (m_destroying.load(std::memory_order_acquire)) return; applyBinSnapshot(*after); },
+                [this, before]() { if (m_destroying.load(std::memory_order_acquire)) return; applyBinSnapshot(*before); }));
         }
 
         de->acceptProposedAction();

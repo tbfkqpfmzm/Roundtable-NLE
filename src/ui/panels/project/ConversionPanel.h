@@ -25,6 +25,7 @@
 
 #include <QCheckBox>
 #include <QColor>
+#include <atomic>
 #include <QComboBox>
 #include <QLabel>
 #include <QMenu>
@@ -93,6 +94,8 @@ private:
 
     // Batch conversion tracking — tracks current Convert job progress
     size_t         m_batchTotal{0};
+
+    std::atomic<bool> m_destroying{false};
 };
 
 } // namespace rt

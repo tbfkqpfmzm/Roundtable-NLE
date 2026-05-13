@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <QDataStream>
 #include <QLabel>
 #include <QLineEdit>
@@ -49,7 +50,7 @@ class BackgroundDownloadPanel : public QWidget
 
 public:
     explicit BackgroundDownloadPanel(QWidget* parent = nullptr);
-    ~BackgroundDownloadPanel() override = default;
+    ~BackgroundDownloadPanel() override;
 
     /// Access the grid widget so parent panels can connect signals.
     [[nodiscard]] BackgroundGridWidget* backgroundGrid() const noexcept { return m_backgroundGrid; }
@@ -101,6 +102,8 @@ private:
     QLabel*       m_instructionsLabel{nullptr};
     BackgroundGridWidget* m_backgroundGrid{nullptr};
     QLabel*       m_statusLabel{nullptr};
+
+    std::atomic<bool> m_destroying{false};
 
     static constexpr const char* kTargetDir = "assets/NikkeBKG";
     static constexpr const char* kMegaUrl   = "https://mega.nz/folder/V55C3T6C#02N6WUjiEQ8hQv6PhZuMkg";

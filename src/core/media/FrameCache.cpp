@@ -176,6 +176,53 @@ void FrameCache::evictMedia(uint64_t mediaId)
     m_playheads.erase(mediaId);
 }
 
+
+// ─── GPU-co-owned eviction (cross-cache VRAM pressure) ─────────────────────
+
+size_t FrameCache::evictGpuCoOwned(size_t minBytes)
+{
+    std::lock_guard lock(m_mutex);
+
+    if (m_lru.empty() || minBytes == 0)
+        return 0;
+
+    size_t freed = 0;
+
+    // Walk from LRU back (least recently used) toward front.
+    // Evict frames that have a non-null gpuTextureOwner (co-own GPU
+    // memory with GpuTextureCache via putShared).
+    // Never evict pinned frames (static images).
+    auto it = m_lru.end();
+    while (freed < minBytes && it != m_lru.begin()) {
+        --it;
+        auto mapIt = m_map.find(*it);
+        if (mapIt == m_map.end()) {
+            it = m_lru.erase(it);
+            continue;
+        }
+
+        auto& frame = mapIt->second.frame;
+        if (!frame || frame->pinned) {
+            continue;  // never evict pinned
+        }
+        if (!frame->gpuTextureOwner) {
+            continue;  // no GPU co-ownership — skip
+        }
+
+        // This frame co-owns GPU memory.  Evicting it releases the
+        // shared_ptr, which may trigger GPU texture destruction in
+        // the shared_ptrs aliased by GpuTextureCache::putShared().
+        size_t frameBytes = frame->memoryUsage();
+        m_used -= frameBytes;
+        freed += frameBytes;
+        m_map.erase(mapIt);
+        it = m_lru.erase(it);
+        ++m_evictions;
+    }
+
+    return freed;
+}
+
 void FrameCache::removePlayhead(uint64_t mediaId)
 {
     std::lock_guard lock(m_mutex);

@@ -99,6 +99,7 @@ void TimelineWorkspace::wireMediaDropSignals()
         connect(m_timelinePanel, &TimelinePanel::mediaDropped,
                 this, [this](const QString& filePath, uint64_t /*mediaHandle*/,
                              int64_t atTick, size_t trackIndex) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (!m_timeline) return;
 
             // If no project or no sequences exist, prompt to create one
@@ -374,6 +375,7 @@ void TimelineWorkspace::wireMediaDropSignals()
             auto audioOverlapCmd  = std::make_shared<std::unique_ptr<Command>>(nullptr);
 
             auto refreshAfter = [this](bool trackStructureChanged = false) {
+                if (m_destroying.load(std::memory_order_acquire)) return;
                 if (trackStructureChanged)
                     m_timelinePanel->rebuildTracks();
                 else
@@ -676,6 +678,7 @@ void TimelineWorkspace::wireMediaDropSignals()
                 this, [this](const QString& filePath, uint64_t /*mediaHandle*/,
                              int64_t atTick, size_t trackIndex,
                              int64_t sourceIn, int64_t sourceOut) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (!m_timeline) return;
 
             QString ext = QFileInfo(filePath).suffix().toLower();
@@ -866,6 +869,7 @@ void TimelineWorkspace::wireMediaDropSignals()
             auto audioOverlapCmd2  = std::make_shared<std::unique_ptr<Command>>(nullptr);
 
             auto refreshAfter = [this](bool trackStructureChanged = false) {
+                if (m_destroying.load(std::memory_order_acquire)) return;
                 if (trackStructureChanged)
                     m_timelinePanel->rebuildTracks();
                 else

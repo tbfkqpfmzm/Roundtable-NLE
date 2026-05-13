@@ -45,6 +45,7 @@
 #include <QTreeWidget>
 #include <QWidget>
 
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -286,6 +287,7 @@ private:
     int         m_copiedSequenceIdx{-1}; // index of copied sequence for paste
     QTreeWidgetItem* m_dropHighlightItem{nullptr}; // bin highlighted during drag
     QVector<QStringList> m_binTabPaths;  // bin path for each tab (empty = root)
+    std::atomic<bool> m_destroying{false};
 };
 
 } // namespace rt

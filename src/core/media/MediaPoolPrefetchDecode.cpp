@@ -1,0 +1,140 @@
+/*
+ * MediaPoolPrefetchDecode.cpp — Core prefetch decode logic extracted from
+ * MediaPoolPrefetch.cpp.
+ *
+ * Contains: decodePrefetchFrame() — the main decode → convert → cache path
+ * used by both prefetch workers and scrub-frame misses.
+ */
+
+#include "MediaPool.h"
+#include "MediaPoolPrefetchInternal.h"
+
+#include <spdlog/spdlog.h>
+#include <chrono>
+
+namespace rt {
+
+std::shared_ptr<CachedFrame> MediaPool::decodePrefetchFrame(
+    PrefetchDecoderState& state, const PrefetchTask& task)
+{
+    auto perfDecodeT0 = std::chrono::high_resolution_clock::now();
+    auto& decoder = *state.decoder;
+    double targetTime = task.frameNumber / task.fps;
+
+    // Sequential fast path: delta==1 or delta<=150 → advance decoder instead of seeking.
+    bool needSeek = true;
+    if (state.lastDecodedFrame >= 0) {
+        int64_t delta = task.frameNumber - state.lastDecodedFrame;
+        if (delta == 1) {
+            needSeek = false;
+        } else if (delta > 1 && delta <= 150) {
+            needSeek = false;
+            DecodedFrame skip;
+            for (int64_t i = 0; i < delta - 1; ++i) {
+                if (!decoder.decodeNext(skip)) {
+                    needSeek = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (needSeek) {
+        // Keyframe seek + forward decode (avoids Precise seek B-frame bug).
+        if (!decoder.seek(targetTime, SeekMode::Keyframe)) {
+            spdlog::debug("MediaPool prefetch: seek failed handle={} frame={}",
+                          task.handle, task.frameNumber);
+            state.lastDecodedFrame = -1;
+            return nullptr;
+        }
+        const double halfFrame = 0.5 / task.fps;
+        DecodedFrame fwd;
+        int fwdCount = 0;
+        constexpr int kMaxForwardDecode = 600;
+        while (fwdCount < kMaxForwardDecode) {
+            if (!decoder.decodeNext(fwd)) {
+                state.lastDecodedFrame = -1;
+                return nullptr;
+            }
+            ++fwdCount;
+            if (fwd.timestamp >= targetTime - halfFrame)
+                break;
+        }
+        state.lastDecodedFrame = task.frameNumber;
+
+        auto perfDecodeT1a = std::chrono::high_resolution_clock::now();
+        auto cached = convertDecodedToCache(state, task, fwd, task.frameNumber);
+        if (!cached) return nullptr;
+
+        auto perfDecodeT1 = std::chrono::high_resolution_clock::now();
+        const double totalMs = std::chrono::duration<double, std::milli>(perfDecodeT1 - perfDecodeT0).count();
+        const double decodeOnlyMs = std::chrono::duration<double, std::milli>(perfDecodeT1a - perfDecodeT0).count();
+        const double convertMs = totalMs - decodeOnlyMs;
+
+        logDecodePerf(task, true, fwdCount, decodeOnlyMs, convertMs, totalMs,
+                      fwd.width, fwd.height);
+        return cached;
+    }
+
+    DecodedFrame decoded;
+    if (!decoder.decodeNext(decoded)) {
+        state.lastDecodedFrame = -1;
+        return nullptr;
+    }
+    state.lastDecodedFrame = task.frameNumber;
+
+    auto perfDecodeT1a = std::chrono::high_resolution_clock::now();
+    auto cached = convertDecodedToCache(state, task, decoded, task.frameNumber);
+    if (!cached)
+        return nullptr;
+
+    auto perfDecodeT1 = std::chrono::high_resolution_clock::now();
+    const double totalMs = std::chrono::duration<double, std::milli>(perfDecodeT1 - perfDecodeT0).count();
+    const double decodeOnlyMs = std::chrono::duration<double, std::milli>(perfDecodeT1a - perfDecodeT0).count();
+    const double convertMs = totalMs - decodeOnlyMs;
+
+    logDecodePerf(task, false, 0, decodeOnlyMs, convertMs, totalMs,
+                  decoded.width, decoded.height);
+
+    // NVDEC→SW fallback only on sequential decodes (seek frames are inherently slow).
+    if (!needSeek &&
+        shouldFallbackToSoftwarePreview(*state.decoder,
+                                        task.tier,
+                                        decoded.width,
+                                        decoded.height,
+                                        totalMs,
+                                        task.packedAlpha)) {
+        ++state.consecutiveSlowHwFrames;
+        constexpr int kFallbackSlowFrameThreshold = 3;
+        if (state.consecutiveSlowHwFrames >= kFallbackSlowFrameThreshold) {
+            spdlog::warn("[PERF] MediaPool prefetch: handle={} '{}' switching to software after {} consecutive slow hw frames (last={:.1f}ms total, src={}x{}, dst={}x{}, tier={})",
+                         task.handle,
+                         task.filePath.filename().string(),
+                         state.consecutiveSlowHwFrames,
+                         totalMs,
+                         decoded.width,
+                         decoded.height,
+                         cached->width,
+                         cached->height,
+                         static_cast<int>(task.tier));
+            reopenPrefetchDecoderAsSoftware(state, task);
+            state.consecutiveSlowHwFrames = 0;
+        }
+    } else {
+        state.consecutiveSlowHwFrames = 0;
+    }
+
+    // Rolling average decode time (EMA: 0.875*old + 0.125*sample)
+    {
+        uint64_t us = static_cast<uint64_t>(totalMs * 1000.0);
+        uint64_t prev = m_perf.avgDecodeUs.load(std::memory_order_relaxed);
+        uint64_t avg = (prev * 7 + us) / 8;
+        m_perf.avgDecodeUs.store(avg, std::memory_order_relaxed);
+    }
+
+    return cached;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+
+} // namespace rt

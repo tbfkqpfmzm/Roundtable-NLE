@@ -322,11 +322,24 @@ private:
     /// Number of background warmup threads still running.
     std::atomic<int> m_backgroundWarmupActive{0};
 
+    /// Destruction guard — checked by lambdas and callbacks.
+    std::atomic<bool> m_destroying{false};
 
 
 
 
 
+
+
+    // ── Panel build helpers (extracted from TimelineWorkspacePanels.cpp) ─
+    /// Create all dock widgets and panel instances.
+    void createPanelWidgets();
+    /// Arrange the dock layout (Premiere Pro default arrangement).
+    void arrangeDockLayout();
+    /// Wire all playback controller signals (scrub, position, state, composite).
+    void wirePlaybackSignals();
+    /// Register keyboard shortcuts (Home/End, I/O, Ctrl+X/C/V, etc.).
+    void registerKeyboardShortcuts();
 
     /// Flush the composite result LRU cache (call when transforms change).
     void invalidateCompositeCache();

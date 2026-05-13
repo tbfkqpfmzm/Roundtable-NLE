@@ -108,6 +108,8 @@ void ProjectPanel::rebuildResGrid(uint32_t arW, uint32_t arH)
         btn->setChecked(i == 0);
         btn->setCursor(Qt::PointingHandCursor);
         btn->setStyleSheet(chipStyle());
+        btn->setProperty("resW", presets[i].w);
+        btn->setProperty("resH", presets[i].h);
         m_resGroup->addButton(btn, i);
         grid->addWidget(btn, i / 2, i % 2);
     }

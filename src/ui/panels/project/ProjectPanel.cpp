@@ -122,10 +122,10 @@ uint32_t ProjectPanel::customResWidth()  const
     if (m_resGroup) {
         auto* checked = m_resGroup->checkedButton();
         if (checked) {
-            QString txt = checked->text();
-            int xIdx = txt.indexOf(QChar(0x00D7));
-            if (xIdx > 0)
-                return txt.left(xIdx).toUInt();
+            bool ok = false;
+            uint32_t w = checked->property("resW").toUInt(&ok);
+            if (ok && w > 0)
+                return w;
         }
     }
     return 1920;
@@ -138,18 +138,10 @@ uint32_t ProjectPanel::customResHeight() const
     if (m_resGroup) {
         auto* checked = m_resGroup->checkedButton();
         if (checked) {
-            QString txt = checked->text();
-            int xIdx = txt.indexOf(QChar(0x00D7));
-            if (xIdx > 0) {
-                QString right = txt.mid(xIdx + 1);
-                for (int i = 0; i < right.size(); ++i) {
-                    if (right[i].isLetter() && !right[i].isDigit()) {
-                        right = right.left(i);
-                        break;
-                    }
-                }
-                return right.toUInt();
-            }
+            bool ok = false;
+            uint32_t h = checked->property("resH").toUInt(&ok);
+            if (ok && h > 0)
+                return h;
         }
     }
     return 1080;

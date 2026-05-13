@@ -88,6 +88,7 @@ void TimelineWorkspace::wirePanelSignals()
     m_meterTimer = new QTimer(this);
     m_meterTimer->setInterval(33); // ~30 Hz
     connect(m_meterTimer, &QTimer::timeout, this, [this]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         if (!m_audioEngine || !m_timelineVUMeter) return;
         auto state = m_audioEngine->transportState();
         if (state != TransportState::Playing && state != TransportState::Scrubbing) {
@@ -129,6 +130,7 @@ void TimelineWorkspace::wirePanelSignals()
     // =====================================================================
     if (m_effectsPanel && m_effectControlsPanel) {
         auto refreshAfterEffectChange = [this]() {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (m_effectControlsPanel) m_effectControlsPanel->refresh();
             invalidateCompositeCache();
             if (m_programMonitor) m_programMonitor->requestRefresh();

@@ -49,6 +49,16 @@ CharactersPanel::CharactersPanel(QWidget* parent)
     buildUI();
 }
 
+CharactersPanel::~CharactersPanel()
+{
+    m_destroying.store(true, std::memory_order_release);
+
+    // Stop the search debounce timer — prevents it firing during destruction
+    if (m_searchDebounce) {
+        m_searchDebounce->stop();
+    }
+}
+
 QTreeWidget* CharactersPanel::treeWidget() const noexcept
 {
     return m_tree;
@@ -94,9 +104,9 @@ void CharactersPanel::buildUI()
     m_searchDebounce = new QTimer(this);
     m_searchDebounce->setSingleShot(true);
     m_searchDebounce->setInterval(200);
-    connect(m_searchDebounce, &QTimer::timeout, this, [this]() { refresh(); });
+    connect(m_searchDebounce, &QTimer::timeout, this, [this]() { if (m_destroying.load(std::memory_order_acquire)) return; refresh(); });
     connect(m_searchEdit, &QLineEdit::textChanged,
-            this, [this]() { m_searchDebounce->start(); });
+            this, [this]() { if (m_destroying.load(std::memory_order_acquire)) return; m_searchDebounce->start(); });
 
     // Small toolbar button style
     QString tbStyle = QStringLiteral(
@@ -119,7 +129,7 @@ void CharactersPanel::buildUI()
             .arg(Theme::hex(tc.accent)));
     toolbarLayout->addWidget(m_btnSortAZ);
     connect(m_btnSortAZ, &QToolButton::toggled,
-            this, [this]() { refresh(); });
+            this, [this]() { if (m_destroying.load(std::memory_order_acquire)) return; refresh(); });
 
     // Refresh button
     m_btnRefresh = new QToolButton(toolbar);
@@ -129,7 +139,7 @@ void CharactersPanel::buildUI()
     m_btnRefresh->setStyleSheet(tbStyle);
     toolbarLayout->addWidget(m_btnRefresh);
     connect(m_btnRefresh, &QToolButton::clicked,
-            this, [this]() { refresh(); });
+            this, [this]() { if (m_destroying.load(std::memory_order_acquire)) return; refresh(); });
 
     lay->addWidget(toolbar);
 
@@ -328,6 +338,7 @@ void CharactersPanel::refresh()
     disconnect(m_tree, &QTreeWidget::itemExpanded, nullptr, nullptr);
     connect(m_tree, &QTreeWidget::itemExpanded,
             this, [this](QTreeWidgetItem* item) {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         // Check if this item has the stance metadata
         QString key = item->data(0, Qt::UserRole).toString();
         if (key.isEmpty()) return;

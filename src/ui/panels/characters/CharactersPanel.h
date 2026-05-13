@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <QWidget>
 
 class QLabel;
@@ -34,7 +35,7 @@ class CharactersPanel : public QWidget
 
 public:
     explicit CharactersPanel(QWidget* parent = nullptr);
-    ~CharactersPanel() override = default;
+    ~CharactersPanel() override;
 
     void setModelManager(ModelManager* mgr)          { m_modelManager = mgr; }
     void setAnimVideoCache(AnimationVideoCache* cache){ m_animVideoCache = cache; }
@@ -67,6 +68,8 @@ private:
     QTimer*                 m_searchDebounce{nullptr};
     QToolButton*            m_btnRefresh{nullptr};
     QToolButton*            m_btnSortAZ{nullptr};
+
+    std::atomic<bool> m_destroying{false};
 };
 
 } // namespace rt

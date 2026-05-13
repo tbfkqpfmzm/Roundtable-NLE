@@ -74,6 +74,7 @@ void MainWindow::buildFileMenu(QMenuBar* menuBar)
     menu->addSeparator();
 
     menu->addAction("Import Media...", this, [this]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         if (auto* bin = projectBin())
             bin->importFiles();
     });
@@ -86,6 +87,7 @@ void MainWindow::buildFileMenu(QMenuBar* menuBar)
     menu->addSeparator();
 
     menu->addAction("Link Media...", this, [this]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         if (!m_timelineWorkspace || !m_timelineWorkspace->project()) return;
         auto* assetDb = m_timelineWorkspace->project()->assets();
         RelinkMediaDialog dlg(assetDb, m_mediaPool, this);
@@ -124,6 +126,7 @@ void MainWindow::buildEditMenu(QMenuBar* menuBar)
 
     // Dynamic undo/redo text — update when the Edit menu is about to show
     connect(menu, &QMenu::aboutToShow, this, [this]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         if (m_commandStack) {
             auto ud = m_commandStack->undoDescription();
             m_undoAct->setText(ud.empty() ? tr("&Undo")
@@ -159,6 +162,7 @@ void MainWindow::buildEditMenu(QMenuBar* menuBar)
     menu->addSeparator();
 
     menu->addAction("Project &Settings...", this, [this]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         if (!m_timelineWorkspace || !m_timelineWorkspace->project()) return;
         auto& settings = m_timelineWorkspace->project()->settings();
         ProjectSettingsDialog dlg(settings, this);
@@ -174,6 +178,7 @@ void MainWindow::buildEditMenu(QMenuBar* menuBar)
     });
 
     menu->addAction("Keyboard &Shortcuts...", this, [this]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         if (!m_shortcutManager) return;
         KeyboardShortcutsDialog dlg(*m_shortcutManager, this);
         dlg.exec();
@@ -182,6 +187,7 @@ void MainWindow::buildEditMenu(QMenuBar* menuBar)
     menu->addSeparator();
 
     menu->addAction("&Preferences...", this, [this]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         std::vector<AudioDeviceInfo> devices;
         if (m_audioEngine) devices = m_audioEngine->enumerateDevices();
         AppPreferencesDialog dlg(this, devices);
@@ -229,11 +235,11 @@ void MainWindow::buildViewMenu(QMenuBar* menuBar)
 
     // Page navigation shortcuts
     auto* pagesMenu = menu->addMenu("&Pages");
-    pagesMenu->addAction("Projects",   this, [this]() { setCurrentPage(Page::Projects); });
-    pagesMenu->addAction("Characters", this, [this]() { setCurrentPage(Page::Characters); });
-    pagesMenu->addAction("Audio",      this, [this]() { setCurrentPage(Page::Audio); });
-    pagesMenu->addAction("Timeline",   this, [this]() { setCurrentPage(Page::Timeline); });
-    pagesMenu->addAction("Export",     this, [this]() { setCurrentPage(Page::Export); });
+    pagesMenu->addAction("Projects",   this, [this]() { if (m_destroying.load(std::memory_order_acquire)) return; setCurrentPage(Page::Projects); });
+    pagesMenu->addAction("Characters", this, [this]() { if (m_destroying.load(std::memory_order_acquire)) return; setCurrentPage(Page::Characters); });
+    pagesMenu->addAction("Audio",      this, [this]() { if (m_destroying.load(std::memory_order_acquire)) return; setCurrentPage(Page::Audio); });
+    pagesMenu->addAction("Timeline",   this, [this]() { if (m_destroying.load(std::memory_order_acquire)) return; setCurrentPage(Page::Timeline); });
+    pagesMenu->addAction("Export",     this, [this]() { if (m_destroying.load(std::memory_order_acquire)) return; setCurrentPage(Page::Export); });
 
     menu->addSeparator();
 
@@ -259,18 +265,21 @@ void MainWindow::buildTimelineMenu(QMenuBar* menuBar)
     {
         auto* act = menu->addAction("Set In Point\tI");
         connect(act, &QAction::triggered, this, [this]() {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (m_timelineWorkspace) m_timelineWorkspace->setInPoint();
         });
     }
     {
         auto* act = menu->addAction("Set Out Point\tO");
         connect(act, &QAction::triggered, this, [this]() {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (m_timelineWorkspace) m_timelineWorkspace->setOutPoint();
         });
     }
     {
         auto* act = menu->addAction("Clear In/Out\tCtrl+Shift+X");
         connect(act, &QAction::triggered, this, [this]() {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (m_timelineWorkspace) m_timelineWorkspace->clearInOut();
         });
     }
@@ -293,6 +302,7 @@ void MainWindow::buildAudioMenu(QMenuBar* menuBar)
     auto* menu = menuBar->addMenu("&Audio");
 
     menu->addAction("Go to Audio Sync", this, [this]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         setCurrentPage(Page::Audio);
     });
     menu->addSeparator();
@@ -307,6 +317,7 @@ void MainWindow::buildWindowMenu(QMenuBar* menuBar)
     // Populate dynamically each time the menu is shown so that checkmarks
     // reflect the current visibility of each dock panel.
     connect(m_windowMenu, &QMenu::aboutToShow, this, [this]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         m_windowMenu->clear();
 
         // ── Workspaces section ──────────────────────────────────────────
@@ -347,6 +358,7 @@ void MainWindow::buildWindowMenu(QMenuBar* menuBar)
         for (const auto& bp : builtins) {
             auto* act = wsMenu->addAction(bp.name, this,
                 [this, visible = bp.visible, raiseTab = bp.raiseTab]() {
+                    if (m_destroying.load(std::memory_order_acquire)) return;
                     if (!m_timelineWorkspace) return;
                     setCurrentPage(Page::Timeline);
                     const auto& docks = m_timelineWorkspace->dockWidgets();
@@ -371,6 +383,7 @@ void MainWindow::buildWindowMenu(QMenuBar* menuBar)
 
         // Reset to Default Layout (stock Premiere Pro-like arrangement)
         wsMenu->addAction("Reset to Default Layout", this, [this]() {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (!m_timelineWorkspace) return;
             setCurrentPage(Page::Timeline);
             m_timelineWorkspace->resetToDefaultDockLayout();
@@ -379,6 +392,7 @@ void MainWindow::buildWindowMenu(QMenuBar* menuBar)
 
         // Reset to Saved Layout
         wsMenu->addAction("Reset to Saved Layout", this, [this]() {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (!m_timelineWorkspace) return;
             auto s = rt::appSettings();
             s.beginGroup("workspace/last_session");
@@ -394,6 +408,7 @@ void MainWindow::buildWindowMenu(QMenuBar* menuBar)
 
         // ── Refresh Program Monitor ────────────────────────────────────
         wsMenu->addAction("Refresh Program Monitor", this, [this]() {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (!m_timelineWorkspace) return;
             setCurrentPage(Page::Timeline);
             if (auto* pm = m_timelineWorkspace->programMonitor()) {
@@ -408,6 +423,7 @@ void MainWindow::buildWindowMenu(QMenuBar* menuBar)
 
         // Save Workspace as...
         wsMenu->addAction("Save Workspace as...", this, [this]() {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             bool ok = false;
             QString name = QInputDialog::getText(
                 this, "Save Workspace", "Workspace name:",
@@ -433,6 +449,7 @@ void MainWindow::buildWindowMenu(QMenuBar* menuBar)
                 for (const QString& preset : presets) {
                     QMenu* presetMenu = wsMenu->addMenu(preset);
                     presetMenu->addAction("Load", this, [this, preset]() {
+                        if (m_destroying.load(std::memory_order_acquire)) return;
                         auto s = rt::appSettings();
                         s.beginGroup("WorkspacePresets/" + preset);
                         m_timelineWorkspace->restoreDockLayout(s);
@@ -444,6 +461,7 @@ void MainWindow::buildWindowMenu(QMenuBar* menuBar)
                             "Workspace '" + preset + "' loaded", 3000);
                     });
                     presetMenu->addAction("Save current", this, [this, preset]() {
+                        if (m_destroying.load(std::memory_order_acquire)) return;
                         auto s = rt::appSettings();
                         s.beginGroup("WorkspacePresets/" + preset);
                         m_timelineWorkspace->saveDockLayout(s);
@@ -452,6 +470,7 @@ void MainWindow::buildWindowMenu(QMenuBar* menuBar)
                             "Workspace '" + preset + "' updated", 3000);
                     });
                     presetMenu->addAction("Delete", this, [this, preset]() {
+                        if (m_destroying.load(std::memory_order_acquire)) return;
                         auto s = rt::appSettings();
                         s.remove("WorkspacePresets/" + preset);
                         statusBar()->showMessage(
@@ -521,6 +540,7 @@ void MainWindow::buildWindowMenu(QMenuBar* menuBar)
 
                 connect(act, &QAction::triggered, this,
                     [this, dock](bool checked) {
+                        if (m_destroying.load(std::memory_order_acquire)) return;
                         if (checked) {
                             setCurrentPage(Page::Timeline);
                             dock->show();

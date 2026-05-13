@@ -321,8 +321,12 @@ void MediaDragTreeWidget::startDrag(Qt::DropActions /*supportedActions*/)
         spdlog::info("ProjectBinDrag: start bin drag ({} selected)", items.size());
         const Qt::DropAction result = drag->exec(Qt::MoveAction | Qt::CopyAction, Qt::MoveAction);
         spdlog::info("ProjectBinDrag: bin drag finished with action {}", static_cast<int>(result));
-        restoreDragSelection(this, items, m_pressItem ? m_pressItem : currentItem());
+        // Clear stale item pointers — drag->exec() entered a nested event loop
+        // during which the tree may have been cleared, invalidating all pointers.
+        m_pressItem = nullptr;
+        m_renameCandidate = nullptr;
         m_dragItemsSnapshot.clear();
+        restoreDragSelection(this, items, currentItem());
         return;
     }
 
@@ -424,9 +428,13 @@ void MediaDragTreeWidget::startDrag(Qt::DropActions /*supportedActions*/)
     drag->setHotSpot(QPoint(12, h / 2));
     spdlog::info("ProjectBinDrag: start media drag ({} selected)", mediaItems.size());
     const Qt::DropAction result = drag->exec(Qt::MoveAction | Qt::CopyAction, Qt::MoveAction);
-    restoreDragSelection(this, items, m_pressItem ? m_pressItem : currentItem());
-    spdlog::info("ProjectBinDrag: media drag finished with action {}", static_cast<int>(result));
+    // Clear stale item pointers — drag->exec() entered a nested event loop
+    // during which the tree may have been cleared, invalidating all pointers.
+    m_pressItem = nullptr;
+    m_renameCandidate = nullptr;
     m_dragItemsSnapshot.clear();
+    restoreDragSelection(this, items, currentItem());
+    spdlog::info("ProjectBinDrag: media drag finished with action {}", static_cast<int>(result));
 }
 
 } // namespace rt

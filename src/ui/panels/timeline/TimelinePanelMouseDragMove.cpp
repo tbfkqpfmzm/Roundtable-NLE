@@ -1,0 +1,585 @@
+/*
+ * TimelinePanelMouseDragMove.cpp — mouseMoveEvent extracted from
+ * TimelinePanelMouseDrag.cpp.
+ */
+
+#include "panels/timeline/TimelinePanel.h"
+#include "panels/timeline/TimelinePanelInternal.h"
+#include "widgets/TimelineTrackWidget.h"
+
+#include "timeline/Timeline.h"
+#include "timeline/Track.h"
+#include "timeline/Clip.h"
+#include "timeline/EditOperations.h"
+#include "timeline/Transition.h"
+#include "command/commands/ClipCommands.h"
+
+#include <QApplication>
+#include <QMouseEvent>
+#include <QTimer>
+#include <QRubberBand>
+
+#include <spdlog/spdlog.h>
+#include <algorithm>
+#include <limits>
+
+namespace rt {
+
+void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
+{
+    if (!m_timeline)
+    {
+        QWidget::mouseMoveEvent(event);
+        return;
+    }
+
+    // ── Hover cursor feedback when not dragging ─────────────────────────
+    if (m_dragMode == DragMode::None)
+    {
+        if (m_activeTool == EditTool::Razor)
+        {
+            // Track razor position for the red line indicator
+            double px = event->position().x() - headerWidth();
+            int64_t tick = m_layoutEngine.pixelXToTime(px);
+            size_t ti = hitTestTrack(event->position().y());
+
+            // Check if cursor is over a clip in this track
+            bool overClip = false;
+            if (ti < m_timeline->trackCount()) {
+                Track* trk = m_timeline->track(ti);
+                for (size_t ci = 0; ci < trk->clipCount(); ++ci) {
+                    const Clip* c = trk->clip(ci);
+                    if (tick > c->timelineIn() && tick < c->timelineOut()) {
+                        overClip = true;
+                        break;
+                    }
+                }
+            }
+
+            // Set razor tick on the hovered track widget, clear others
+            for (auto tw : m_trackWidgets)
+                tw->setRazorTick(overClip && tw->trackIndex() == ti ? tick : -1);
+
+            QWidget::mouseMoveEvent(event);
+            return;
+        }
+        if (m_activeTool == EditTool::Selection)
+        {
+            // Check for transition-edge hover first
+            bool hoveringTransEdge = false;
+            {
+                double hpx = event->position().x() - headerWidth();
+                size_t hti = hitTestTrack(event->position().y());
+                if (hti < m_timeline->trackCount()) {
+                    Track* hTrack = m_timeline->track(hti);
+                    constexpr double kHandleThreshold = 8.0;
+                    for (size_t trI = 0; trI < hTrack->transitionCount(); ++trI) {
+                        const Transition* trans = hTrack->transition(trI);
+                        if (!trans) continue;
+                        int64_t tStart, tEnd;
+                        trans->getRange(tStart, tEnd);
+                        double pxStart = m_layoutEngine.timeToPixelX(tStart);
+                        double pxEnd   = m_layoutEngine.timeToPixelX(tEnd);
+                        bool canStart = (trans->rightClipId == 0)
+                                     || (trans->leftClipId != 0 && trans->rightClipId != 0);
+                        bool canEnd   = (trans->leftClipId == 0)
+                                     || (trans->leftClipId != 0 && trans->rightClipId != 0);
+                        if ((canStart && std::abs(hpx - pxStart) < kHandleThreshold) ||
+                            (canEnd   && std::abs(hpx - pxEnd)   < kHandleThreshold)) {
+                            setCursor(Qt::SizeHorCursor);
+                            hoveringTransEdge = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!hoveringTransEdge) {
+            auto hitRef = hitTestClip(event->position());
+            if (hitRef)
+            {
+                // Check edge proximity for trim cursor
+                Track* track = m_timeline->track(hitRef->trackIndex);
+                size_t idx = track ? track->findClipIndexById(hitRef->clipId) : SIZE_MAX;
+                if (idx < track->clipCount())
+                {
+                    const Clip* clip = track->clip(idx);
+                    double px = event->position().x() - headerWidth();
+                    double clipLeft  = m_layoutEngine.timeToPixelX(clip->timelineIn());
+                    double clipRight = m_layoutEngine.timeToPixelX(clip->timelineOut());
+
+                    constexpr double kEdgeThreshold = 6.0;
+                    bool nearHead = std::abs(px - clipLeft)  < kEdgeThreshold;
+                    bool nearTail = std::abs(px - clipRight) < kEdgeThreshold;
+                    if (nearHead || nearTail)
+                    {
+                        setCursor(Qt::SizeHorCursor);
+                        // Highlight the hovered edge on the track widget
+                        int64_t edgeTick = nearHead ? clip->timelineIn() : clip->timelineOut();
+                        for (auto tw : m_trackWidgets)
+                            tw->setHoverEdgeTick(hitRef->trackIndex == tw->trackIndex() ? edgeTick : -1);
+                    }
+                    else
+                    {
+                        setCursor(Qt::ArrowCursor);
+                        for (auto tw : m_trackWidgets)
+                            tw->setHoverEdgeTick(-1);
+                    }
+                }
+                else
+                {
+                    setCursor(Qt::ArrowCursor);
+                    for (auto tw : m_trackWidgets)
+                        tw->setHoverEdgeTick(-1);
+                }
+            }
+            else
+            {
+                setCursor(Qt::ArrowCursor);
+                for (auto tw : m_trackWidgets)
+                    tw->setHoverEdgeTick(-1);
+            }
+            } // end if (!hoveringTransEdge)
+        }
+        QWidget::mouseMoveEvent(event);
+        return;
+    }
+
+    QPointF pos = event->position();
+    double deltaX = pos.x() - m_dragStart.x();
+    double pps = m_layoutEngine.pixelsPerSecond();
+    int64_t tickDelta = static_cast<int64_t>(deltaX / pps * 48000.0);
+
+    switch (m_dragMode)
+    {
+    case DragMode::ClipMove:
+    {
+        int64_t newIn = m_dragOriginalIn + tickDelta;
+        if (newIn < 0) newIn = 0;
+
+        // Snap the primary dragged clip (both head and tail edges,
+        // like Premiere Pro, so the right edge also snaps to existing
+        // clip boundaries — prevents overlap "spill over").
+        int64_t newOut = newIn + m_dragOriginalDuration;
+        auto result = m_snapEngine.snapPair(newIn, newOut);
+        if (result.didSnap) {
+            newIn = result.snappedTick;
+            // Show indicator at whichever edge actually snapped
+            auto headCheck = m_snapEngine.snap(newIn);
+            if (headCheck.didSnap && headCheck.delta == 0)
+                setSnapIndicator(newIn);  // head edge snapped
+            else
+                setSnapIndicator(newIn + m_dragOriginalDuration);  // tail edge
+        } else {
+            setSnapIndicator(-1);
+        }
+
+        // Compute the actual delta applied to the primary clip
+        int64_t actualDelta = newIn - m_dragOriginalIn;
+
+        // Detect cross-track target
+        size_t targetTrack = hitTestTrack(pos.y());
+        if (targetTrack < m_timeline->trackCount()) {
+            m_dragTargetTrack = targetTrack;
+            m_ghostTrackVisible = false;
+            if (m_ghostOverlay) m_ghostOverlay->hide();
+        } else if (!m_trackWidgets.empty()) {
+            // ── Ghost track detection (Premiere Pro-style) ──────────────
+            // Cursor is OUTSIDE any existing track.
+            auto firstTw = m_trackWidgets.front();
+            auto lastTw  = m_trackWidgets.back();
+            QPoint firstTop = firstTw->mapTo(this, QPoint(0, 0));
+            QPoint lastBot  = lastTw->mapTo(this, QPoint(0, lastTw->height()));
+
+            // Determine dragged clip's track type
+            TrackType dragType = TrackType::Video;
+            if (!m_dragSelectedClips.empty()) {
+                Track* srcTr = m_timeline->track(m_dragSelectedClips[0].ref.trackIndex);
+                if (srcTr) dragType = srcTr->type();
+            }
+
+            // Find first/last track indices of each type
+            size_t firstVideoIdx = SIZE_MAX, lastVideoIdx = SIZE_MAX;
+            size_t firstAudioIdx = SIZE_MAX, lastAudioIdx = SIZE_MAX;
+            for (size_t i = 0; i < m_timeline->trackCount(); ++i) {
+                if (m_timeline->track(i)->type() == TrackType::Video) {
+                    if (firstVideoIdx == SIZE_MAX) firstVideoIdx = i;
+                    lastVideoIdx = i;
+                } else {
+                    if (firstAudioIdx == SIZE_MAX) firstAudioIdx = i;
+                    lastAudioIdx = i;
+                }
+            }
+
+            // Scroll area X position
+            QPoint scrollOrig = m_verticalScroll->mapTo(this, QPoint(0, 0));
+            int ghostX = scrollOrig.x();
+            int ghostW = m_verticalScroll->width();
+
+            if (dragType == TrackType::Video && pos.y() < firstTop.y() &&
+                firstVideoIdx < m_trackWidgets.size()) {
+                m_ghostTrackVisible = true;
+                m_ghostTrackIsAbove = true;
+                m_ghostTrackHeight = firstTw->height();
+                m_ghostTrackY = firstTop.y() - m_ghostTrackHeight;
+                if (m_ghostOverlay) {
+                    m_ghostOverlay->isAbove = true;
+                    m_ghostOverlay->setGeometry(ghostX, m_ghostTrackY, ghostW, m_ghostTrackHeight);
+                    m_ghostOverlay->raise();
+                    m_ghostOverlay->show();
+                    m_ghostOverlay->update();
+                }
+            } else if (dragType == TrackType::Audio && pos.y() > lastBot.y() &&
+                       lastAudioIdx < m_trackWidgets.size()) {
+                m_ghostTrackVisible = true;
+                m_ghostTrackIsAbove = false;
+                m_ghostTrackHeight = lastTw->height();
+                m_ghostTrackY = lastBot.y();
+                if (m_ghostOverlay) {
+                    m_ghostOverlay->isAbove = false;
+                    m_ghostOverlay->setGeometry(ghostX, m_ghostTrackY, ghostW, m_ghostTrackHeight);
+                    m_ghostOverlay->raise();
+                    m_ghostOverlay->show();
+                    m_ghostOverlay->update();
+                }
+            } else {
+                m_ghostTrackVisible = false;
+                if (m_ghostOverlay) m_ghostOverlay->hide();
+            }
+        }
+
+        // Compute per-clip cross-track delta from the primary clip.
+        int trackDeltaLive = 0;
+        if (m_dragTargetTrack != SIZE_MAX && !m_dragSelectedClips.empty()) {
+            trackDeltaLive = static_cast<int>(m_dragTargetTrack)
+                           - static_cast<int>(m_dragOriginalTrack);
+        }
+
+        // ── Y deadzone for cross-track shifts ───────────────────────────
+        constexpr double kTrackShiftDeadzone = 18.0;
+        if (std::abs(pos.y() - m_dragStart.y()) < kTrackShiftDeadzone)
+            trackDeltaLive = 0;
+
+        // ── Group-safety clamp ──────────────────────────────────────────
+        if (trackDeltaLive != 0) {
+            size_t minOrig = SIZE_MAX, maxOrig = 0;
+            for (const auto& dcs : m_dragSelectedClips) {
+                minOrig = std::min(minOrig, dcs.originalTrack);
+                maxOrig = std::max(maxOrig, dcs.originalTrack);
+            }
+            if (minOrig != SIZE_MAX) {
+                const int lastTrack = static_cast<int>(m_timeline->trackCount()) - 1;
+                const int minAllowed = -static_cast<int>(minOrig);
+                const int maxAllowed = lastTrack - static_cast<int>(maxOrig);
+                trackDeltaLive = std::clamp(trackDeltaLive, minAllowed, maxAllowed);
+            }
+        }
+
+        // Move clips DIRECTLY in the data model (no commands) for live visual feedback.
+        for (auto& dcs : m_dragSelectedClips) {
+            int64_t clipNewIn = std::max<int64_t>(0, dcs.originalIn + actualDelta);
+
+            int dst = static_cast<int>(dcs.originalTrack) + trackDeltaLive;
+            size_t dstTrack = static_cast<size_t>(dst);
+
+            Track* srcTr = m_timeline->track(dcs.ref.trackIndex);
+            if (!srcTr) continue;
+            Track* dstTr = m_timeline->track(dstTrack);
+            if (!dstTr || dstTr->type() != srcTr->type())
+                dstTrack = dcs.ref.trackIndex;
+
+            size_t curTrack = dcs.ref.trackIndex;
+
+            if (dstTrack != curTrack) {
+                Track* curTr = m_timeline->track(curTrack);
+                size_t idx = curTr->findClipIndexById(dcs.ref.clipId);
+                if (idx >= curTr->clipCount()) continue;
+                auto clipPtr = curTr->removeClip(idx);
+                clipPtr->setTimelineIn(clipNewIn);
+                dstTr->addClip(std::move(clipPtr));
+                dcs.ref.trackIndex = dstTrack;
+            } else {
+                Track* tr = m_timeline->track(curTrack);
+                size_t idx = tr->findClipIndexById(dcs.ref.clipId);
+                if (idx >= tr->clipCount()) continue;
+                tr->moveClip(idx, clipNewIn);
+            }
+        }
+        onScrollChanged();
+
+        // Sync selection + drag state
+        {
+            std::vector<std::vector<size_t>> perTrack(m_trackWidgets.size());
+            for (const auto& dcs : m_dragSelectedClips) {
+                size_t ti = dcs.ref.trackIndex;
+                if (ti < m_trackWidgets.size()) {
+                    Track* trk = m_timeline->track(ti);
+                    if (trk) {
+                        size_t idx = trk->findClipIndexById(dcs.ref.clipId);
+                        if (idx < trk->clipCount())
+                            perTrack[ti].push_back(idx);
+                    }
+                }
+            }
+            for (size_t ti = 0; ti < m_trackWidgets.size(); ++ti) {
+                m_trackWidgets[ti]->setSelectedClips(perTrack[ti]);
+                m_trackWidgets[ti]->setDraggedClips(perTrack[ti]);
+            }
+        }
+        break;
+    }
+    case DragMode::ClipTrimHead:
+    {
+        int64_t newHead = m_dragOriginalIn + tickDelta;
+        auto result = m_snapEngine.snap(newHead);
+        if (result.didSnap) {
+            newHead = result.snappedTick;
+            setSnapIndicator(result.snappedTick);
+        } else {
+            setSnapIndicator(-1);
+        }
+
+        if (Track* tr = m_timeline->track(m_dragClipRef.trackIndex)) {
+            const int64_t origTail = m_dragOriginalIn + m_dragOriginalDuration;
+            int64_t leftLimit = std::numeric_limits<int64_t>::min();
+            for (size_t ci = 0; ci < tr->clipCount(); ++ci) {
+                const Clip* other = tr->clip(ci);
+                if (!other || other->id() == m_dragClipRef.clipId) continue;
+                if (other->timelineOut() <= m_dragOriginalIn &&
+                    other->timelineOut() > leftLimit)
+                    leftLimit = other->timelineOut();
+            }
+            if (newHead < leftLimit) newHead = leftLimit;
+            if (newHead >= origTail) newHead = origTail - 1;
+        }
+
+        auto cmd = EditOperations::trimClip(*m_timeline, m_dragClipRef.trackIndex,
+                                            m_dragClipRef.clipId,
+                                            ClipEdge::Head, newHead);
+        executeCommand(std::move(cmd));
+        for (auto tw : m_trackWidgets)
+            tw->setHoverEdgeTick(tw->trackIndex() == m_dragClipRef.trackIndex ? newHead : -1);
+        onScrollChanged();
+        break;
+    }
+    case DragMode::ClipTrimTail:
+    {
+        int64_t newTail = m_dragOriginalIn + m_dragOriginalDuration + tickDelta;
+        auto result = m_snapEngine.snap(newTail);
+        if (result.didSnap) {
+            newTail = result.snappedTick;
+            setSnapIndicator(result.snappedTick);
+        } else {
+            setSnapIndicator(-1);
+        }
+
+        if (Track* tr = m_timeline->track(m_dragClipRef.trackIndex)) {
+            const int64_t origTail = m_dragOriginalIn + m_dragOriginalDuration;
+            int64_t rightLimit = std::numeric_limits<int64_t>::max();
+            for (size_t ci = 0; ci < tr->clipCount(); ++ci) {
+                const Clip* other = tr->clip(ci);
+                if (!other || other->id() == m_dragClipRef.clipId) continue;
+                if (other->timelineIn() >= origTail &&
+                    other->timelineIn() < rightLimit)
+                    rightLimit = other->timelineIn();
+            }
+            if (newTail > rightLimit) newTail = rightLimit;
+            if (newTail <= m_dragOriginalIn) newTail = m_dragOriginalIn + 1;
+        }
+
+        auto cmd = EditOperations::trimClip(*m_timeline, m_dragClipRef.trackIndex,
+                                            m_dragClipRef.clipId,
+                                            ClipEdge::Tail, newTail);
+        executeCommand(std::move(cmd));
+        for (auto tw : m_trackWidgets)
+            tw->setHoverEdgeTick(tw->trackIndex() == m_dragClipRef.trackIndex ? newTail : -1);
+        onScrollChanged();
+        break;
+    }
+    case DragMode::SlipTool:
+    {
+        auto cmd = EditOperations::slipClip(*m_timeline, m_dragClipRef.trackIndex,
+                                            m_dragClipRef.clipId, tickDelta);
+        executeCommand(std::move(cmd));
+        onScrollChanged();
+        break;
+    }
+    case DragMode::SlideTool:
+    {
+        auto cmd = EditOperations::slideClip(*m_timeline, m_dragClipRef.trackIndex,
+                                            m_dragClipRef.clipId, tickDelta);
+        executeCommand(std::move(cmd));
+        onScrollChanged();
+        break;
+    }
+    case DragMode::RollingEdit:
+    {
+        int64_t newEditPoint = m_rollOriginalEditPoint + tickDelta;
+        auto result = m_snapEngine.snap(newEditPoint);
+        if (result.didSnap) {
+            newEditPoint = result.snappedTick;
+            setSnapIndicator(result.snappedTick);
+        } else {
+            setSnapIndicator(-1);
+        }
+
+        Track* rollTrack = m_timeline->track(m_rollTrackIndex);
+        if (rollTrack) {
+            size_t li = rollTrack->findClipIndexById(m_rollLeftClipId);
+            size_t ri = rollTrack->findClipIndexById(m_rollRightClipId);
+            if (li < rollTrack->clipCount() && ri < rollTrack->clipCount()) {
+                constexpr int64_t kMinDur = 2000;
+                int64_t leftNewDur = newEditPoint - m_rollLeftOrigIn;
+                if (leftNewDur < kMinDur) {
+                    newEditPoint = m_rollLeftOrigIn + kMinDur;
+                    leftNewDur = kMinDur;
+                }
+                int64_t rightEnd = m_rollRightOrigIn + m_rollRightOrigDur;
+                int64_t rightNewDur = rightEnd - newEditPoint;
+                if (rightNewDur < kMinDur) {
+                    newEditPoint = rightEnd - kMinDur;
+                    leftNewDur = newEditPoint - m_rollLeftOrigIn;
+                    rightNewDur = kMinDur;
+                }
+                int64_t rightSrcDelta = newEditPoint - m_rollRightOrigIn;
+
+                Clip* lc = rollTrack->clip(li);
+                Clip* rc = rollTrack->clip(ri);
+                lc->setDuration(leftNewDur);
+                rc->setTimelineIn(newEditPoint);
+                rc->setDuration(rightNewDur);
+                rc->setSourceIn(m_rollRightOrigSrcIn + rightSrcDelta);
+            }
+        }
+        onScrollChanged();
+        break;
+    }
+    case DragMode::PendingMarquee:
+    {
+        QPointF delta = pos - m_dragStart;
+        if (delta.manhattanLength() < 5.0)
+            break;
+
+        const bool shiftHeld =
+            (QApplication::keyboardModifiers() & Qt::ShiftModifier);
+
+        if (shiftHeld) {
+            m_marqueeBaseSelection = m_selection.clips();
+        } else {
+            m_marqueeBaseSelection.clear();
+            m_selection.clear();
+            m_selectedTransitionTrack = SIZE_MAX;
+            m_selectedTransitionIndex = SIZE_MAX;
+            for (size_t w = 0; w < m_trackWidgets.size(); ++w)
+                m_trackWidgets[w]->setSelectedTransition(SIZE_MAX);
+            emit selectionChanged();
+        }
+        if (m_gapSelection.active) {
+            m_gapSelection.active = false;
+            for (size_t w = 0; w < m_trackWidgets.size(); ++w)
+                m_trackWidgets[w]->setGapHighlight(-1, -1);
+        }
+        m_dragMode = DragMode::MarqueeSelect;
+        [[fallthrough]];
+    }
+    case DragMode::MarqueeSelect:
+    {
+        m_marqueeEnd = pos;
+        m_marqueeLastMovePos = pos;
+
+        if (!m_marqueeScrollTimer) {
+            m_marqueeScrollTimer = new QTimer(this);
+            m_marqueeScrollTimer->setInterval(16);
+            connect(m_marqueeScrollTimer, &QTimer::timeout,
+                    this, [this]() {
+                if (m_dragMode != DragMode::MarqueeSelect) {
+                    m_marqueeScrollTimer->stop();
+                    return;
+                }
+                const int hdr = headerWidth();
+                constexpr int kEdge   = 40;
+                constexpr double kMaxV = 18.0;
+                double dx = 0.0;
+                const double cx = m_marqueeLastMovePos.x();
+                if (cx < hdr + kEdge)
+                    dx = -kMaxV * std::clamp(
+                        (hdr + kEdge - cx) / kEdge, 0.0, 1.0);
+                else if (cx > width() - kEdge)
+                    dx =  kMaxV * std::clamp(
+                        (cx - (width() - kEdge)) / kEdge, 0.0, 1.0);
+                if (dx == 0.0) return;
+                double oldScroll = m_layoutEngine.scrollX();
+                double newScroll = std::max(0.0, oldScroll + dx);
+                if (newScroll == oldScroll) return;
+                m_layoutEngine.setScrollX(newScroll);
+                m_dragStart.setX(m_dragStart.x() - (newScroll - oldScroll));
+                onScrollChanged();
+                refreshMarqueeSelection();
+            });
+        }
+        const int hdr = headerWidth();
+        constexpr int kEdge = 40;
+        const bool atEdge = (pos.x() < hdr + kEdge) ||
+                            (pos.x() > width() - kEdge);
+        if (atEdge && !m_marqueeScrollTimer->isActive())
+            m_marqueeScrollTimer->start();
+        else if (!atEdge && m_marqueeScrollTimer->isActive())
+            m_marqueeScrollTimer->stop();
+
+        if (!m_rubberBand)
+            m_rubberBand = new QRubberBand(QRubberBand::Rectangle, this);
+
+        const int rightLimit = width();
+        double rbX1 = std::clamp(m_dragStart.x(),
+                                 static_cast<double>(hdr),
+                                 static_cast<double>(rightLimit));
+        double rbX2 = std::clamp(pos.x(),
+                                 static_cast<double>(hdr),
+                                 static_cast<double>(rightLimit));
+        QRect marqueeRect = QRect(
+            QPoint(static_cast<int>(std::min(rbX1, rbX2)),
+                   static_cast<int>(std::min(m_dragStart.y(), pos.y()))),
+            QPoint(static_cast<int>(std::max(rbX1, rbX2)),
+                   static_cast<int>(std::max(m_dragStart.y(), pos.y()))));
+        m_rubberBand->setGeometry(marqueeRect);
+        m_rubberBand->show();
+
+        refreshMarqueeSelection();
+        update();
+        break;
+    }
+    case DragMode::TransitionTrim:
+    {
+        Track* track = m_timeline->track(m_transTrimTrackIndex);
+        if (track && m_transTrimIndex < track->transitionCount()) {
+            Transition t = *track->transition(m_transTrimIndex);
+            double px = pos.x() - headerWidth();
+            int64_t dragTick = m_layoutEngine.pixelXToTime(px);
+
+            constexpr int64_t kMinTransDur = 1600;
+            int64_t newDur = t.duration;
+
+            if (t.leftClipId == 0) {
+                newDur = std::max(kMinTransDur, dragTick - t.editPointTick);
+            } else if (t.rightClipId == 0) {
+                newDur = std::max(kMinTransDur, t.editPointTick - dragTick);
+            } else {
+                int64_t dist = std::abs(dragTick - t.editPointTick);
+                newDur = std::max(kMinTransDur, dist * 2);
+            }
+
+            t.duration = newDur;
+            track->setTransition(m_transTrimIndex, t);
+        }
+        onScrollChanged();
+        break;
+    }
+    default:
+        break;
+    }
+
+    event->accept();
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+
+} // namespace rt

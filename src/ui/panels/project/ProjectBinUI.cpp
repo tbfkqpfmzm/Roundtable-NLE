@@ -117,7 +117,10 @@ ProjectBin::ProjectBin(QWidget* parent)
     setupUI();
 }
 
-ProjectBin::~ProjectBin() = default;
+ProjectBin::~ProjectBin()
+{
+    m_destroying.store(true, std::memory_order_release);
+}
 
 // -----------------------------------------------------------------------------
 //  UI Setup (Premiere Pro style)

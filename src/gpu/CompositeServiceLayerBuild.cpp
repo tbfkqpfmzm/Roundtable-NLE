@@ -50,37 +50,8 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
     std::unique_lock<std::mutex>& lock,
     bool& gpuSpineUsedThisFrame)
 {
-    auto fetchMediaFrame = [&](MediaHandle handle, int64_t frameNumber,
-                               ResolutionTier tier) -> std::shared_ptr<CachedFrame> {
-        if (!m_mediaPool)
-            return nullptr;
-        // During export (forceFullRes), first try the cache via tryGetFrame
-        // — this sets the playhead + extends the interactive playback window
-        // (unlike getFrame with scrubMode=true which skips both).  If the
-        // exact frame IS cached, return it instantly.  Otherwise fall through
-        // to blocking getFrame with scrubMode=true which does inline decode
-        // via the scrub decoder (the !scrubMode path only returns stale
-        // frames without decoding — useless for export).  The playhead is
-        // already set by tryGetFrame, so the cache won't thrash-evict.
-        if (m_forceFullResolution.load()) {
-            auto frame = m_mediaPool->tryGetFrame(handle, frameNumber, tier);
-            if (frame && frame->frameNumber == frameNumber)
-                return frame;
-            return m_mediaPool->getFrame(handle, frameNumber, tier, true);
-        }
-        // Try non-blocking first (fast path for cached frames during playback).
-        auto frame = m_mediaPool->tryGetFrame(handle, frameNumber, tier);
-        if (frame)
-            return frame;
-        // During timeline scrub, avoid blocking decode (would hold the
-        // compositor mutex for 50-500ms, causing the program monitor to
-        // freeze on a stale m_lastGoodComposite).  The scrub settle loop
-        // will re-try next cycle when the prefetch has landed the frame.
-        if (scrubMode)
-            return nullptr;
-        // Fall back to blocking read (correct path for cold cache).
-        return m_mediaPool->getFrame(handle, frameNumber, tier, scrubMode);
-    };
+    // fetchMediaFrame lambda replaced by CompositeService::resolveMediaFrame()
+    // (extracted to CompositeServiceLayerBuildVideo.cpp for modularization).
 
     std::vector<LayerInfo> layers;
 
@@ -506,7 +477,7 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
                     }
                 }
 
-                frame = fetchMediaFrame(handle, frameNum, charVideoTier);
+                frame = resolveMediaFrame(handle, frameNum, charVideoTier, scrubMode);
 
                 // Packed-alpha unpack is now handled entirely by:
                 //   - GPU path: compositor shader isPacked UV split
@@ -650,8 +621,8 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
                             // they're composited at 1920Ãƒâ€”1080 and never need
                             // full resolution, even when paused. This avoids
                             // massive initial-render decode (7 chars Ãƒâ€” Full res).
-                            frame = fetchMediaFrame(animHandle, animFrame,
-                                                    ResolutionTier::Half);
+                            frame = resolveMediaFrame(animHandle, animFrame,
+                                                    ResolutionTier::Half, scrubMode);
                             if (frame) {
                                 // Packed-alpha unpack is now handled by:
                                 //   - GPU path: compositor shader isPacked UV split
@@ -961,8 +932,8 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
                             if (mInfo && mInfo->fps > 0.0) fps = mInfo->fps;
                             int64_t frameNum = static_cast<int64_t>(ticksToSeconds(srcTick) * fps);
                             if (mInfo && mInfo->frameCount <= 1) frameNum = 0;
-                            frame = fetchMediaFrame(fb.handle, frameNum,
-                                                    videoTier);
+                            frame = resolveMediaFrame(fb.handle, frameNum,
+                                                    videoTier, scrubMode);
                         }
                     } else if (playbackNonBlocking && !m_forceFullResolution.load() && !fb.videoPath.empty()) {
                         // Spine video fallback async open

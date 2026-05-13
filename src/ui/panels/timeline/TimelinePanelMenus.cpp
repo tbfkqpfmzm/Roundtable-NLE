@@ -439,6 +439,7 @@ void TimelinePanel::showClipContextMenu(const QPointF& globalPos, const ClipRef&
                     [this, progress, pollTimer, detector, state,
                      capturedTrack, capturedClipId, clipTimelineIn, clipSourceIn, fps]()
                 {
+                    if (m_destroying.load(std::memory_order_acquire)) { pollTimer->stop(); return; }
                     // Update progress bar
                     float pct = state->percent.load();
                     progress->setValue(static_cast<int>(pct * 100.0f));
@@ -983,6 +984,7 @@ void TimelinePanel::showPasteAttributesDialog()
                     for (auto* ck : checks) states.push_back(ck->isChecked());
                     return states;
                 }(), isAudio, isVideo]() {
+                    if (m_destroying.load(std::memory_order_acquire)) return;
                     // Redo: re-apply from clipboard
                     if (!m_timeline || !m_attrClipboard) return;
                     for (const auto& snap : snapshots) {
@@ -1017,6 +1019,7 @@ void TimelinePanel::showPasteAttributesDialog()
                     emit contentChanged();
                 },
                 [this, snapshots, isAudio, isVideo]() {
+                    if (m_destroying.load(std::memory_order_acquire)) return;
                     // Undo: restore old values
                     if (!m_timeline) return;
                     for (const auto& snap : snapshots) {

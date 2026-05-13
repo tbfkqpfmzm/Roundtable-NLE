@@ -90,12 +90,14 @@ void ProjectBin::createNewSequence()
             m_commandStack->execute(std::make_unique<LambdaCommand>(
                 "Add Sequence '" + name + "'",
                 [this, name, newIdx]() {
+                    if (m_destroying.load(std::memory_order_acquire)) return;
                     m_project->addSequence(name);
                     syncListView();
                     emit sequencesChanged();
                     emit sequenceOpened(newIdx);
                 },
                 [this, newIdx]() {
+                    if (m_destroying.load(std::memory_order_acquire)) return;
                     m_project->removeSequence(newIdx);
                     syncListView();
                     emit sequencesChanged();
@@ -239,6 +241,7 @@ void ProjectBin::createSequenceFromMedia(const std::filesystem::path& filePath)
     auto addSeqCmd = std::make_unique<LambdaCommand>(
         "Add Sequence '" + seqName + "'",
         [this, newIdx, sharedTimeline]() {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             m_project->insertSequence(newIdx, std::move(*sharedTimeline));
             *sharedTimeline = nullptr;
             syncListView();
@@ -246,6 +249,7 @@ void ProjectBin::createSequenceFromMedia(const std::filesystem::path& filePath)
             emit sequenceOpened(newIdx);
         },
         [this, newIdx, sharedTimeline]() {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             *sharedTimeline = m_project->extractSequence(newIdx);
             syncListView();
             emit sequencesChanged();

@@ -495,6 +495,7 @@ void ShotComposer::refreshLayerList()
 
         int layerIdx = static_cast<int>(li);
         connect(eyeBtn, &QPushButton::clicked, this, [this, layerIdx]() {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             if (layerIdx < 0 || layerIdx >= m_currentShot.layerCount()) return;
             pushUndoState();
             const auto& lref = m_currentShot.layerOrder()[static_cast<size_t>(layerIdx)];

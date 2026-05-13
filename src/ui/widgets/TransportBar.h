@@ -25,6 +25,7 @@
 #pragma once
 
 #include <QLabel>
+#include <atomic>
 #include <QPushButton>
 #include <QTimer>
 #include <QWidget>
@@ -100,6 +101,8 @@ private:
 
     // Speed indicator
     QLabel* m_speedLabel{nullptr};
+
+    std::atomic<bool> m_destroying{false};
 
     void setupUI();
     void updateButtonStates();

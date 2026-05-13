@@ -65,13 +65,31 @@ ShotComposer::ShotComposer(QWidget* parent)
     m_undoCoalesceTimer->setSingleShot(true);
     m_undoCoalesceTimer->setInterval(600);
     connect(m_undoCoalesceTimer, &QTimer::timeout, this, [this]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
         m_undoPropertyPushed = false;
     });
 
     setupUI();
 }
 
-ShotComposer::~ShotComposer() = default;
+ShotComposer::~ShotComposer()
+{
+    m_destroying.store(true, std::memory_order_release);
+
+    // Stop timers — prevents them firing into partially-destroyed members
+    if (m_undoCoalesceTimer) {
+        m_undoCoalesceTimer->stop();
+    }
+
+    // Stop video playback worker threads
+    for (auto& [path, player] : m_videoPlayers) {
+        if (player) {
+            player->stopWorker.store(true);
+            if (player->workerThread.joinable())
+                player->workerThread.join();
+        }
+    }
+}
 
 QSize ShotComposer::sizeHint() const
 {

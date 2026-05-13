@@ -23,7 +23,16 @@ AudioMixer::AudioMixer(QWidget* parent)
     setupUI();
 }
 
-AudioMixer::~AudioMixer() = default;
+AudioMixer::~AudioMixer()
+{
+    m_destroying.store(true, std::memory_order_release);
+
+    // Stop the meter timer — prevents it firing into partially-destroyed
+    // channel strip widgets (which are Qt children and get destroyed first).
+    if (m_meterTimer) {
+        m_meterTimer->stop();
+    }
+}
 
 QSize AudioMixer::sizeHint() const { return {520, 440}; }
 

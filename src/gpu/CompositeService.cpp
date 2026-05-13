@@ -17,6 +17,7 @@
 #include "ClipRenderers.h"
 
 // Media / timeline
+#include "media/CacheCoordinator.h"
 #include "media/FrameCache.h"
 #include "media/MediaPool.h"
 #include "timeline/AudioClip.h"
@@ -217,6 +218,16 @@ void CompositeService::invalidateCacheDirect()
     }
     m_cacheInvalidateRequested.store(false, std::memory_order_release);
 }
+
+// ── Cache coordinator ───────────────────────────────────────────────────────
+
+void CompositeService::setCacheCoordinator(rt::CacheCoordinator* coordinator)
+{
+    if (m_engine)
+        m_engine->setCacheCoordinator(coordinator);
+}
+
+// ── Shutdown ────────────────────────────────────────────────────────────────
 
 void CompositeService::shutdown()
 {

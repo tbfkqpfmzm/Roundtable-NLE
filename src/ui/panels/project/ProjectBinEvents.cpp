@@ -225,11 +225,13 @@ bool ProjectBin::eventFilter(QObject* obj, QEvent* event)
                 m_commandStack->execute(std::make_unique<LambdaCommand>(
                     "Paste Sequence",
                     [this, srcIdx]() {
+                        if (m_destroying.load(std::memory_order_acquire)) return;
                         m_project->duplicateSequence(srcIdx);
                         syncListView();
                         emit sequencesChanged();
                     },
                     [this, newIdx]() {
+                        if (m_destroying.load(std::memory_order_acquire)) return;
                         m_project->removeSequence(newIdx);
                         syncListView();
                         emit sequencesChanged();
@@ -410,6 +412,7 @@ bool ProjectBin::eventFilter(QObject* obj, QEvent* event)
                         "Delete Bin Items",
                         [this, after, timelineRefsShared,
                          extractedTimelineClips, extractTimelineClips]() {
+                            if (m_destroying.load(std::memory_order_acquire)) return;
                             if (extractedTimelineClips->empty() && !timelineRefsShared->empty())
                                 *extractedTimelineClips =
                                     extractTimelineClips(*timelineRefsShared);
@@ -419,6 +422,7 @@ bool ProjectBin::eventFilter(QObject* obj, QEvent* event)
                         },
                         [this, before,
                          extractedTimelineClips, restoreTimelineClips]() {
+                            if (m_destroying.load(std::memory_order_acquire)) return;
                             this->applyBinSnapshot(*before);
                             if (!extractedTimelineClips->empty()) {
                                 restoreTimelineClips(*extractedTimelineClips);
@@ -438,11 +442,13 @@ bool ProjectBin::eventFilter(QObject* obj, QEvent* event)
                     m_commandStack->pushWithoutExecute(std::make_unique<LambdaCommand>(
                         "Delete Sequence",
                         [this, seqIdx]() {
+                            if (m_destroying.load(std::memory_order_acquire)) return;
                             m_project->removeSequence(seqIdx);
                             syncListView();
                             emit sequencesChanged();
                         },
                         [this, seqIdx, shared]() {
+                            if (m_destroying.load(std::memory_order_acquire)) return;
                             m_project->insertSequence(seqIdx, std::move(*shared));
                             syncListView();
                             emit sequencesChanged();
@@ -497,6 +503,7 @@ bool ProjectBin::eventFilter(QObject* obj, QEvent* event)
                         "Delete Bin",
                         [this, after, timelineRefsShared,
                          extractedTimelineClips, extractTimelineClips]() {
+                            if (m_destroying.load(std::memory_order_acquire)) return;
                             if (extractedTimelineClips->empty() && !timelineRefsShared->empty())
                                 *extractedTimelineClips =
                                     extractTimelineClips(*timelineRefsShared);
@@ -506,6 +513,7 @@ bool ProjectBin::eventFilter(QObject* obj, QEvent* event)
                         },
                         [this, before,
                          extractedTimelineClips, restoreTimelineClips]() {
+                            if (m_destroying.load(std::memory_order_acquire)) return;
                             this->applyBinSnapshot(*before);
                             if (!extractedTimelineClips->empty()) {
                                 restoreTimelineClips(*extractedTimelineClips);
@@ -545,15 +553,17 @@ bool ProjectBin::eventFilter(QObject* obj, QEvent* event)
                             "Delete Bin Item",
                             [this, after, timelineRefsShared,
                              extractedTimelineClips, extractTimelineClips]() {
+                                if (m_destroying.load(std::memory_order_acquire)) return;
                                 if (extractedTimelineClips->empty() && !timelineRefsShared->empty())
                                     *extractedTimelineClips =
                                         extractTimelineClips(*timelineRefsShared);
                                 this->applyBinSnapshot(*after);
                                 if (!timelineRefsShared->empty())
-                                    emit timelineClipsMutated();
+                                emit timelineClipsMutated();
                             },
                             [this, before,
                              extractedTimelineClips, restoreTimelineClips]() {
+                                if (m_destroying.load(std::memory_order_acquire)) return;
                                 this->applyBinSnapshot(*before);
                                 if (!extractedTimelineClips->empty()) {
                                     restoreTimelineClips(*extractedTimelineClips);

@@ -48,10 +48,13 @@ namespace rt {
 // Forward declarations
 class AnimationVideoCache;
 class AudioEngine;
+class CacheCoordinator;
 class Clip;
 class GraphicClip;
 class MediaPool;
 class ModelManager;
+class SpineClip;
+class VideoClip;
 class Project;
 class ShotPresetManager;
 class SpineClip;
@@ -128,13 +131,11 @@ public:
 
     // ── Cache management ────────────────────────────────────────────────
     /// Invalidate composite result LRU (thread-safe, lock-free flag).
-    /// Also immediately clears m_lastGoodComposite so the contention
-    /// fallback path in compositeFrame() doesn't return a stale frame.
-    /// Uses try_lock on m_compositeMutex to avoid deadlocking if the
-    /// producer thread is mid-composite (try_to_lock gives up instead
-    /// of blocking).  In that case the invalidation is deferred — the
-    /// compositeFrame() function checks m_cacheInvalidateRequested on
-    /// its next successful lock acquisition.
+    /// Immediately clears m_lastGoodComposite so stale frames are not
+    /// returned during invalidation.  Sets an atomic flag that
+    /// compositeFrame() checks on its next acquisition of
+    /// m_compositeMutex (the FrameProducer thread is the sole
+    /// compositor, so the flag is always picked up promptly).
     void requestCacheInvalidation() {
         m_cacheInvalidateRequested.store(true, std::memory_order_release);
         {
@@ -176,15 +177,22 @@ public:
 
     // ── Media handle management ─────────────────────────────────────────
     /// Look up a cached media handle by path. Returns 0 if not found.
+    /// Thread-safe via m_openMediaHandlesMutex (accessed by prewarm thread,
+    /// FrameProducer thread, and UI thread).
     [[nodiscard]] uint64_t findMediaHandle(const std::string& path) const {
+        std::lock_guard lock(m_openMediaHandlesMutex);
         auto it = m_openMediaHandles.find(path);
         return it != m_openMediaHandles.end() ? it->second : 0;
     }
     /// Register (or update) a media handle for the given path.
     void registerMediaHandle(const std::string& path, uint64_t handle) {
+        std::lock_guard lock(m_openMediaHandlesMutex);
         m_openMediaHandles[path] = handle;
     }
-    void clearMediaHandles() { m_openMediaHandles.clear(); }
+    void clearMediaHandles() {
+        std::lock_guard lock(m_openMediaHandlesMutex);
+        m_openMediaHandles.clear();
+    }
 
     // ── Video fallback cache ────────────────────────────────────────────
     struct VideoFallbackInfo {
@@ -205,16 +213,25 @@ public:
     std::shared_ptr<CachedFrame> renderGraphicClip(GraphicClip* clip, int64_t tick,
                                                     uint32_t outW, uint32_t outH);
 
+    // ── Cache coordinator ───────────────────────────────────────────────
+    /// Set the CacheCoordinator for system-adaptive budgets and VRAM
+    /// pressure monitoring.  Forwards to CompositeEngine.
+    void setCacheCoordinator(rt::CacheCoordinator* coordinator);
+
     // ── Composite engine access ─────────────────────────────────────────
     [[nodiscard]] CompositeEngine* engine() const noexcept { return m_engine.get(); }
 
     /// VRAM usage percentage (0-100) from GPU texture cache, or 0 if none.
     [[nodiscard]] int vramUsagePercent() const;
 
-    // ── Composite mutex (for invalidateCompositeCache try_to_lock) ──────
+    // ── Composite mutex ──────────────────────────────────────────────────
+    // Protects compositeFrame() execution.  FrameProducer is the sole
+    // holder — the old try_to_lock pattern has been removed.
     std::mutex& compositeMutex() { return m_compositeMutex; }
 
-    // ── Last good composite (for contention fallback) ───────────────────
+    // ── Last good composite ─────────────────────────────────────────────
+    // Kept for safe-mode fallback and exception safety.  The normal
+    // compositeFrame() path no longer returns stale frames.
     std::shared_ptr<CachedFrame> lastGoodComposite() const {
         std::lock_guard lg(m_lastCompositeMtx);
         return m_lastGoodComposite;
@@ -345,6 +362,15 @@ private:
                                                 std::unique_lock<std::mutex>& lock,
                                                 bool& gpuSpineUsedThisFrame);
 
+    // Per-clip-type layer builders (extracted to reduce CompositeServiceLayerBuild.cpp)
+    struct PerClipContext;
+    std::shared_ptr<CachedFrame> resolveMediaFrame(MediaHandle handle, int64_t frameNumber,
+                                                    ResolutionTier tier, bool scrubMode) const;
+    void buildVideoClipLayer(VideoClip* videoClip, Clip* clip, const PerClipContext& ctx);
+#ifdef ROUNDTABLE_HAS_SPINE
+    void buildSpineClipLayer(SpineClip* spineClip, Clip* clip, const PerClipContext& ctx);
+#endif
+
     // GPU compositing path (delegates to CompositeEngine)
     std::shared_ptr<CachedFrame> tryCompositeOnGpu(const std::vector<LayerInfo>& layers,
                                                      uint32_t outW, uint32_t outH,
@@ -409,7 +435,10 @@ private:
     std::unordered_map<std::string, std::shared_ptr<CachedFrame>> m_stickyLastCharFrame;
 
     // Open media handles (shared with preOpenVideoMedia)
+    // Protected by its own mutex — the prewarm thread accesses this
+    // concurrently with compositeFrame() on the FrameProducer thread.
     std::unordered_map<std::string, uint64_t> m_openMediaHandles;
+    mutable std::mutex m_openMediaHandlesMutex;
 
     // SpineClip video fallback cache
     std::unordered_map<uint64_t, VideoFallbackInfo> m_videoFallbackCache;

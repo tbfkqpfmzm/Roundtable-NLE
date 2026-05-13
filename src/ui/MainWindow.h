@@ -30,6 +30,7 @@
 #include <QMap>
 #include <QString>
 
+#include <atomic>
 #include <memory>
 #include <vector>
 
@@ -294,6 +295,9 @@ private:
     // ── Auto-save ───────────────────────────────────────────────────────
     QTimer* m_autoSaveTimer{nullptr};
     void onAutoSave();
+
+    // ── Destruction guard ────────────────────────────────────────────────
+    std::atomic<bool> m_destroying{false};
 
     // ── Recent files ────────────────────────────────────────────────────
     QMenu* m_recentProjectsMenu{nullptr};

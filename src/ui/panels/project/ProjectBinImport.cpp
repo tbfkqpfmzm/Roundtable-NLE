@@ -266,6 +266,7 @@ void ProjectBin::clearAll()
     if (m_listWidget) {
         m_listWidget->blockSignals(true);
         m_listWidget->clear();
+        m_dropHighlightItem = nullptr;  // tree items destroyed by clear()
         m_listWidget->blockSignals(false);
     }
 }

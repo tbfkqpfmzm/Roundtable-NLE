@@ -28,6 +28,7 @@ namespace rt {
 // Forward declarations
 class AudioEngine;
 class AVSyncClock;
+class CacheCoordinator;
 class CommandStack;
 class MainWindow;
 class MediaPool;
@@ -81,6 +82,9 @@ private:
     static App* s_instance;
 
     bool m_initialized{false};
+
+    // ── Cache coordinator (system-adaptive budgets + VRAM pressure) ──
+    std::unique_ptr<CacheCoordinator> m_cacheCoordinator;
 
     // ── Core subsystems (owned) ─────────────────────────────────────────
     std::unique_ptr<Timeline>        m_timeline;

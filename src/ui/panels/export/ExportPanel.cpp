@@ -935,13 +935,16 @@ void ExportPanel::onStartExport()
     // Set up callbacks
     m_renderQueue->setProgressCallback(
         [this](uint32_t id, const JobProgress& /*prog*/) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             Q_UNUSED(id);
             // Progress stored in job, polled by timer
         });
 
     m_renderQueue->setCompleteCallback(
         [this](uint32_t id, bool success, const std::string& msg) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
             QMetaObject::invokeMethod(this, [this, id, success, msg]() {
+                if (m_destroying.load(std::memory_order_acquire)) return;
                 m_pollTimer->stop();
                 m_startButton->setEnabled(true);
                 m_addQueueButton->setEnabled(true);
@@ -973,6 +976,7 @@ void ExportPanel::onStartExport()
             [this](int64_t tick, int64_t nextTick,
                    uint32_t w, uint32_t h, bool scrub)
                 -> std::shared_ptr<CachedFrame> {
+                if (m_destroying.load(std::memory_order_acquire)) return nullptr;
                 return pipelineComposite(tick, nextTick, w, h, scrub);
             });
     }

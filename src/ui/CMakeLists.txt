@@ -6,8 +6,14 @@ add_library(roundtable_ui STATIC
     App.cpp
     MainWindow.cpp
     MainWindowUI.cpp
+    MainWindowUIBuild.cpp
+    MainWindowUINav.cpp
+    MainWindowUIWorkspace.cpp
     MainWindowMenus.cpp
     MainWindowProject.cpp
+    MainWindowProjectSet.cpp
+    MainWindowProjectHandlers.cpp
+    MainWindowProjectMisc.cpp
     MainWindowRecovery.cpp
     ShortcutManager.cpp
     SplashScreen.cpp
@@ -21,12 +27,19 @@ add_library(roundtable_ui STATIC
     # Panels
     panels/timeline/TrackHeader.cpp
     panels/timeline/DockBehavior.cpp
+    panels/timeline/DockTabBarWatcher.cpp
+    panels/timeline/DockTabDragFilter.cpp
+    panels/timeline/DockEdgeOverlay.cpp
+    panels/timeline/EdgeColumnGuard.cpp
+    panels/timeline/DockEdgeDragWatcher.cpp
     panels/timeline/PlayheadLineWidget.cpp
     panels/timeline/TimelinePanel.cpp
     panels/timeline/TimelinePanelMenus.cpp
     panels/timeline/TimelinePanelMedia.cpp
     panels/timeline/TimelinePanelMouse.cpp
     panels/timeline/TimelinePanelMouseDrag.cpp
+    panels/timeline/TimelinePanelMouseDragMove.cpp
+    panels/timeline/TimelinePanelMouseDragRelease.cpp
     panels/timeline/TimelinePanelDragDrop.cpp
     panels/timeline/TimelinePanelLayout.cpp
     panels/timeline/TimelinePanelTracks.cpp
@@ -122,7 +135,16 @@ add_library(roundtable_ui STATIC
     panels/project/ProjectPanelEvents.cpp
     panels/project/ProjectPanelThumbnails.cpp
     panels/timeline/TimelineWorkspace.cpp
+    panels/timeline/TimelineWorkspaceIntegration.cpp
+    panels/timeline/TimelineWorkspaceEditCommands.cpp
+    panels/timeline/TimelineWorkspaceDeps.cpp
+    panels/timeline/TimelineWorkspaceDock.cpp
+    panels/timeline/TimelineWorkspaceToggleMaximize.cpp
     panels/timeline/TimelineWorkspacePanels.cpp
+    panels/timeline/TimelineWorkspacePanelsCreate.cpp
+    panels/timeline/TimelineWorkspacePanelsLayout.cpp
+    panels/timeline/TimelineWorkspacePanelsPlayback.cpp
+    panels/timeline/TimelineWorkspacePanelsShortcuts.cpp
     panels/timeline/TimelineWorkspacePanelsWiring.cpp
     panels/timeline/TimelineWorkspacePanelsWiringClipSelection.cpp
     panels/timeline/TimelineWorkspacePanelsWiringMediaDrop.cpp
@@ -196,6 +218,16 @@ set_source_files_properties(
     panels/timeline/TimelineWorkspacePanelsWiringNest.cpp
     panels/timeline/TimelineWorkspacePanelsWiringEffectDrop.cpp
     panels/timeline/TimelineWorkspacePanelsWiringTrack.cpp
+    panels/timeline/TimelineWorkspaceIntegration.cpp
+    panels/timeline/TimelineWorkspaceEditCommands.cpp
+    panels/timeline/TimelineWorkspaceDeps.cpp
+    panels/timeline/TimelineWorkspaceDock.cpp
+    panels/timeline/TimelineWorkspaceToggleMaximize.cpp
+    panels/timeline/DockTabBarWatcher.cpp
+    panels/timeline/DockTabDragFilter.cpp
+    panels/timeline/DockEdgeOverlay.cpp
+    panels/timeline/EdgeColumnGuard.cpp
+    panels/timeline/DockEdgeDragWatcher.cpp
     panels/properties/PropertiesPanelVideo.cpp
     panels/properties/PropertiesPanelAudio.cpp
     panels/properties/PropertiesPanelTitle.cpp
@@ -206,6 +238,15 @@ set_source_files_properties(
     panels/characters/ShotComposerGroups.cpp
     panels/characters/ShotComposerClipboard.cpp
     panels/characters/ShotComposerEvents.cpp
+    panels/characters/ShotComposerUI.cpp
+    panels/characters/ShotComposerLibrary.cpp
+    MainWindowUIBuild.cpp
+    MainWindowUINav.cpp
+    MainWindowUIWorkspace.cpp
+    MainWindowProjectSet.cpp
+    MainWindowProjectHandlers.cpp
+    MainWindowProjectMisc.cpp
+    App.cpp
     PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON
 )
 
