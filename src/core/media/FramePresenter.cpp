@@ -29,6 +29,7 @@ void FramePresenter::start()
 {
     if (m_running.load()) return;
     m_running.store(true);
+    m_destroying.store(false);
     m_thread = std::thread(&FramePresenter::presentLoop, this);
     spdlog::info("[FramePresenter] Started");
 }

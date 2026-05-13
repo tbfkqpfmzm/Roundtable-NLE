@@ -35,6 +35,9 @@ extern "C" {
 }
 #endif
 
+// ── Event loop runner (simple wrapper for consistency)
+static int runEventLoop(QApplication& app) { return app.exec(); }
+
 int main(int argc, char* argv[])
 {
     // Per-Monitor DPI v2 (must be set before ANY window is created)
@@ -59,16 +62,16 @@ int main(int argc, char* argv[])
 
     // ── Unified log root ──────────────────────────────────────────────
     // All crash logs, minidumps, and spdlog output go to a single location:
-    //   logs/  (project root, resolved relative to the exe parent chain)
+    //   logs/  (alongside the executable)
     //
     // Detection logic: walk up from argv[0]'s parent directory looking for
-    // CMakeLists.txt.  If found, use that directory as the log root (dev
-    // build).  Otherwise fall back to %LOCALAPPDATA%/ROUNDTABLE/logs/ so
-    // installed builds still work from read-only directories (Program Files).
-    std::filesystem::path logRoot = "logs";
+    // CMakeLists.txt (dev build with build subdirectory).  If found, use
+    // the project root as the log root.  Otherwise use the exe's own
+    // directory (installed build — installer creates a logs/ folder).
+    // NEVER use %LOCALAPPDATA% — logs must be easy to find.
+    std::filesystem::path logRoot;
     {
         auto exeDir = std::filesystem::path(argv[0]).parent_path();
-        // Walk up from exe dir, up to 5 levels, looking for CMakeLists.txt
         auto probe = exeDir;
         bool foundProjectRoot = false;
         for (int i = 0; i < 5; ++i) {
@@ -78,16 +81,12 @@ int main(int argc, char* argv[])
                 break;
             }
             auto parent = probe.parent_path();
-            if (parent == probe) break;  // reached filesystem root
+            if (parent == probe) break;
             probe = parent;
         }
         if (!foundProjectRoot) {
-#ifdef _WIN32
-            wchar_t appData[MAX_PATH];
-            DWORD len = GetEnvironmentVariableW(L"LOCALAPPDATA", appData, MAX_PATH);
-            if (len > 0 && len < MAX_PATH)
-                logRoot = std::filesystem::path(appData) / "ROUNDTABLE" / "logs";
-#endif
+            // Installed build — logs go next to the exe.
+            logRoot = exeDir / "logs";
         }
     }
     std::filesystem::create_directories(logRoot);
@@ -275,7 +274,7 @@ int main(int argc, char* argv[])
         splash.setProgress(100);
         splash.finish(nullptr);
         spdlog::info("Workspace captured — entering event loop for clean exit");
-        int result = qtApp.exec();
+        int result = runEventLoop(qtApp);
         spdlog::info("ROUNDTABLE NLE shutdown complete");
         return result;
     }
@@ -295,7 +294,7 @@ int main(int argc, char* argv[])
 
     spdlog::info("ROUNDTABLE NLE ready — entering event loop");
 
-    int result = qtApp.exec();
+    int result = runEventLoop(qtApp);
 
     spdlog::info("ROUNDTABLE NLE shutdown complete");
     return result;

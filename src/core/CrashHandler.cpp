@@ -37,6 +37,7 @@ struct CrashHandlerState
 {
     bool                                installed{false};
     std::filesystem::path               crashDir;
+    wchar_t                             crashDirW[MAX_PATH + 1]{}; // stack-safe copy
     CrashHandler::EmergencySaveCallback emergencySave;
     CrashHandler::PostCrashCallback     postCrash;
     CrashInfo                           lastCrashInfo;
@@ -92,6 +93,71 @@ void appendCrashLogRaw(const std::filesystem::path& logPath, const std::string& 
     SetFilePointer(hFile, 0, nullptr, FILE_END);
     DWORD written = 0;
     WriteFile(hFile, msg.data(), static_cast<DWORD>(msg.size()), &written, nullptr);
+    FlushFileBuffers(hFile);
+    CloseHandle(hFile);
+}
+
+/// Heap-safe fallback: writes to crash_log.txt using ONLY stack buffers and
+/// raw Win32 calls.  No std::string, no std::filesystem, no heap allocation.
+/// Call this when heap corruption is suspected (e.g., in a purecall handler
+/// or after an access violation that may have corrupted the heap).
+void appendCrashLogRawStackSafe(const wchar_t* logDir, const char* msg)
+{
+    // Build path: logDir\crash_log.txt using stack buffer
+    wchar_t fullPath[MAX_PATH + 32];
+    wchar_t* p = fullPath;
+    size_t dirLen = 0;
+    while (logDir[dirLen] && dirLen < MAX_PATH) { ++dirLen; }
+    for (size_t i = 0; i < dirLen && i < MAX_PATH; ++i)
+        *p++ = logDir[i];
+    *p++ = L'\\';
+    wcscpy_s(p, 32, L"crash_log.txt");
+
+    HANDLE hFile = CreateFileW(fullPath, FILE_APPEND_DATA, FILE_SHARE_READ,
+                                nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        // Directory may not exist — try to create it
+        CreateDirectoryW(logDir, nullptr);
+        hFile = CreateFileW(fullPath, FILE_APPEND_DATA, FILE_SHARE_READ,
+                            nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hFile == INVALID_HANDLE_VALUE) return;
+    }
+    SetFilePointer(hFile, 0, nullptr, FILE_END);
+
+    // Build timestamp on stack: YYYY-MM-DD HH:MM:SS
+    wchar_t timeBuf[32];
+    timeBuf[0] = L'[';
+    {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        swprintf_s(timeBuf + 1, 30, L"%04d-%02d-%02d %02d:%02d:%02d",
+                   st.wYear, st.wMonth, st.wDay,
+                   st.wHour, st.wMinute, st.wSecond);
+    }
+    size_t timeLen = wcslen(timeBuf);
+    timeBuf[timeLen] = L']';
+    timeBuf[timeLen + 1] = L' ';
+    timeBuf[timeLen + 2] = L'\0';
+
+    // Write timestamp prefix without heap allocation
+    DWORD written = 0;
+    char narrowTime[64];
+    int narrowLen = WideCharToMultiByte(CP_UTF8, 0, timeBuf, -1,
+                                         narrowTime, 64, nullptr, nullptr);
+    if (narrowLen > 1) {
+        WriteFile(hFile, narrowTime, narrowLen - 1, &written, nullptr);
+    }
+
+    // Write message
+    if (msg && *msg) {
+        DWORD msgLen = static_cast<DWORD>(strlen(msg));
+        WriteFile(hFile, msg, msgLen, &written, nullptr);
+    }
+
+    // Write newline
+    const char newline[] = "\n";
+    WriteFile(hFile, newline, 1, &written, nullptr);
+
     FlushFileBuffers(hFile);
     CloseHandle(hFile);
 }
@@ -209,22 +275,59 @@ inline void sehCall(Fn&& fn)
 // even the SEH handler cannot run.  A VEH fires before that, while the
 // guard page is still present, giving us a chance to call _resetstkoflw()
 // and restore a usable stack BEFORE the SEH handler is invoked.
-//
-// Hooking this as a VEH (first-chance) ensures _resetstkoflw() runs on
-// the stack-overflowed thread with just enough stack to make the call.
-// After reset, the exception continues to the SEH handler (which now has
-// a usable stack) and everything works normally.
 static LONG WINAPI stackOverflowVectoredHandler(EXCEPTION_POINTERS* exInfo)
 {
     if (exInfo && exInfo->ExceptionRecord &&
         exInfo->ExceptionRecord->ExceptionCode == EXCEPTION_STACK_OVERFLOW)
     {
-        // Reset the stack — this must be called on the faulting thread
-        // while the guard page is still accessible.
         _resetstkoflw();
-        // Continue searching for the next handler (the SEH filter).
         return EXCEPTION_CONTINUE_SEARCH;
     }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// ── Last-chance VEH (registered as last handler) ────────────────────────
+// On Windows 8+, SetUnhandledExceptionFilter is unreliable — WER may
+// intercept the exception before the filter runs.  This VEH runs BEFORE
+// the SEH __try/__except chain (all VEH handlers are first-chance).
+// IMPORTANT: We must NOT terminate here — we only LOG the exception and
+// return EXCEPTION_CONTINUE_SEARCH so the SEH handler chain still runs.
+// If we terminate, we break normal operation for exceptions that the
+// application handles via __try/__except (e.g., during static init).
+//
+// C++ exceptions (0xE06D7363) and debugger exceptions are passed through
+// silently since they're handled by std::terminate or the debugger.
+static LONG WINAPI lastChanceVectoredHandler(EXCEPTION_POINTERS* exInfo)
+{
+    if (!exInfo || !exInfo->ExceptionRecord)
+        return EXCEPTION_CONTINUE_SEARCH;
+
+    DWORD code = exInfo->ExceptionRecord->ExceptionCode;
+
+    // Pass through C++ exceptions, debugger events, and guard page
+    // exceptions (normal stack growth — OS handles it transparently).
+    if (code == 0xE06D7363)
+        return EXCEPTION_CONTINUE_SEARCH;
+    if (code == EXCEPTION_BREAKPOINT || code == EXCEPTION_SINGLE_STEP)
+        return EXCEPTION_CONTINUE_SEARCH;
+    if (code == EXCEPTION_GUARD_PAGE)
+        return EXCEPTION_CONTINUE_EXECUTION;  // OS must retry after expanding stack
+    if (code == 0x406D1388)  // Thread name exception (SetThreadDescription)
+        return EXCEPTION_CONTINUE_SEARCH;
+
+    // Log using the stack-safe writer.  We're in the middle of an exception
+    // so heap operations are unsafe.  The log may be incomplete if the
+    // crash_dir_w isn't populated yet (before CrashHandler::install()).
+    char msg[256];
+    uintptr_t addr = reinterpret_cast<uintptr_t>(
+        exInfo->ExceptionRecord->ExceptionAddress);
+    snprintf(msg, sizeof(msg),
+             "SEH: CODE=0x%08X ADDR=0x%llX",
+             code, static_cast<unsigned long long>(addr));
+    appendCrashLogRawStackSafe(state().crashDirW, msg);
+
+    // Continue searching — SEH handlers and the unhandled exception
+    // filter will still process this exception normally.
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
@@ -290,7 +393,9 @@ LONG WINAPI crashExceptionFilter(EXCEPTION_POINTERS* exInfo)
 
     // 2. Write crash log FIRST (before minidump — if MiniDumpWriteDump
     //    crashes with a nested exception the process dies immediately).
-    appendCrashLog(logPath, info.summary);
+    //    Use the stack-safe path to avoid heap allocation failures that
+    //    can occur when the heap is corrupted by the crash.
+    appendCrashLogRawStackSafe(s.crashDirW, info.summary.c_str());
 
     // 3. Write minidump (SEH-protected via helper)
     auto dumpPath = dumpDir / ("crash_" + timestamp() + ".dmp");
@@ -443,6 +548,12 @@ void CrashHandler::install(const std::filesystem::path& crashDir)
     }
 
     s.crashDir = crashDir;
+    // Populate stack-safe wchar_t copy of crash directory
+    {
+        std::wstring ws = crashDir.wstring();
+        size_t len = ws.copy(s.crashDirW, MAX_PATH);
+        s.crashDirW[len] = L'\0';
+    }
 
     try {
         std::filesystem::create_directories(crashDir);
@@ -456,21 +567,17 @@ void CrashHandler::install(const std::filesystem::path& crashDir)
 
     // ── Non-SEH crash handlers ─────────────────────────────────────────
     // These catch termination paths that bypass SetUnhandledExceptionFilter.
+    // ALL handlers use appendCrashLogRawStackSafe() to avoid heap allocation
+    // failures that occur when the heap is corrupted.
 
     // 1. Pure virtual function call (e.g. calling virtual methods on a
     //    partially-destroyed object).  The default handler calls abort()
     //    which terminates without SEH, leaving NO crash log.
-    //    Use raw Win32 calls to avoid ANY heap/stack allocation.
 #ifdef _WIN32
     _set_purecall_handler([]() {
-        auto logPath = crashLogPath();
-        std::string msg = "PURE VIRTUAL FUNCTION CALL — likely use-after-free "
-                          "on a partially-destroyed object";
-        appendCrashLog(logPath, msg);
-        // Write marker using raw Win32 (avoid std::ofstream which allocates)
-        auto markerPath = logPath.parent_path() / "crash_marker.txt";
-        appendCrashLogRaw(markerPath, "summary=" + msg + "\n");
-        // Terminate immediately — nothing safe to do after a purecall
+        appendCrashLogRawStackSafe(state().crashDirW,
+            "PURE VIRTUAL FUNCTION CALL — likely use-after-free "
+            "on a partially-destroyed object");
         TerminateProcess(GetCurrentProcess(), 0xC0000005);
     });
 
@@ -480,45 +587,62 @@ void CrashHandler::install(const std::filesystem::path& crashDir)
         const wchar_t* expr, const wchar_t* func,
         const wchar_t* file, unsigned int line, uintptr_t /*reserved*/)
     {
-        // Convert wchar_t to narrow using Win32 API (stack-safe, no alloc)
-        auto toNarrow = [](const wchar_t* ws) -> std::string {
-            if (!ws || !*ws) return {};
-            int len = WideCharToMultiByte(CP_UTF8, 0, ws, -1, nullptr, 0,
-                                           nullptr, nullptr);
-            if (len <= 0) return {};
-            std::string result(static_cast<size_t>(len) - 1, '\0');
-            WideCharToMultiByte(CP_UTF8, 0, ws, -1, result.data(), len,
-                                nullptr, nullptr);
-            return result;
-        };
-        std::ostringstream oss;
-        oss << "CRT INVALID PARAMETER:";
-        if (expr) oss << " expr=" << toNarrow(expr);
-        if (func) oss << " func=" << toNarrow(func);
-        if (file) oss << " file=" << toNarrow(file) << ":" << line;
-        appendCrashLog(crashLogPath(), oss.str());
+        // Build message on stack without heap allocation
+        char msg[512];
+        int pos = snprintf(msg, sizeof(msg), "CRT INVALID PARAMETER:");
+        if (pos > 0 && expr) {
+            char narrow[128];
+            WideCharToMultiByte(CP_UTF8, 0, expr, -1, narrow, 128, nullptr, nullptr);
+            pos += snprintf(msg + pos, sizeof(msg) - pos, " expr=%s", narrow);
+        }
+        if (pos > 0 && func) {
+            char narrow[128];
+            WideCharToMultiByte(CP_UTF8, 0, func, -1, narrow, 128, nullptr, nullptr);
+            pos += snprintf(msg + pos, sizeof(msg) - pos, " func=%s", narrow);
+        }
+        if (pos > 0 && file) {
+            char narrow[128];
+            WideCharToMultiByte(CP_UTF8, 0, file, -1, narrow, 128, nullptr, nullptr);
+            pos += snprintf(msg + pos, sizeof(msg) - pos, " file=%s:%u", narrow, line);
+        }
+        appendCrashLogRawStackSafe(state().crashDirW, msg);
     });
 #endif
 
     // 3. std::terminate handler (catches unhandled C++ exceptions that
     //    escape main(), or exceptions thrown during stack unwinding).
     std::set_terminate([]() {
-        appendCrashLog(crashLogPath(),
+        // Write crash log FIRST using stack-safe path.
+        // Do NOT re-throw — calling throw; inside a terminate handler
+        // causes recursive std::terminate (undefined behavior), which
+        // would prevent this log from ever being written.
+        // Write to TWO locations: the configured crashDir (via state)
+        // and a hardcoded fallback in case state is corrupted.
+        const wchar_t* dir = state().crashDirW;
+        appendCrashLogRawStackSafe(dir,
             "std::terminate called — unhandled C++ exception or "
             "exception during stack unwinding");
-        // Attempt to re-throw and capture the active exception's type
-        try {
-            throw;
-        } catch (const std::exception& e) {
-            appendCrashLog(crashLogPath(),
-                std::string("  Active exception: ") + e.what());
-        } catch (...) {
-            appendCrashLog(crashLogPath(),
-                "  Active exception: unknown type (not std::exception)");
+        // Also write a fallback to a known path to verify handler runs
+        HANDLE hFb = CreateFileW(L"C:\\roundtable_terminate_marker.txt",
+                                  GENERIC_WRITE, 0, nullptr,
+                                  CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hFb != INVALID_HANDLE_VALUE) {
+            const char msg[] = "terminate handler fired\n";
+            DWORD wrote = 0;
+            WriteFile(hFb, msg, sizeof(msg) - 1, &wrote, nullptr);
+            CloseHandle(hFb);
         }
-        // Re-abort so the OS can generate a crash dump
+        // Terminate immediately — nothing safe left to do.
+#ifdef _WIN32
+        TerminateProcess(GetCurrentProcess(), 0xC0000005);
+#else
         abort();
+#endif
     });
+
+    // Write startup marker to verify crash log is writable.
+    // Uses the stack-safe raw Win32 path — no heap allocation.
+    appendCrashLogRawStackSafe(s.crashDirW, "=== SESSION START ===");
 
     spdlog::info("CrashHandler installed — crash dir: {}", crashDir.string());
 }
@@ -675,9 +799,14 @@ void CrashHandler::installPlatformHandler()
 #ifdef _WIN32
     // Install VEH first (catches stack overflow before the stack is gone)
     // so _resetstkoflw() can be called to restore a usable stack before
-    // the SEH filter runs.  The handler function is a free function so
-    // MSVC won't complain about mixing SEH with C++ EH.
+    // the SEH filter runs.
     AddVectoredExceptionHandler(/*FirstHandler=*/1, stackOverflowVectoredHandler);
+
+    // Install last-chance VEH — catches SEH that SetUnhandledExceptionFilter
+    // misses on Windows 8+ (WER may intercept before the filter runs).
+    // Registered as last handler (FirstHandler=0) so __try/__except blocks
+    // and C++ exception handling run first.
+    AddVectoredExceptionHandler(/*FirstHandler=*/0, lastChanceVectoredHandler);
 
     state().previousFilter = SetUnhandledExceptionFilter(crashExceptionFilter);
 #else

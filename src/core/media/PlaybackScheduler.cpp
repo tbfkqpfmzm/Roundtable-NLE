@@ -102,6 +102,8 @@ void PlaybackScheduler::stop()
 {
     if (!isRunning()) return;
 
+    spdlog::info("[PlaybackScheduler] Stopping (clock={} prod={} pres={})",
+                 m_clock.isRunning(), m_producer.isRunning(), m_presenter.isRunning());
     m_clock.stop();
     m_producer.stop();
     m_presenter.stop();

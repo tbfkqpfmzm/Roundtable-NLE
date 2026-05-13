@@ -56,6 +56,9 @@ add_library(roundtable_gpu STATIC
 
     # CPU Compositor Safe Mode (Phase 6)
     CompositeServiceCpuFallback.cpp
+
+    # Render graph DAG (Phase 6 — DAG-based render passes)
+    render_graph/GpuRenderGraph.cpp
 )
 
 target_include_directories(roundtable_gpu PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

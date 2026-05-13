@@ -37,6 +37,7 @@ void FrameProducer::start()
 {
     if (m_running.load()) return;
     m_running.store(true);
+    m_destroying.store(false);
     m_thread = std::thread(&FrameProducer::producerLoop, this);
     spdlog::info("[FrameProducer] Started");
 }
@@ -44,6 +45,8 @@ void FrameProducer::start()
 void FrameProducer::stop()
 {
     if (!m_running.load()) return;
+    spdlog::info("[FP-TRACE] FrameProducer::stop() called (running=true, destroying={})",
+                 m_destroying.load());
     m_destroying.store(true);
     m_running.store(false);
     m_reqCV.notify_one();       // wake worker if blocked
@@ -130,10 +133,22 @@ void FrameProducer::producerLoop()
             }
         }
 
-        if (scrubReq) {
-            produceScrubFrameImpl(*scrubReq);
-        } else {
-            produceFrameImpl(tick);
+        // Wrap each frame production in try/catch so an exception from
+        // compositing doesn't kill the producer thread (which would
+        // leave the presenter and clock running with no data source).
+        try {
+            if (scrubReq) {
+                produceScrubFrameImpl(*scrubReq);
+            } else {
+                produceFrameImpl(tick);
+            }
+        } catch (const std::exception& e) {
+            spdlog::error("[FrameProducer] Exception in produceFrame: {}", e.what());
+            // Publish null frame so presenter doesn't wait forever
+            publishFrame(nullptr, tick);
+        } catch (...) {
+            spdlog::error("[FrameProducer] Unknown exception in produceFrame");
+            publishFrame(nullptr, tick);
         }
     }
 

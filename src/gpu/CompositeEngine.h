@@ -110,6 +110,13 @@ public:
     [[nodiscard]] VkSemaphore compositeSemaphore() const noexcept
         { return m_compositeSemaphore; }
 
+    // ── Render graph feature flag (Phase 6 — DAG-based pipeline) ─────────
+    /// When true, composite() uses the GpuRenderGraph DAG pipeline instead
+    /// of the monolithic single-submit path.  Set at startup or runtime.
+    /// Default: false (old path).  Switch to true after verifying pixel
+    /// identical output.
+    static bool s_useRenderGraph;
+
     // ── Resource cleanup helpers ────────────────────────────────────────
     void destroyCompositeSlot();
     void clearGpuTexCache();
@@ -142,6 +149,23 @@ private:
     static constexpr int kGpuBackoffMaxMs     = 10000;
     std::chrono::steady_clock::time_point m_gpuBackoffUntil{};
     int  m_gpuBackoffAttempts{0};
+
+    // ── Render graph alternative path ────────────────────────────────
+    [[nodiscard]] std::shared_ptr<rt::CachedFrame> compositeViaRenderGraph(
+        const std::vector<rt::LayerInfo>& layers,
+        uint32_t outW, uint32_t outH,
+        int64_t tick, bool scrubMode,
+        bool gpuDisplayMode,
+        rt::Compositor* compositor,
+        rt::EffectProcessor* effectProcessor,
+        rt::TransitionRenderer* transitionRenderer,
+        bool perfLog,
+        std::chrono::high_resolution_clock::time_point perfT0,
+        std::chrono::high_resolution_clock::time_point& perfTlayers,
+        std::chrono::high_resolution_clock::time_point& perfTgpuUp,
+        std::chrono::high_resolution_clock::time_point& perfTcomp,
+        int& effectLayerCount, int& effectPassCount,
+        int& transitionCount);
 
     // Composite result LRU
     static constexpr size_t kCacheSize = 8;

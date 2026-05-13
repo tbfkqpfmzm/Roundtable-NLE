@@ -83,6 +83,7 @@ ProgramMonitor::~ProgramMonitor()
     m_destroying.store(true, std::memory_order_release);
 
     if (m_pipeline) {
+        spdlog::info("[PM-TRACE] destructor stopping pipeline");
         // Stop pipeline threads BEFORE clearing callbacks.  stop() joins
         // all threads, guaranteeing no more callbacks will fire.
         m_pipeline->stop();

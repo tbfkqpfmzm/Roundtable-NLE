@@ -107,6 +107,11 @@ void PlaybackController::setStandaloneDuration(int64_t ticks) noexcept
 
 void PlaybackController::play()
 {
+    // Log and flush BEFORE the play call.  If the app crashes during
+    // play(), this message will be the last thing in the log.
+    spdlog::info("[PLAY] PlaybackController::play() called (tick={})", currentTick());
+    spdlog::default_logger()->flush();
+
     if (m_destroying.load(std::memory_order_acquire))
         return;
     if (m_state == PlayState::Playing)
@@ -115,34 +120,19 @@ void PlaybackController::play()
     m_shuttleSpeed = 1.0;
     m_jShuttleLevel = 0;
     m_lShuttleLevel = 0;
-
-    // Reset standalone time tracking
     m_lastPollTimeNs = 0;
 
-    // Capture the playhead position BEFORE starting the clock.
-    // setState(Playing) triggers onStateChanged → loadAudioSources()
-    // which can take significant time.  If the clock is already
-    // running, currentTick() advances during that work and audio
-    // starts from a position ~1 second ahead of the playhead.
     int64_t startTick = currentTick();
 
-    // Trigger pre-buffer callback BEFORE setState so the media pool
-    // prefetch workers start decoding ahead-of-playhead frames.
-    // setState(Playing) triggers loadAudioSources() which can block
-    // for 100-500ms on H.264.  By starting prefetch first, the workers
-    // have that entire blocking window to decode upcoming frames,
-    // significantly reducing cold-start cache misses at play start.
+    // Trigger pre-buffer callback BEFORE setState
     if (onPlayStarting && !m_destroying.load(std::memory_order_acquire))
         onPlayStarting(startTick);
 
     // Set state — fires onStateChanged → loadAudioSources().
-    // Prefetch workers are already decoding during this blocking call.
     setState(PlayState::Playing);
 
     // Sync the audio engine's position with the captured playhead tick
-    // BEFORE starting the stream and the clock.
-    if (m_audioEngine)
-    {
+    if (m_audioEngine) {
         m_audioEngine->setPlaybackSpeed(1.0);
         uint32_t sr = m_audioEngine->sampleRate();
         int64_t frame = static_cast<int64_t>(
@@ -150,28 +140,22 @@ void PlaybackController::play()
         m_audioEngine->seekToFrame(frame);
     }
 
-    // Reset the clock position BEFORE starting the audio stream, but do
-    // NOT set it running yet.  AudioEngine::play() will call
-    // setRunning(true) AFTER Pa_StartStream succeeds, so the clock only
-    // begins extrapolating once audio is actually flowing.  This prevents
-    // the 50-100ms WASAPI startup gap from letting wall-clock
-    // extrapolation run video ahead of audio.
-    if (m_syncClock)
-    {
+    // Reset the clock position
+    if (m_syncClock) {
         m_syncClock->reset(startTick);
         m_syncClock->setSpeed(1.0);
-        // Do NOT setRunning(true) here — audio engine does it after
-        // the PortAudio stream is started.
     }
 
     // Start audio engine — this also starts the sync clock running
     if (m_audioEngine)
         m_audioEngine->play();
 
-    // Fallback: if there's no audio engine (e.g. PortAudio disabled),
-    // start the clock ourselves so video still plays.
+    // Fallback: if there's no audio engine
     if (!m_audioEngine && m_syncClock)
         m_syncClock->setRunning(true);
+
+    spdlog::info("[PLAY] PlaybackController::play() completed successfully");
+    spdlog::default_logger()->flush();
 }
 
 void PlaybackController::pause()

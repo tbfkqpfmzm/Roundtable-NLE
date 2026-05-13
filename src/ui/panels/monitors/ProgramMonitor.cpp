@@ -108,6 +108,7 @@ void ProgramMonitor::stopPolling()
     m_pollTimer->stop();
     if (m_pipeline)
         m_pipeline->stop();
+    spdlog::info("[PM-TRACE] stopPolling() called");
 }
 
 void ProgramMonitor::refresh()
@@ -193,9 +194,18 @@ void ProgramMonitor::resetViewState()
         syncOverlayGeometry();
     });
 
-    // 6. Stop and restart the pipeline so stale queued frames are discarded.
-    if (m_pipeline && m_pipeline->isRunning()) {
-        m_pipeline->stop();
+    // 6. Reset pipeline state: stop if idle, skip if playing.
+    //    Do NOT stop the pipeline during active playback — that kills
+    //    the FrameProducer/FramePresenter threads and requires a full
+    //    restart cycle.  Stale queued frames are harmless since the
+    //    next tick will overwrite them.
+    if (m_controller && m_controller->isPlaying()) {
+        spdlog::info("[PM-TRACE] resetViewState() — playback active, skipping pipeline stop");
+    } else {
+        spdlog::info("[PM-TRACE] resetViewState() stopping pipeline (not playing)");
+        if (m_pipeline && m_pipeline->isRunning()) {
+            m_pipeline->stop();
+        }
     }
 
     // 7. Force a full composite refresh on the next poll cycle.
