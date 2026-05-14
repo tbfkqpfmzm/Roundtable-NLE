@@ -372,34 +372,23 @@ void VulkanViewport::presentFrame(VkSemaphore waitSemaphore)
     float swW = static_cast<float>(m_swapchain->extent().width);
     float swH = static_cast<float>(m_swapchain->extent().height);
 
-    // Compute aspect-ratio-aware viewport for the source image
-    float imgAspect = (m_srcW > 0 && m_srcH > 0)
-        ? static_cast<float>(m_srcW) / static_cast<float>(m_srcH)
-        : 16.0f / 9.0f;
-    float winAspect = swW / std::max(swH, 1.0f);
-
-    // ~5% padding on each side (kFitPadding=0.95) so the frame never
-    // touches the viewport edges.  Mirrors the same constant in
-    // Viewport.cpp's CPU path; per CLAUDE_IMPROVEMENT_PLAN user request.
-    // When the user zooms in (m_viewZoom > 1), the viewport rect
-    // expands past the swapchain bounds and the scissor clips — i.e.
-    // the padding only matters at fit (zoom = 1).
-    constexpr float kFitPadding = 0.95f;
-
-    float baseW, baseH, baseX, baseY;
-    if (winAspect > imgAspect) {
-        // Window wider than image — pillarbox
-        baseH = swH * kFitPadding;
-        baseW = baseH * imgAspect;
-        baseX = (swW - baseW) * 0.5f;
-        baseY = (swH - baseH) * 0.5f;
-    } else {
-        // Window taller than image — letterbox
-        baseW = swW * kFitPadding;
-        baseH = baseW / imgAspect;
-        baseX = (swW - baseW) * 0.5f;
-        baseY = (swH - baseH) * 0.5f;
-    }
+    // 5% padding on EVERY side — see Viewport.cpp's matching block for
+    // the rationale.  Earlier version applied kFitPadding to just one
+    // axis (the one that aspect-fit chose), so a 16:9 image in a wide
+    // widget got 2.5% side padding but 0% top/bottom.  Now we shrink
+    // both axes first, then aspect-fit into the smaller box.
+    constexpr float kFitPadding = 0.90f;  // 5% margin per side
+    const float availW = swW * kFitPadding;
+    const float availH = swH * kFitPadding;
+    const float srcW   = (m_srcW > 0) ? static_cast<float>(m_srcW) : 16.0f;
+    const float srcH   = (m_srcH > 0) ? static_cast<float>(m_srcH) :  9.0f;
+    const float scaleX = availW / srcW;
+    const float scaleY = availH / srcH;
+    const float scale  = std::min(scaleX, scaleY);
+    const float baseW  = srcW * scale;
+    const float baseH  = srcH * scale;
+    const float baseX  = (swW - baseW) * 0.5f;
+    const float baseY  = (swH - baseH) * 0.5f;
 
     VkViewport vp{};
     vp.x        = baseX + m_viewPanX + (1.0f - m_viewZoom) * baseW * 0.5f;
@@ -942,15 +931,22 @@ void VulkanViewport::moveEvent(QMoveEvent* event)
     QWidget::moveEvent(event);
 
     // Vulkan native surfaces don't follow Qt's normal paint/expose loop:
-    // moving the widget (e.g. dock rearrange, floating-window drag) does
-    // NOT fire resizeEvent or paintEvent, so the last-presented swapchain
+    // moving the widget (e.g. dock rearrange, window drag) does NOT
+    // fire resizeEvent or paintEvent, so the last-presented swapchain
     // content stays on screen at the OLD position, producing a visible
-    // "echo" of stale UI alongside the new position.  Schedule a deferred
-    // redraw so the surface refreshes once the move settles.  Coalesced
-    // by scheduleDeferredRedraw so a rapid drag doesn't queue dozens of
-    // present calls.
+    // "echo" of stale UI alongside the new position.
+    //
+    // We have to refresh synchronously here — posting via
+    // scheduleDeferredRedraw is too late, because on Windows the OS
+    // modal move loop runs its own pump and Qt's posted-event queue
+    // isn't drained until the drag ENDS.  By the time the deferred
+    // event fires the user has already seen the echo for the whole
+    // duration of the move.  Calling refresh() inline re-presents the
+    // existing m_sourceView every move tick, which is cheap (a single
+    // Vulkan submit of an unchanged texture) and matches the OS's
+    // native compositing cadence.
     if (m_gpuActive && m_sourceView != VK_NULL_HANDLE) {
-        scheduleDeferredRedraw();
+        refresh();
     }
 }
 
