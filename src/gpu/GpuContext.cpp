@@ -19,6 +19,7 @@
 
 #include <vk_mem_alloc.h>
 #include <volk.h>
+#include <cstdlib>     // std::getenv (validation opt-in env vars)
 #include <thread>
 #include <spdlog/spdlog.h>
 
@@ -55,12 +56,37 @@ bool GpuContext::init(VkSurfaceKHR surface)
 #ifdef _WIN32
     instCfg.extraExtensions.push_back("VK_KHR_win32_surface");
 #endif
+
+    // Allow Release builds to opt into validation via environment variable
+    // for stress testing.  Set ROUNDTABLE_VALIDATION=1 to force validation
+    // ON regardless of build config; set ROUNDTABLE_GPU_ASSISTED=1 to add
+    // GPU-Assisted Validation (significant perf cost) when investigating
+    // shader-side bugs; set ROUNDTABLE_VALIDATION_FATAL=0 to disable the
+    // debug-break on validation errors during unattended stress runs.
+    auto envFlag = [](const char* name, bool dflt) -> bool {
+        if (const char* v = std::getenv(name)) {
+            return !(v[0] == '\0' || v[0] == '0' || v[0] == 'f' || v[0] == 'F');
+        }
+        return dflt;
+    };
+    instCfg.enableValidation                = envFlag("ROUNDTABLE_VALIDATION",
+                                                       instCfg.enableValidation);
+    instCfg.enableGpuAssistedValidation     = envFlag("ROUNDTABLE_GPU_ASSISTED",
+                                                       instCfg.enableGpuAssistedValidation);
+    instCfg.validationErrorsFatal           = envFlag("ROUNDTABLE_VALIDATION_FATAL",
+                                                       instCfg.validationErrorsFatal);
+    // Sync validation is cheap; only override via env if explicitly disabled.
+    instCfg.enableSynchronizationValidation = envFlag("ROUNDTABLE_SYNC_VALIDATION",
+                                                       instCfg.enableSynchronizationValidation);
+
     if (!m_instance.create(instCfg)) {
         spdlog::error("GpuContext: Failed to create Vulkan instance");
         return false;
     }
-    spdlog::info("GpuContext: Vulkan instance created (validation={})",
-                 m_instance.validationEnabled());
+    spdlog::info("GpuContext: Vulkan instance created (validation={}, sync={}, gpu-assisted={})",
+                 m_instance.validationEnabled(),
+                 instCfg.enableValidation && instCfg.enableSynchronizationValidation,
+                 instCfg.enableValidation && instCfg.enableGpuAssistedValidation);
 
     // 2) Select physical device + create logical device
     if (!m_device.create(m_instance, surface)) {

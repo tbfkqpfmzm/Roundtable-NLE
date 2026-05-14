@@ -23,6 +23,28 @@ struct InstanceConfig
 #else
     bool        enableValidation = false;
 #endif
+
+    /// Synchronization validation catches cross-queue hazards, missing
+    /// pipeline barriers, and similar — exactly the class of bug that
+    /// produced the May 2026 SpineRenderer cross-queue TDR.  Low runtime
+    /// cost (a few % overhead on the validation thread); ON by default
+    /// whenever validation is enabled.
+    bool        enableSynchronizationValidation = true;
+
+    /// GPU-Assisted Validation instruments shaders to catch out-of-bounds
+    /// buffer/image reads, stale descriptor reads, and similar.  Has a
+    /// significant perf cost (often 2-3x slower frame times) so OFF by
+    /// default; enable per session via the ROUNDTABLE_GPU_ASSISTED=1
+    /// environment variable when investigating shader-side bugs.
+    bool        enableGpuAssistedValidation = false;
+
+    /// When true, validation messages at ERROR severity trigger a
+    /// debug-break (DebuggerPresent path) and elevate the log line to
+    /// spdlog::critical so it cannot be silently ignored.  Warnings
+    /// still just log.  ON by default with validation; flip to false
+    /// for unattended stress runs where you only want the log.
+    bool        validationErrorsFatal = true;
+
     /// Extra instance extensions to request (e.g. surface extensions)
     std::vector<const char*> extraExtensions;
 };
@@ -60,6 +82,14 @@ private:
     VkInstance               m_instance{VK_NULL_HANDLE};
     VkDebugUtilsMessengerEXT m_debugMessenger{VK_NULL_HANDLE};
     bool                     m_validationEnabled{false};
+
+    /// True if InstanceConfig::validationErrorsFatal was set when this
+    /// instance was created; consulted by debugCallback to decide
+    /// whether to debug-break on ERROR severity messages.  Stored as
+    /// a static so the static-method callback can read it without an
+    /// instance pointer (Vulkan validation provides a userData slot
+    /// but we don't currently plumb it).
+    static bool              s_errorsFatal;
 
     bool checkValidationLayerSupport() const;
     void setupDebugMessenger();

@@ -12,10 +12,18 @@
 #include <cstring>
 #include <stdexcept>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
 namespace rt {
 
 // ── Validation layer name ───────────────────────────────────────────────────
 static constexpr const char* VALIDATION_LAYER = "VK_LAYER_KHRONOS_validation";
+
+// Static flag used by debugCallback (Vulkan's userData slot isn't plumbed).
+bool Instance::s_errorsFatal = true;
 
 // ── Debug callback ──────────────────────────────────────────────────────────
 VKAPI_ATTR VkBool32 VKAPI_CALL Instance::debugCallback(
@@ -26,7 +34,23 @@ VKAPI_ATTR VkBool32 VKAPI_CALL Instance::debugCallback(
 {
     if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
     {
-        spdlog::error("[Vulkan] {}", callbackData->pMessage);
+        // Use critical so the message shows even when the log level is
+        // turned up; validation errors are real bugs that we don't want
+        // buried under perf-log spam.
+        spdlog::critical("[Vulkan VALIDATION ERROR] {}", callbackData->pMessage);
+
+        // If a debugger is attached, break here so the developer lands
+        // exactly on the offending API call.  Stack trace shows which
+        // Roundtable code triggered the validation error.
+        if (s_errorsFatal) {
+#ifdef _WIN32
+            if (IsDebuggerPresent()) {
+                __debugbreak();
+            }
+#elif defined(__GNUC__) || defined(__clang__)
+            __builtin_trap();
+#endif
+        }
     }
     else if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)
     {
@@ -103,6 +127,7 @@ bool Instance::create(const InstanceConfig& config)
     {
         spdlog::warn("Validation layers requested but not available — continuing without");
     }
+    s_errorsFatal = m_validationEnabled && config.validationErrorsFatal;
 
     // ── Application info ────────────────────────────────────────────────
     VkApplicationInfo appInfo{};
@@ -138,6 +163,10 @@ bool Instance::create(const InstanceConfig& config)
     std::vector<const char*> layers;
     VkDebugUtilsMessengerCreateInfoEXT debugCreateInfo{};
 
+    // Storage for the validation-features chain (must outlive vkCreateInstance).
+    std::vector<VkValidationFeatureEnableEXT> enabledValidationFeatures;
+    VkValidationFeaturesEXT validationFeatures{};
+
     if (m_validationEnabled)
     {
         layers.push_back(VALIDATION_LAYER);
@@ -152,7 +181,38 @@ bool Instance::create(const InstanceConfig& config)
                                           VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
                                           VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
         debugCreateInfo.pfnUserCallback = debugCallback;
-        createInfo.pNext                = &debugCreateInfo;
+
+        // Build the validation-features chain.  These extend the
+        // VK_LAYER_KHRONOS_validation layer's coverage:
+        //   • Synchronization validation — catches missing barriers,
+        //     cross-queue read/write hazards, layout-transition races.
+        //     Exactly the class of bug behind the May 2026 Spine TDR.
+        //   • GPU-Assisted Validation — instruments shaders to catch
+        //     out-of-bounds buffer/image accesses and stale-descriptor
+        //     reads.  Significant perf cost (2-3x), opt-in only.
+        if (config.enableSynchronizationValidation) {
+            enabledValidationFeatures.push_back(
+                VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT);
+        }
+        if (config.enableGpuAssistedValidation) {
+            enabledValidationFeatures.push_back(
+                VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_EXT);
+            enabledValidationFeatures.push_back(
+                VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_RESERVE_BINDING_SLOT_EXT);
+        }
+
+        if (!enabledValidationFeatures.empty()) {
+            validationFeatures.sType =
+                VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT;
+            validationFeatures.enabledValidationFeatureCount =
+                static_cast<uint32_t>(enabledValidationFeatures.size());
+            validationFeatures.pEnabledValidationFeatures =
+                enabledValidationFeatures.data();
+            validationFeatures.pNext = &debugCreateInfo;
+            createInfo.pNext = &validationFeatures;
+        } else {
+            createInfo.pNext = &debugCreateInfo;
+        }
     }
 
     VkResult result = vkCreateInstance(&createInfo, nullptr, &m_instance);
