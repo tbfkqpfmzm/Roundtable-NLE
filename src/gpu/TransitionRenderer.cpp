@@ -5,6 +5,8 @@
 
 #include <volk.h>
 #include "TransitionRenderer.h"
+#include "GpuContext.h"
+#include "GpuScheduler.h"
 
 #define VMA_STATIC_VULKAN_FUNCTIONS 0
 #define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
@@ -660,7 +662,7 @@ bool TransitionRenderer::resize(uint32_t width, uint32_t height)
     if (!m_initialized) return false;
     if (width == m_config.outputWidth && height == m_config.outputHeight) return true;
 
-    vkDeviceWaitIdle(m_device->handle());
+    GpuContext::get().scheduler().deviceWaitIdle();
 
     m_config.outputWidth  = width;
     m_config.outputHeight = height;

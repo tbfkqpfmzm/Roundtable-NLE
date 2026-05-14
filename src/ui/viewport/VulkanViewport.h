@@ -57,9 +57,13 @@ public:
     /// @param waitSemaphore  Optional VkSemaphore (timeline) to wait on before
     ///                       reading the image.  Used for inter-queue sync
     ///                       between compute (compositor) and graphics (present).
+    /// @param textureOwner   Shared ownership handle that keeps the source
+    ///                       texture alive until the GPU finishes sampling it.
+    ///                       From CachedFrame::gpuTextureOwner.
     void displayGpuImage(VkImageView imageView, VkSampler sampler,
                          uint32_t width, uint32_t height,
-                         VkSemaphore waitSemaphore = VK_NULL_HANDLE);
+                         VkSemaphore waitSemaphore = VK_NULL_HANDLE,
+                         std::shared_ptr<void> textureOwner = nullptr);
 
     /// Is the GPU backend active?
     [[nodiscard]] bool isGpuActive() const noexcept { return m_gpuActive; }
@@ -194,6 +198,24 @@ private:
     uint32_t          m_srcW{0};
     uint32_t          m_srcH{0};
     bool              m_imageDirty{false};
+    // Holds a reference to the CURRENTLY sampled texture until the
+    // GPU-signaled fence indicates the next frame's work is complete.
+    std::shared_ptr<void> m_sourceTextureOwner;
+
+    // ── Pending source image (deferred until after fence wait) ─────────
+    // displayGpuImage stores handles here; presentFrame applies them to
+    // m_sourceView/m_sourceSampler AFTER the previous frame's fence has
+    // signaled and m_presentMtx is held.  This closes the race where the
+    // compositor resizes and destroys the output texture between the
+    // handle store (displayGpuImage) and the fence wait (presentFrame).
+    VkImageView       m_pendingView{VK_NULL_HANDLE};
+    VkSampler         m_pendingSampler{VK_NULL_HANDLE};
+    uint32_t          m_pendingW{0};
+    uint32_t          m_pendingH{0};
+    bool              m_pendingValid{false};
+    // Holds a reference to the source texture (via gpuTextureOwner)
+    // until presentFrame's fence signals the GPU is done reading it.
+    std::shared_ptr<void> m_pendingTextureOwner;
 
     // ── CPU fallback ────────────────────────────────────────────────────
     QImage m_cpuImage;

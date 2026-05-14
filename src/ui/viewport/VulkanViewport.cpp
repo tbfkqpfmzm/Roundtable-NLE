@@ -175,6 +175,8 @@ void VulkanViewport::handleResize()
     m_sourceView    = VK_NULL_HANDLE;
     m_sourceSampler = VK_NULL_HANDLE;
     m_imageDirty    = true;
+    m_sourceTextureOwner.reset();
+    m_pendingTextureOwner.reset();
 }
 
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -183,7 +185,8 @@ void VulkanViewport::handleResize()
 
 void VulkanViewport::displayGpuImage(VkImageView imageView, VkSampler sampler,
                                       uint32_t imgWidth, uint32_t imgHeight,
-                                      VkSemaphore waitSemaphore)
+                                      VkSemaphore waitSemaphore,
+                                      std::shared_ptr<void> textureOwner)
 {
     m_frameWidth  = imgWidth;
     m_frameHeight = imgHeight;
@@ -202,24 +205,28 @@ void VulkanViewport::displayGpuImage(VkImageView imageView, VkSampler sampler,
         return;
     }
 
-    bool viewChanged = false;
-    if (imageView != m_sourceView || sampler != m_sourceSampler) {
-        m_sourceView    = imageView;
-        m_sourceSampler = sampler;
-        m_srcW          = imgWidth;
-        m_srcH          = imgHeight;
-        m_imageDirty    = true;
-        viewChanged = true;
-    }
+    // Defer source image storage to presentFrame() so it happens AFTER
+    // the previous frame's fence has signaled, under m_presentMtx.
+    // Without this deferral, the compositor can resize and destroy the
+    // output texture between the store here and the fence wait inside
+    // presentFrame, leaving m_sourceView/m_sourceSampler as dangling
+    // handles — GPU reads freed memory → nvoglv64.dll ACCESS_VIOLATION.
+    m_pendingView      = imageView;
+    m_pendingSampler   = sampler;
+    m_pendingW         = imgWidth;
+    m_pendingH         = imgHeight;
+    m_pendingValid     = true;
+    m_pendingTextureOwner = std::move(textureOwner);  // keep texture alive
 
     // DIAG: log viewport present attempts
     {
         static int s_vpLog = 0;
         if (++s_vpLog % 5 == 0) {
-            spdlog::info("[DIAG-VIEWPORT] displayGpuImage: view=0x{:X} viewChanged={} "
-                         "imageDirty={} {}x{}",
-                         reinterpret_cast<uint64_t>(imageView), viewChanged,
-                         m_imageDirty, imgWidth, imgHeight);
+            spdlog::info("[DIAG-VIEWPORT] displayGpuImage: view=0x{:X} "
+                         "sampler=0x{:X} pending=true {}x{}",
+                         reinterpret_cast<uint64_t>(imageView),
+                         reinterpret_cast<uint64_t>(sampler),
+                         imgWidth, imgHeight);
         }
     }
 
@@ -252,7 +259,12 @@ void VulkanViewport::presentFrame(VkSemaphore waitSemaphore)
 {
     std::lock_guard lock(m_presentMtx);
 
-    if (!m_gpuActive || !m_swapchain || m_sourceView == VK_NULL_HANDLE) {
+    if (!m_gpuActive || !m_swapchain) {
+        m_pendingValid = false;
+        recycleSemaphores();
+        return;
+    }
+    if (!m_pendingValid && m_sourceView == VK_NULL_HANDLE) {
         recycleSemaphores();
         return;
     }
@@ -305,13 +317,41 @@ void VulkanViewport::presentFrame(VkSemaphore waitSemaphore)
     // Handle resize
     if (m_swapchainDirty || m_swapchain->needsRecreation()) {
         handleResize();
-        if (!m_swapchain || m_swapchain->needsRecreation()) return;
-
-        // handleResize() sets m_sourceView = VK_NULL_HANDLE to invalidate
-        // stale composite textures.  We can't proceed with a NULL image
-        // view — vkUpdateDescriptorSets would NULL-deref the driver.
-        if (m_sourceView == VK_NULL_HANDLE)
+        if (!m_swapchain || m_swapchain->needsRecreation()) {
+            m_pendingValid = false;
             return;
+        }
+        // handleResize() sets m_sourceView = VK_NULL_HANDLE to invalidate
+        // stale composite textures.  The pending apply below will set it
+        // to the current compositor output if a new frame has arrived.
+    }
+
+    // Apply pending source image — SAFE because:
+    // 1. m_presentMtx is held (serialized with other present callers)
+    // 2. The previous frame's fence has signaled (waited above) — any
+    //    GPU work referencing the OLD descriptor (old handles) is done
+    // 3. compositor::resize() -> scheduler.deviceWaitIdle() waits for
+    //    ALL in-flight work including this viewport's submissions, so
+    //    the source texture stays alive until at least the NEXT resize
+    if (m_pendingValid) {
+        bool changed = (m_pendingView != m_sourceView ||
+                        m_pendingSampler != m_sourceSampler);
+        m_sourceView    = m_pendingView;
+        m_sourceSampler = m_pendingSampler;
+        m_srcW          = m_pendingW;
+        m_srcH          = m_pendingH;
+        if (changed) m_imageDirty = true;
+        m_pendingValid = false;
+        // Swap the texture owner reference — the old texture (from the
+        // previous frame) can now be freed since the GPU has signaled
+        // the previous fence (waited above) and won't read from it again.
+        m_sourceTextureOwner = std::move(m_pendingTextureOwner);
+    }
+
+    if (m_sourceView == VK_NULL_HANDLE) {
+        // No source image available even after applying pending.
+        recycleSemaphores();
+        return;
     }
 
     // Acquire swapchain image
@@ -732,6 +772,8 @@ void VulkanViewport::clearFrame()
     m_frameWidth  = 0;
     m_frameHeight = 0;
     m_sourceView  = VK_NULL_HANDLE;
+    m_sourceTextureOwner.reset();
+    m_pendingTextureOwner.reset();
 
     if (m_gpuActive) {
         presentClearFrame();

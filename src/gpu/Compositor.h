@@ -241,9 +241,14 @@ public:
 
     // ── Output access ───────────────────────────────────────────────────
 
-    [[nodiscard]] VkImage       outputImage()     const noexcept { return m_outputTexture.image(); }
-    [[nodiscard]] VkImageView   outputImageView() const noexcept override { return m_outputTexture.imageView(); }
-    [[nodiscard]] VkSampler     outputSampler()   const noexcept override { return m_outputTexture.sampler(); }
+    [[nodiscard]] VkImage       outputImage()     const noexcept { return m_outputTexture ? m_outputTexture->image()    : VK_NULL_HANDLE; }
+    [[nodiscard]] VkImageView   outputImageView() const noexcept override { return m_outputTexture ? m_outputTexture->imageView() : VK_NULL_HANDLE; }
+    [[nodiscard]] VkSampler     outputSampler()   const noexcept override { return m_outputTexture ? m_outputTexture->sampler()   : VK_NULL_HANDLE; }
+
+    /// Opaque shared ownership for CachedFrame::gpuTextureOwner.
+    /// Keeps the output texture alive as long as any composited frame
+    /// that sampled it is still in flight in the viewport.
+    [[nodiscard]] std::shared_ptr<void> outputTextureOwner() const noexcept { return m_outputTexture; }
     [[nodiscard]] uint32_t      outputWidth()     const noexcept { return m_config.outputWidth; }
     [[nodiscard]] uint32_t      outputHeight()    const noexcept { return m_config.outputHeight; }
 
@@ -316,8 +321,10 @@ private:
     CompositorConfig m_config;
     bool             m_initialized{false};
 
-    // Output storage image
-    Texture m_outputTexture;
+    // Output storage image — shared_ptr so CachedFrame references
+    // (via gpuTextureOwner) can keep the old texture alive after
+    // resize reassigns this pointer.
+    std::shared_ptr<Texture> m_outputTexture;
 
     // Compute pipeline
     PipelineManager m_pipelineManager;

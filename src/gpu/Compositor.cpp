@@ -130,7 +130,7 @@ void Compositor::updateDescriptorSet()
 
     // ── Binding 0: output storage image ─────────────────────────────────
     VkDescriptorImageInfo outputInfo{};
-    outputInfo.imageView   = m_outputTexture.imageView();
+    outputInfo.imageView   = m_outputTexture->imageView();
     outputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
     VkWriteDescriptorSet writes[4] = {};
@@ -309,13 +309,13 @@ bool Compositor::resize(uint32_t width, uint32_t height)
     if (!m_initialized) return false;
     if (width == m_config.outputWidth && height == m_config.outputHeight) return true;
 
-    vkDeviceWaitIdle(m_device->handle());
+    GpuContext::get().scheduler().deviceWaitIdle();
 
     m_config.outputWidth  = width;
     m_config.outputHeight = height;
 
     m_readbackStaging.destroy(); // recreated on next readback
-    m_outputTexture.destroy();
+    m_outputTexture.reset();
     if (!createOutputTexture())
         return false;
 
@@ -329,7 +329,7 @@ bool Compositor::resize(uint32_t width, uint32_t height)
 
 VkDescriptorImageInfo Compositor::outputDescriptorInfo() const
 {
-    return m_outputTexture.descriptorInfo();
+    return m_outputTexture->descriptorInfo();
 }
 
 // ── readbackOutput ──────────────────────────────────────────────────────────
@@ -358,7 +358,7 @@ bool Compositor::readbackOutput(std::vector<uint8_t>& outPixels)
     VkCommandBuffer cmd = m_cmdPool->beginSingleTime();
 
     // Transition output to TRANSFER_SRC
-    m_outputTexture.transitionLayout(cmd,
+    m_outputTexture->transitionLayout(cmd,
         VK_IMAGE_LAYOUT_GENERAL,
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 
@@ -374,12 +374,12 @@ bool Compositor::readbackOutput(std::vector<uint8_t>& outPixels)
     region.imageOffset = {0, 0, 0};
     region.imageExtent = {w, h, 1};
 
-    vkCmdCopyImageToBuffer(cmd, m_outputTexture.image(),
+    vkCmdCopyImageToBuffer(cmd, m_outputTexture->image(),
                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            m_readbackStaging.handle(), 1, &region);
 
     // Transition back to GENERAL for next composite
-    m_outputTexture.transitionLayout(cmd,
+    m_outputTexture->transitionLayout(cmd,
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
         VK_IMAGE_LAYOUT_GENERAL);
 
@@ -435,7 +435,7 @@ bool Compositor::recordReadback(VkCommandBuffer cmd)
         0, 1, &barrier, 0, nullptr, 0, nullptr);
 
     // Transition output to TRANSFER_SRC
-    m_outputTexture.transitionLayout(cmd,
+    m_outputTexture->transitionLayout(cmd,
         VK_IMAGE_LAYOUT_GENERAL,
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 
@@ -451,12 +451,12 @@ bool Compositor::recordReadback(VkCommandBuffer cmd)
     region.imageOffset = {0, 0, 0};
     region.imageExtent = {w, h, 1};
 
-    vkCmdCopyImageToBuffer(cmd, m_outputTexture.image(),
+    vkCmdCopyImageToBuffer(cmd, m_outputTexture->image(),
                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            m_readbackStaging.handle(), 1, &region);
 
     // Transition back to GENERAL for next composite
-    m_outputTexture.transitionLayout(cmd,
+    m_outputTexture->transitionLayout(cmd,
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
         VK_IMAGE_LAYOUT_GENERAL);
 

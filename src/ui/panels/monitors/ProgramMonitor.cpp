@@ -431,7 +431,8 @@ bool ProgramMonitor::presentFrame(const std::shared_ptr<CachedFrame>& frame)
                 reinterpret_cast<VkImageView>(frame->gpuImageView),
                 reinterpret_cast<VkSampler>(frame->gpuSampler),
                 frame->width, frame->height,
-                reinterpret_cast<VkSemaphore>(frame->gpuSemaphore.load()));
+                reinterpret_cast<VkSemaphore>(frame->gpuSemaphore.load()),
+                frame->gpuTextureOwner);
             m_lastDirectFrame = frame;
             return true;
         }

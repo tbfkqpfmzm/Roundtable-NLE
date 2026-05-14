@@ -155,7 +155,7 @@ void Compositor::shutdown()
     m_readbackStaging.destroy();
     m_layerParamsBuffer.destroy();
     m_placeholderTexture.destroy();
-    m_outputTexture.destroy();
+    m_outputTexture.reset();
 
     m_layers.clear();
     m_layerCount  = 0;
@@ -189,15 +189,17 @@ bool Compositor::createOutputTexture()
         cfg.concurrentQueueFamilies = {computeFamily, graphicsFamily};
     }
 
-    if (!m_outputTexture.create(m_allocator->handle(), m_device->handle(), cfg))
+    m_outputTexture = std::make_shared<Texture>();
+    if (!m_outputTexture->create(m_allocator->handle(), m_device->handle(), cfg))
     {
         spdlog::error("Compositor: Failed to create output texture");
+        m_outputTexture.reset();
         return false;
     }
 
     // Transition to GENERAL for compute shader writes
     VkCommandBuffer cmd = m_cmdPool->beginSingleTime();
-    m_outputTexture.transitionLayout(cmd, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    m_outputTexture->transitionLayout(cmd, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
     m_cmdPool->endSingleTime(cmd, m_queue);
 
     return true;

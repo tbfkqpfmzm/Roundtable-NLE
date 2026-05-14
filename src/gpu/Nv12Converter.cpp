@@ -8,6 +8,8 @@
 
 #include <volk.h>
 #include "Nv12Converter.h"
+#include "GpuContext.h"
+#include "GpuScheduler.h"
 
 #define VMA_STATIC_VULKAN_FUNCTIONS 0
 #define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
@@ -165,7 +167,7 @@ bool Nv12Converter::resize(uint32_t width, uint32_t height)
     m_config.height = height;
 
     if (m_initialized) {
-        vkDeviceWaitIdle(m_device->handle());
+        GpuContext::get().scheduler().deviceWaitIdle();
         m_yTexture.destroy();
         m_uvTexture.destroy();
         m_uTexture.destroy();

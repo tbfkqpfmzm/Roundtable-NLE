@@ -1188,6 +1188,9 @@ std::shared_ptr<CachedFrame> CompositeEngine::compositeViaRenderGraph(
             result->gpuImageView = reinterpret_cast<uint64_t>(compositor->outputImageView());
             result->gpuSampler   = reinterpret_cast<uint64_t>(compositor->outputSampler());
             result->gpuSemaphore = reinterpret_cast<uint64_t>(frameSem);
+            // Keep the compositor's output texture alive until all frames
+            // referencing it are consumed by the viewport.
+            result->gpuTextureOwner = compositor->outputTextureOwner();
         }
 
         if (readbackOk && gpuDisplayMode && !scrubMode) {

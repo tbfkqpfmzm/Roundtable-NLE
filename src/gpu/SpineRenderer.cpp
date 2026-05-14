@@ -559,7 +559,7 @@ void SpineRenderer::releaseTexture(int pageIndex)
     if (it == m_atlasTextures.end()) return;
 
     if (m_vkDevice != VK_NULL_HANDLE)
-        vkDeviceWaitIdle(m_vkDevice);
+        GpuContext::get().scheduler().deviceWaitIdle();
 
     if (it->second.descriptorSet != VK_NULL_HANDLE) {
         vkFreeDescriptorSets(m_vkDevice, m_descriptorPool, 1, &it->second.descriptorSet);
@@ -571,7 +571,7 @@ void SpineRenderer::releaseTexture(int pageIndex)
 void SpineRenderer::releaseAllTextures()
 {
     if (m_vkDevice != VK_NULL_HANDLE && !m_atlasTextures.empty())
-        vkDeviceWaitIdle(m_vkDevice);
+        GpuContext::get().scheduler().deviceWaitIdle();
 
     for (auto& [idx, slot] : m_atlasTextures) {
         if (slot.descriptorSet != VK_NULL_HANDLE) {
@@ -856,7 +856,7 @@ bool SpineRenderer::resize(uint32_t width, uint32_t height)
 {
     if (!m_initialized) return false;
 
-    vkDeviceWaitIdle(m_vkDevice);
+    GpuContext::get().scheduler().deviceWaitIdle();
 
     m_config.renderWidth  = width;
     m_config.renderHeight = height;
