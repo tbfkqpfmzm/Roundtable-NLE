@@ -54,10 +54,17 @@ void GpuScheduler::shutdown()
                  m_graphics.submissions.load(std::memory_order_relaxed),
                  m_compute.submissions.load(std::memory_order_relaxed),
                  m_transfer.submissions.load(std::memory_order_relaxed));
-    m_device       = VK_NULL_HANDLE;
-    m_graphics     = {};
-    m_compute      = {};
-    m_transfer     = {};
+    m_device = VK_NULL_HANDLE;
+    // QueueSlot holds a std::atomic so it can't be copy-assigned with {};
+    // clear fields in place instead.
+    auto clearSlot = [](QueueSlot& s) {
+        s.queue = VK_NULL_HANDLE;
+        s.mutex = nullptr;
+        s.submissions.store(0, std::memory_order_relaxed);
+    };
+    clearSlot(m_graphics);
+    clearSlot(m_compute);
+    clearSlot(m_transfer);
     m_totalSubmissions.store(0, std::memory_order_relaxed);
 }
 
