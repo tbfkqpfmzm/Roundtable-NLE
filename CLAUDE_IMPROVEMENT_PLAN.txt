@@ -364,38 +364,60 @@ P3 — UNIFIED CACHE COORDINATOR  [LANDED — see realized scope below]
   further is yak-shaving.
 
 
-P4 — STANDARDIZE THE THREADING MODEL  [1 week]
-──────────────────────────────────────────────
+P4 — STANDARDIZE THE THREADING MODEL  [DEFERRED — see below]
+────────────────────────────────────────────────────────────
 
-  Today there are at least 8 thread roles, each with its own
-  communication style:
-    - FrameClock (TIME_CRITICAL, atomic counter + cv)
-    - FrameProducer (composite worker, request queue + cv)
-    - FramePresenter (lock-free exchange slot)
-    - MediaPool prefetch workers ×10 (custom queue + futures)
-    - MediaPool loop pre-decode workers ×4 (separate queue)
-    - AudioSync worker (dedicated thread + atomic)
-    - ScopesPanel worker (timer + queue)
-    - Various encoders (RenderQueue, ChromaKeyEncoder)
+  Originally proposed: pick one inter-thread pattern (MPMC queue +
+  std::move ownership transfer + std::stop_token cancellation) and
+  apply it to all 35 thread-spawning files in the codebase.
 
-  Pick one pattern and apply it everywhere:
+  Status: DEFERRED after the post-P3 audit (May 15, 2026).
 
-    Recommendation — single MPMC queue + ownership transfer:
-      • All inter-thread messages use std::move into a MPMC queue
-        (e.g. moodycamel::ConcurrentQueue, already a common dep).
-      • No shared_ptr fan-out unless multiple consumers genuinely need
-        a copy.  shared_ptr ref-count contention is invisible until it
-        isn't.
-      • Per-thread state is owned exclusively by that thread; no other
-        thread reads or writes it.
-      • Cancellation via a single std::stop_token per thread.
+  Why deferred:
 
-  Apply to: FrameClock, FrameProducer, FramePresenter (they already
-  approximate this), MediaPool prefetch, AudioSync, encoders.
+    1. The threading bugs that actually shipped were architectural,
+       not pattern-inconsistency:
+         • The May 14 cross-queue Spine→Compositor TDR — fixed by
+           cross-queue semaphore plumbing (P0).
+         • The May 15 program-monitor deadlock — fixed by removing
+           a redundant queue-mutex lock around a scheduler submit
+           (post-P1 cleanup).
+       Neither would have been prevented by uniform MPMC plumbing —
+       both came from forgetting Vulkan synchronization rules.
 
-  The "BACKUP: pre-thread-model-fix" commit (5ae91f4) suggests the
-  user has already started this.  The work should be finished and the
-  backup branch deleted.
+    2. The threading currently works.  FrameClock / FrameProducer /
+       FramePresenter use request queue + condition variable.
+       MediaPool prefetch uses a custom priority queue + worker
+       affinity.  Encoders use simple "thread + atomic running" loops.
+       None of these are broken; they're just stylistically different.
+
+    3. A 35-file migration introduces real regression risk on a
+       codebase that just regained stability after P0-P2.  The user
+       (rmdoug) is shipping again.  Disturbing that for stylistic
+       consistency is the wrong trade.
+
+  When P4 SHOULD be revisited:
+
+    • A specific new threading bug surfaces that the current
+      patterns can't express cleanly.
+    • The codebase gains a third or fourth pattern variant (cap it
+      before it grows further).
+    • A specific subsystem (e.g. MediaPool prefetch) is being
+      rewritten for other reasons and standardizing its threading
+      is a small marginal cost on top.
+
+  Small wins that ARE worth doing without the full P4:
+
+    • Audit and document the existing pattern per subsystem so a
+      new contributor can find the right reference quickly.
+    • Replace ad-hoc std::atomic<bool> m_running flags with
+       std::stop_token / std::jthread when a thread is rewritten
+      for unrelated reasons.  Don't churn working code just to flip
+      the cancellation style.
+
+  Net: P4 stays in the backlog with a "revisit when N applies"
+  trigger.  P5/P6 plus the realized P0-P3 cover the stability
+  mission already.
 
 
 P5 — BOUND CONCURRENCY  [2 days]
