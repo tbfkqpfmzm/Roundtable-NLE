@@ -55,6 +55,10 @@ assets/characters/
 assets/cache/
 assets/temp/
 
+# Converted/transcoded character assets (regenerated from source)
+assets/Converted/
+*.rendering
+
 # AI model checkpoints (downloaded via setup)
 **/checkpoints/
 
