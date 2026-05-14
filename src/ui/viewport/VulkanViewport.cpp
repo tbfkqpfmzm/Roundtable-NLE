@@ -378,18 +378,26 @@ void VulkanViewport::presentFrame(VkSemaphore waitSemaphore)
         : 16.0f / 9.0f;
     float winAspect = swW / std::max(swH, 1.0f);
 
+    // ~5% padding on each side (kFitPadding=0.95) so the frame never
+    // touches the viewport edges.  Mirrors the same constant in
+    // Viewport.cpp's CPU path; per CLAUDE_IMPROVEMENT_PLAN user request.
+    // When the user zooms in (m_viewZoom > 1), the viewport rect
+    // expands past the swapchain bounds and the scissor clips — i.e.
+    // the padding only matters at fit (zoom = 1).
+    constexpr float kFitPadding = 0.95f;
+
     float baseW, baseH, baseX, baseY;
     if (winAspect > imgAspect) {
-        // Window wider than image â€” pillarbox
-        baseH = swH;
-        baseW = swH * imgAspect;
+        // Window wider than image — pillarbox
+        baseH = swH * kFitPadding;
+        baseW = baseH * imgAspect;
         baseX = (swW - baseW) * 0.5f;
-        baseY = 0.0f;
+        baseY = (swH - baseH) * 0.5f;
     } else {
-        // Window taller than image â€” letterbox
-        baseW = swW;
-        baseH = swW / imgAspect;
-        baseX = 0.0f;
+        // Window taller than image — letterbox
+        baseW = swW * kFitPadding;
+        baseH = baseW / imgAspect;
+        baseX = (swW - baseW) * 0.5f;
         baseY = (swH - baseH) * 0.5f;
     }
 
@@ -927,6 +935,23 @@ void VulkanViewport::resizeEvent(QResizeEvent* event)
     emit resized();
 
     s_inResize = false;
+}
+
+void VulkanViewport::moveEvent(QMoveEvent* event)
+{
+    QWidget::moveEvent(event);
+
+    // Vulkan native surfaces don't follow Qt's normal paint/expose loop:
+    // moving the widget (e.g. dock rearrange, floating-window drag) does
+    // NOT fire resizeEvent or paintEvent, so the last-presented swapchain
+    // content stays on screen at the OLD position, producing a visible
+    // "echo" of stale UI alongside the new position.  Schedule a deferred
+    // redraw so the surface refreshes once the move settles.  Coalesced
+    // by scheduleDeferredRedraw so a rapid drag doesn't queue dozens of
+    // present calls.
+    if (m_gpuActive && m_sourceView != VK_NULL_HANDLE) {
+        scheduleDeferredRedraw();
+    }
 }
 
 QSize VulkanViewport::sizeHint() const

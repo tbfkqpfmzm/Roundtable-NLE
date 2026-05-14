@@ -580,9 +580,14 @@ void Viewport::recalcLayout()
     {
     case ViewportFitMode::Fit:
     {
+        // ~5% padding on each side so the frame doesn't touch the
+        // viewport edges (per CLAUDE_IMPROVEMENT_PLAN user request).
+        // 0.95 = total content occupies 95% of the available space →
+        // 2.5% padding per side.  Adjust this constant to taste.
+        constexpr double kFitPadding = 0.95;
         double scaleX = ww / fw;
         double scaleY = wh / fh;
-        double scale  = std::min(scaleX, scaleY);
+        double scale  = std::min(scaleX, scaleY) * kFitPadding;
         double dw     = fw * scale;
         double dh     = fh * scale;
         baseRect = QRectF((ww - dw) * 0.5, (wh - dh) * 0.5, dw, dh);

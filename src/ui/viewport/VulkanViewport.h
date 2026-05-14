@@ -130,6 +130,7 @@ signals:
 protected:
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
+    void moveEvent(QMoveEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
     void mouseDoubleClickEvent(QMouseEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
