@@ -1152,7 +1152,12 @@ std::shared_ptr<CachedFrame> CompositeEngine::compositeViaRenderGraph(
     const bool endOk = slot.endRecording();
     bool gpuSubmitOk = false;
     if (endOk) {
-        std::lock_guard qLock(ctx.computeQueueMutex());
+        // Note: no manual ctx.computeQueueMutex() lock here.  GpuWork-
+        // Submission::submit routes through GpuScheduler (P1.1), which
+        // owns the queue mutex.  Locking it manually here would re-enter
+        // a non-recursive std::mutex on the same thread and throw
+        // resource_deadlock_would_occur — exactly the regression that
+        // caused the program monitor to stay blank.
         gpuSubmitOk = slot.submit(ctx.computeQueue(), frameSem, nullptr);
     }
 
