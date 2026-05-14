@@ -71,7 +71,14 @@ target_precompile_headers(roundtable_gpu PRIVATE pch_gpu.h)
 # P1.5: GpuScheduler.cpp is the only TU allowed to call vkQueueSubmit
 # directly.  The pch_gpu.h macro guard replaces vkQueueSubmit elsewhere
 # with a sentinel that fails to compile.
+#
+# IMPORTANT: target_precompile_headers builds ONE PCH per target, with
+# the macro definition baked in.  Per-source COMPILE_DEFINITIONS arrives
+# too late to opt out of a baked PCH symbol.  So we skip the PCH for
+# this one source file — it includes <volk.h> and <spdlog/spdlog.h>
+# directly, so it doesn't need the PCH.
 set_source_files_properties(GpuScheduler.cpp PROPERTIES
+    SKIP_PRECOMPILE_HEADERS TRUE
     COMPILE_DEFINITIONS "ROUNDTABLE_ALLOW_VK_QUEUE_SUBMIT")
 
 # Use volk (runtime Vulkan loader — no Vulkan SDK install required)
