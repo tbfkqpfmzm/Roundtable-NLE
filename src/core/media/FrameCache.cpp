@@ -113,6 +113,18 @@ void FrameCache::setPlayhead(uint64_t mediaId, int64_t frameNumber)
     m_playheads[mediaId] = frameNumber;
 }
 
+void FrameCache::setPlayheadWindow(uint64_t mediaId,
+                                   int64_t playheadFrame,
+                                   int aheadCount,
+                                   int behindCount)
+{
+    std::lock_guard lock(m_mutex);
+    m_playheads[mediaId] = playheadFrame;
+    WindowExtent& w = m_windows[mediaId];
+    w.behind = std::max(0, behindCount);
+    w.ahead  = std::max(0, aheadCount);
+}
+
 bool FrameCache::contains(uint64_t mediaId, int64_t frameNumber,
                            ResolutionTier tier) const
 {
@@ -339,13 +351,25 @@ void FrameCache::evictUntilFits(size_t neededBytes)
                 }
             }
 
-            // Check if this frame is behind the playhead for its media.
+            // Check if this frame is OUTSIDE the protected playback window
+            // for its media.  Default extent is 5 behind / 0 ahead (matches
+            // pre-Phase-B behavior).  UnifiedCache::setPlayheadWindow can
+            // widen the window per media via FrameCache::setPlayheadWindow.
             auto phIt = m_playheads.find(key.mediaId);
             if (phIt != m_playheads.end()) {
                 int64_t playhead = phIt->second;
-                // Frame is more than 5 frames behind the playhead — safe to evict.
-                // Keep a small window behind for backward scrub tolerance.
-                if (key.frameNumber < playhead - 5) {
+                int behindExt = 5;
+                int aheadExt  = 0;
+                auto winIt = m_windows.find(key.mediaId);
+                if (winIt != m_windows.end()) {
+                    behindExt = winIt->second.behind;
+                    aheadExt  = winIt->second.ahead;
+                }
+                const int64_t lo = playhead - behindExt;
+                const int64_t hi = playhead + aheadExt;
+                const bool outsideWindow = (key.frameNumber < lo) ||
+                                           (aheadExt > 0 && key.frameNumber > hi);
+                if (outsideWindow) {
                     auto mapIt = m_map.find(key);
                     if (mapIt != m_map.end()) {
                         size_t freed = mapIt->second.frame->memoryUsage();
@@ -359,7 +383,7 @@ void FrameCache::evictUntilFits(size_t neededBytes)
                     continue;
                 }
             }
-            // Not behind playhead or no playhead info — skip in pass 1
+            // Inside protected window or no playhead info — skip in pass 1
         }
     }
 

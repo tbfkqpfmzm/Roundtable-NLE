@@ -290,9 +290,20 @@ bool EffectProcessor::processSync(const VkDescriptorImageInfo& sourceImage,
     bool ok = process(cmd, sourceImage, effects);
     vkEndCommandBuffer(cmd);
 
-    // Use persistent fence (reset + reuse) to avoid per-call create/destroy
+    // Use persistent fence (reset + reuse) to avoid per-call create/destroy.
+    // A5: 100ms bounded fence waits.  These calls are on the synchronous
+    // single-shot EffectProcessor path (compositeSync, test code) — the
+    // per-frame DAG path does not reach here.  Even so, an infinite wait
+    // could deadlock the test runner or export pipeline if the GPU hangs.
     if (ok && m_syncFence != VK_NULL_HANDLE) {
-        vkWaitForFences(m_device->handle(), 1, &m_syncFence, VK_TRUE, UINT64_MAX);
+        constexpr uint64_t kFenceTimeoutNs = 100'000'000ull;
+        if (vkWaitForFences(m_device->handle(), 1, &m_syncFence,
+                             VK_TRUE, kFenceTimeoutNs) == VK_TIMEOUT)
+        {
+            spdlog::error("[EFFECT] pre-submit fence timeout — bailing");
+            m_cmdPool->freeBuffer(cmd);
+            return false;
+        }
         vkResetFences(m_device->handle(), 1, &m_syncFence);
 
         VkSubmitInfo submitInfo{};
@@ -305,7 +316,13 @@ bool EffectProcessor::processSync(const VkDescriptorImageInfo& sourceImage,
             std::lock_guard lock(rt::GpuContext::get().computeQueueMutex());
             vkQueueSubmit(m_queue, 1, &submitInfo, m_syncFence);
         }
-        vkWaitForFences(m_device->handle(), 1, &m_syncFence, VK_TRUE, UINT64_MAX);
+        if (vkWaitForFences(m_device->handle(), 1, &m_syncFence,
+                             VK_TRUE, kFenceTimeoutNs) == VK_TIMEOUT)
+        {
+            spdlog::error("[EFFECT] post-submit fence timeout — GPU hang");
+            m_cmdPool->freeBuffer(cmd);
+            return false;
+        }
 
         m_cmdPool->freeBuffer(cmd);
     } else {

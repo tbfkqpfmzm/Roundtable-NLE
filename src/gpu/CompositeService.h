@@ -49,6 +49,7 @@ namespace rt {
 class AnimationVideoCache;
 class AudioEngine;
 class CacheCoordinator;
+class UnifiedCache;
 class Clip;
 class GraphicClip;
 class MediaPool;
@@ -145,6 +146,14 @@ public:
         }
     }
 
+    /// A3: range-scoped invalidation.  Drops only LRU entries whose
+    /// tick is in [fromTick, toTick].  Cheap enough to call
+    /// directly without the atomic-flag dance (acquires
+    /// m_compositeMutex with try_lock; if busy, falls back to full
+    /// invalidation via requestCacheInvalidation()).  Edits that
+    /// modify a known time range should prefer this.
+    void requestCacheInvalidationRange(int64_t fromTick, int64_t toTick);
+
     /// Try to invalidate immediately (used when caller holds no lock).
     void invalidateCacheDirect();
 
@@ -217,6 +226,11 @@ public:
     /// Set the CacheCoordinator for system-adaptive budgets and VRAM
     /// pressure monitoring.  Forwards to CompositeEngine.
     void setCacheCoordinator(rt::CacheCoordinator* coordinator);
+
+    /// Phase B: install the UnifiedCache coordinator.  May be null.
+    /// CompositeService stores the pointer and forwards per-frame
+    /// generation ticks + playhead window updates.
+    void setUnifiedCache(rt::UnifiedCache* uc) noexcept { m_unifiedCache = uc; }
 
     // ── Composite engine access ─────────────────────────────────────────
     [[nodiscard]] CompositeEngine* engine() const noexcept { return m_engine.get(); }
@@ -401,6 +415,21 @@ private:
     mutable std::mutex m_lastCompositeMtx;
     std::shared_ptr<CachedFrame> m_lastGoodComposite;
     int64_t m_lastGoodCompositeTick{-1};
+
+    // A1: settle-window state.  When a composite is incomplete (fewer
+    // resolved layers than active clips at the tick), we hold the prior
+    // complete frame for up to kSettleWindowMs ms instead of showing a
+    // partial composite that "builds up" layer-by-layer over several
+    // frames.  Reset when a fully-resolved composite is produced.
+    int  m_lastFullLayerCount{0};
+    std::chrono::steady_clock::time_point m_lastFullCompositeAt{};
+    static constexpr int kSettleWindowMs = 200;
+
+    // Phase B: UnifiedCache coordinator (non-owning pointer).  Wired by
+    // App::createMainWindow after CompositeService is constructed.  May
+    // be null in tests and during early startup.
+    UnifiedCache* m_unifiedCache{nullptr};
+
     std::atomic<bool> m_cacheInvalidateRequested{false};
 
     // Track active clip IDs for shot-boundary detection

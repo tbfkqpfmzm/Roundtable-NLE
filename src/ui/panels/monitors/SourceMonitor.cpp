@@ -36,6 +36,8 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPointer>
+#include <QResizeEvent>
+#include <QTimer>
 #include <QTreeWidget>
 #include <QApplication>
 
@@ -483,13 +485,57 @@ void SourceMonitor::updateFrameDisplay()
     emit playheadChanged(tick);
 }
 
+void SourceMonitor::resizeEvent(QResizeEvent* event)
+{
+    QWidget::resizeEvent(event);
+    // Mirror of ProgramMonitor::resizeEvent — see that file for the full
+    // explanation of why repaint() + updateFrameDisplay() + a deferred
+    // update() are all needed (Windows modal WM_SIZE loop suppresses
+    // queued paint events while the dock still receives stale WM_PAINTs).
+    auto forceRepaint = [this]() {
+        repaint();
+        if (auto* lay = layout()) {
+            for (int i = 0; i < lay->count(); ++i) {
+                auto* item = lay->itemAt(i);
+                auto* w = item ? item->widget() : nullptr;
+                if (!w || !w->isVisible()) continue;
+                if (m_viewport && w == m_viewport->parentWidget()) continue;
+                w->repaint();
+            }
+        }
+    };
+    forceRepaint();
+
+    // Produce a fresh decoded frame at the new widget size so the viewport
+    // content is correct during/after resize even when paused.  Without
+    // this, the poll timer stops (when not playing) and the old stretched
+    // frame remains — the "echo" effect.
+    updateFrameDisplay();
+    // Keep the poll timer alive briefly after resize to settle, so any
+    // late decodes or paint corrections take effect.
+    if (!m_controller->isPlaying()) {
+        m_scrubSettleCounter = 10;
+        if (!m_pollTimer->isActive())
+            m_pollTimer->start();
+    }
+
+    QTimer::singleShot(0, this, [this]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
+        update();
+        if (auto* lay = layout()) {
+            for (int i = 0; i < lay->count(); ++i) {
+                auto* item = lay->itemAt(i);
+                auto* w = item ? item->widget() : nullptr;
+                if (!w || !w->isVisible()) continue;
+                if (m_viewport && w == m_viewport->parentWidget()) continue;
+                w->update();
+            }
+        }
+    });
+}
+
 void SourceMonitor::updateTimecodeDisplay()
 {
-    if (!m_controller) return;
-
-    std::string tc = m_controller->currentTimecodeString();
-    m_timecodeLabel->setText(QString::fromStdString(tc));
-
     // Update duration timecode
     if (m_durationLabel) {
         auto dur = tickToTimecode(m_controller->durationTicks(),

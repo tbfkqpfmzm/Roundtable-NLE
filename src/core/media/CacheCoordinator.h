@@ -43,6 +43,13 @@ public:
     /// Returns budget bytes via the out-parameter.
     using VramPressureFn = std::function<bool(size_t* vramBudgetOut)>;
 
+    /// Signature for temporarily reducing the GPU texture cache budget.
+    /// Called when the CPU FrameCache is under sustained pressure so the
+    /// GPU side gives up some VRAM (which frees the matching shared_ptr
+    /// references the CPU cache may be holding), and again to restore the
+    /// original budget when pressure subsides.
+    using SetGpuBudgetFn = std::function<void(size_t newBudgetBytes)>;
+
     CacheCoordinator();
     ~CacheCoordinator();
 
@@ -63,6 +70,11 @@ public:
     /// Called from onFrameCompleted().  The callback lives in the GPU layer
     /// (CompositeEngine) which has access to GpuTextureCache.
     void setVramPressureFn(VramPressureFn fn) { m_vramPressureFn = std::move(fn); }
+
+    /// Register a callback to set the GPU texture cache budget.  Used by
+    /// the CPU-pressure response path to shrink VRAM allocation when RAM
+    /// is full, and to restore the original budget when pressure subsides.
+    void setGpuBudgetFn(SetGpuBudgetFn fn) { m_setGpuBudgetFn = std::move(fn); }
 
     // ── Budget queries (used by factories before caches exist) ─────────────
 
@@ -106,14 +118,24 @@ private:
     /// Check VRAM pressure and evict co-owned GPU textures from FrameCache.
     void checkVramPressure();
 
+    /// Check CPU FrameCache pressure and shrink GPU budget if over 90%.
+    /// Restores the original budget once pressure subsides.
+    void checkCpuPressure();
+
     FrameCache*      m_frameCache{nullptr};
     DiskFrameCache*  m_diskCache{nullptr};
 
     VramPressureFn   m_vramPressureFn;
+    SetGpuBudgetFn   m_setGpuBudgetFn;
 
     size_t m_totalRam{0};
     size_t m_totalVram{0};
     size_t m_vramBudget{0};
+
+    // CPU-pressure response state: when active, the GPU budget has been
+    // temporarily shrunk to relieve cross-cache pressure.  Reverted when
+    // CPU usage drops below the low-water mark.
+    bool   m_cpuPressureActive{false};
 
     // Throttle pressure checks to once every N seconds
     std::chrono::steady_clock::time_point m_lastPressureCheck;

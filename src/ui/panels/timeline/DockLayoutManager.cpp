@@ -335,6 +335,7 @@ bool DockLayoutManager::applyState(const QByteArray& state,
         edgeMW->setObjectName(QStringLiteral("EdgeColumn"));
         edgeMW->setWindowFlags(Qt::Widget);
         edgeMW->setDockNestingEnabled(true);
+        edgeMW->setAnimated(false);
         edgeMW->setMinimumWidth(150);
         edgeMW->setTabPosition(Qt::TopDockWidgetArea, QTabWidget::North);
         edgeMW->setTabPosition(Qt::BottomDockWidgetArea, QTabWidget::North);
@@ -388,7 +389,13 @@ bool DockLayoutManager::applyState(const QByteArray& state,
     if (m_cfg.edgeSplitter)
         m_cfg.edgeSplitter->updateGeometry();
     m_cfg.innerMainWindow->updateGeometry();
-    QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+    // A6: replaced full processEvents() with a targeted flush of only
+    // QEvent::LayoutRequest events.  The previous call re-entered the
+    // event loop and could process resize / paint / deferred-delete
+    // events mid-layout, which contributed to the dock-animation crash
+    // class.  This narrower flush still propagates the splitter sizes
+    // but does not run user code from arbitrary other event handlers.
+    QApplication::sendPostedEvents(nullptr, QEvent::LayoutRequest);
 
     // ── Step 4: Remove edge-bound docks from inner MW before restore ─
     for (const QString& name : edgeDockNames) {

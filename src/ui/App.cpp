@@ -7,6 +7,7 @@
 #include "App.h"
 #include "MainWindow.h"
 #include "ShortcutManager.h"
+#include "panels/monitors/ProgramMonitor.h"
 #include "panels/timeline/TimelineWorkspace.h"
 #include "CompositeService.h"
 #include "Theme.h"
@@ -18,6 +19,7 @@
 #include "media/MediaPool.h"
 #include "media/MediaSourceService.h"
 #include "media/CacheCoordinator.h"
+#include "media/UnifiedCache.h"
 #include "media/FrameCache.h"
 #include "media/DiskFrameCache.h"
 #include "media/PlaybackController.h"
@@ -97,8 +99,21 @@ App::~App()
 {
     auto& sm = ShutdownManager::instance();
 
-    // Phase 1: Stop all background threads
+    // Phase 1: Stop all background threads.
+    // A10: explicitly stop the PlaybackScheduler (clock + producer +
+    // presenter threads) so they can't call into the CompositeService
+    // while MainWindow's widget tree is torn down in Phase 3.  The
+    // presenter and producer hold callback lambdas that capture
+    // CompositeService pointers; without an explicit stop here the
+    // join would happen as a side-effect of ProgramMonitor's
+    // destructor late in Phase 3.
     sm.advanceTo(ShutdownPhase::Phase1_StopThreads);
+    if (m_mainWindow) {
+        if (auto* tw = m_mainWindow->timelineWorkspace()) {
+            if (auto* pm = tw->programMonitor())
+                pm->stopPlaybackPipeline();
+        }
+    }
     if (m_audioEngine) m_audioEngine->shutdown();
     m_audioEngine.reset();
     if (m_scanThread.joinable()) m_scanThread.join();
@@ -165,6 +180,13 @@ bool App::init()
     // ── Cache coordinator (system-adaptive budgets) ─────────────────
     m_cacheCoordinator = std::make_unique<CacheCoordinator>();
 
+    // ── Unified cache coordinator (generation + playhead-window) ────
+    // Phase B: overlays the existing CPU + GPU caches with a single
+    // generation counter and per-media playback-window pinning.  See
+    // UnifiedCache.h for the design rationale (coordinator vs full
+    // replacement).
+    m_unifiedCache = std::make_unique<UnifiedCache>();
+
     // ── AV sync clock (audio-driven master clock) ────────────────────
     m_syncClock = std::make_unique<AVSyncClock>();
     m_audioEngine->setSyncClock(m_syncClock.get());
@@ -174,6 +196,7 @@ bool App::init()
         // CacheCoordinator will override it with a system-adaptive budget.
         auto frameCache = std::make_shared<FrameCache>(8ull * 1024 * 1024 * 1024);
         m_cacheCoordinator->setFrameCache(frameCache.get());
+        m_unifiedCache->setFrameCache(frameCache.get());
         m_mediaPool = std::make_unique<MediaPool>(std::move(frameCache));
     }
 
@@ -236,6 +259,21 @@ bool App::createMainWindow()
 
     m_mainWindow = std::make_unique<MainWindow>();
 
+    // A8: Install fatal-GPU-failure callback as soon as the MainWindow
+    // exists.  Previously this was done just before showMaximized(), but
+    // buildPanels()/applyDefaultLayout() can synchronously trigger Vulkan
+    // work (program-monitor probe, thumbnail decode), and if that first
+    // GPU work hits VK_ERROR_DEVICE_LOST the dialog wouldn't fire.
+    {
+        MainWindow* mw = m_mainWindow.get();
+        GpuContext::get().setFatalFailureCallback([mw]() {
+            if (!mw) return;
+            QMetaObject::invokeMethod(mw, [mw]() {
+                mw->showGpuFatalError();
+            }, Qt::QueuedConnection);
+        });
+    }
+
     // Wire subsystems
     m_mainWindow->setTimeline(m_timeline.get());
     m_mainWindow->setCommandStack(m_commandStack.get());
@@ -282,6 +320,9 @@ bool App::createMainWindow()
         }
     }
 
+    // (Fatal-GPU-failure callback was installed earlier — see A8 block
+    // immediately after MainWindow construction.)
+
     m_mainWindow->showMaximized();
 
     // Finish async model scan — by now the scan thread has been running
@@ -296,7 +337,7 @@ bool App::createMainWindow()
     }
 #endif
 
-    // ── Wire CacheCoordinator into CompositeService ─────────────────
+    // ── Wire CacheCoordinator + UnifiedCache into CompositeService ───
     // Must happen after MainWindow builds panels (which creates
     // TimelineWorkspace → CompositeService → CompositeEngine).
     {
@@ -305,6 +346,7 @@ bool App::createMainWindow()
             auto* cs = tw->compositeService();
             if (cs) {
                 cs->setCacheCoordinator(m_cacheCoordinator.get());
+                cs->setUnifiedCache(m_unifiedCache.get());
             }
         }
         m_cacheCoordinator->logBudgets();

@@ -149,6 +149,12 @@ void TimelineWorkspace::invalidateCompositeCache()
     if (m_compositeService) m_compositeService->requestCacheInvalidation();
 }
 
+void TimelineWorkspace::invalidateCompositeCacheRange(int64_t fromTick, int64_t toTick)
+{
+    if (m_compositeService)
+        m_compositeService->requestCacheInvalidationRange(fromTick, toTick);
+}
+
 void TimelineWorkspace::refreshAfterUndoRedo()
 {
     invalidateCompositeCache();

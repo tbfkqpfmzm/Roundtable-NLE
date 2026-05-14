@@ -16,8 +16,12 @@
 
 #include "vulkan/Texture.h"
 
+#include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 // Forward declarations
@@ -52,11 +56,18 @@ public:
 
     // ── Frame lifecycle ────────────────────────────────────────────────
 
-    /// Begin a new composite frame.  Resets the staging ring, unpins all
-    /// previously-pinned cache entries, and sets the command buffer that
-    /// all upload commands will be recorded into.
-    /// @param cmd  The command buffer for this frame's GPU work.
-    void beginFrame(VkCommandBuffer cmd);
+    /// Begin a new composite frame.  Resets the staging ring, unpins only
+    /// the textures that were pinned during this slot's previous submission
+    /// (safe because the triple-buffered slot's fence was just waited on),
+    /// and sets the command buffer that all upload commands will be
+    /// recorded into.
+    /// @param cmd            The command buffer for this frame's GPU work.
+    /// @param submissionSlot The current GpuWorkSubmission ring slot index
+    ///                       (0-2).  Used to track pinned textures per-slot
+    ///                       so that unpinning only affects textures from
+    ///                       this slot's previous submission — textures
+    ///                       pinned by other in-flight slots are preserved.
+    void beginFrame(VkCommandBuffer cmd, int submissionSlot = 0);
 
     /// End the current frame — destroys any staging buffers that were
     /// allocated as fallback (ring-buffer allocations are automatically
@@ -137,6 +148,73 @@ private:
     /// Staging buffers allocated via the batched fallback path.
     /// Destroyed in endFrame().
     std::vector<Texture::StagingCleanup> m_stagingCleanups;
+
+    // ── Per-slot pin tracking ──────────────────────────────────────────
+    // GpuWorkSubmission has 3 ring slots.  Each slot tracks which texture
+    // keys it pinned.  When beginFrame() is called for a slot, only that
+    // slot's previous pins are released — textures pinned by other
+    // in-flight slots remain protected from eviction.
+    static constexpr int kRingSize = 3;
+    // A9: cap on how many textures one ring slot can keep pinned at a
+    // time.  Beyond this, the oldest pin in the slot is released to allow
+    // the LRU to evict its texture if memory pressure is high.  Premiere
+    // / Resolve enforce similar caps (~24-32 active media textures per
+    // composite frame).  Pin lifetime is one ring traversal (~3 frames).
+    static constexpr size_t kMaxPinsPerSlot = 32;
+    using PinKey = std::pair<uint64_t, int64_t>;
+    std::array<std::vector<PinKey>, kRingSize> m_slotPins;
+
+    int  m_currentSubmissionSlot{0};  // set by beginFrame()
+    void recordPin(uint64_t mediaId, int64_t frameNumber);
+    void releaseSlotPins(int slotIndex);
+
+    // ── A4: Recycled-texture pool ──────────────────────────────────────
+    // Each cacheable upload used to vmaCreateImage + vkCreateImageView a
+    // fresh Texture (~3-10 allocations per composite frame).  Under heavy
+    // scrubbing this churns dozens of VkImages per second.  The pool keeps
+    // a small set of textures keyed by (w, h, format, usage) and recycles
+    // them when the caller doesn't claim ownership (i.e. when the texture
+    // was inserted into GpuTextureCache, not when the cache evicted one).
+    //
+    // The pool is consulted before vmaCreateImage; on cache eviction the
+    // evicted Texture is returned to the pool instead of being destroyed.
+    struct PoolKey {
+        uint32_t          width{0};
+        uint32_t          height{0};
+        VkFormat          format{VK_FORMAT_UNDEFINED};
+        VkImageUsageFlags usage{0};
+        bool operator==(const PoolKey& o) const noexcept {
+            return width == o.width && height == o.height &&
+                   format == o.format && usage == o.usage;
+        }
+    };
+    struct PoolKeyHash {
+        size_t operator()(const PoolKey& k) const noexcept {
+            size_t h = std::hash<uint32_t>{}(k.width);
+            h ^= std::hash<uint32_t>{}(k.height) + 0x9e3779b9 + (h << 6) + (h >> 2);
+            h ^= std::hash<uint32_t>{}(static_cast<uint32_t>(k.format))
+                 + 0x9e3779b9 + (h << 6) + (h >> 2);
+            h ^= std::hash<uint32_t>{}(k.usage)
+                 + 0x9e3779b9 + (h << 6) + (h >> 2);
+            return h;
+        }
+    };
+    // Per-shape FIFO of recycled textures.  Capped at kMaxPoolPerShape
+    // so the pool itself doesn't become a memory leak (excess textures
+    // are destroyed when the cap is reached).
+    static constexpr size_t kMaxPoolPerShape = 8;
+    std::unordered_map<PoolKey,
+        std::vector<std::unique_ptr<Texture>>, PoolKeyHash> m_texPool;
+    bool m_recycleHookInstalled{false};
+
+    /// Pop a recycled texture of the requested shape, or nullptr.
+    [[nodiscard]] std::unique_ptr<Texture> acquireFromPool(
+        uint32_t w, uint32_t h, VkFormat fmt, VkImageUsageFlags usage);
+
+    /// Return a texture to the pool for later reuse.  Excess textures are
+    /// dropped (destructor frees VkImage / VkImageView via VMA).
+    void releaseToPool(std::unique_ptr<Texture> tex,
+                       uint32_t w, uint32_t h, VkFormat fmt, VkImageUsageFlags usage);
 };
 
 } // namespace rt

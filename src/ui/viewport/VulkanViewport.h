@@ -25,6 +25,7 @@
 #include <QRectF>
 #include <QWheelEvent>
 #include <QMouseEvent>
+#include <QTimer>
 
 #include <vulkan/vulkan.h>
 
@@ -147,6 +148,13 @@ private:
     void presentFrame(VkSemaphore waitSemaphore = VK_NULL_HANDLE);
     void presentClearFrame();
 
+    // ── Semaphore lifecycle ──────────────────────────────────────────────
+    /// Collect semaphores consumed by the previous present and keep them
+    /// alive (no-op recycle).  Semaphores are destroyed only during
+    /// shutdownGpu() to avoid the handle-reuse race with the compositor
+    /// thread that caused nvoglv64.dll NULL-deref crashes.
+    void recycleSemaphores();
+
     // ── Native window + Vulkan surface ──────────────────────────────────
     QWindow*          m_nativeWindow{nullptr};
     QWidget*          m_windowContainer{nullptr};
@@ -219,6 +227,20 @@ private:
     // thread (displayGpuImage path) and the UI thread (zoom/pan/resize).
     std::mutex m_presentMtx;
 
+    // ── Deferred semaphore recycling ─────────────────────────────────────
+    // Per-frame inter-queue semaphores are created by CompositeEngine and
+    // passed to presentFrame() via displayGpuImage().  We used to destroy
+    // them after use, but that caused a handle-reuse race: the compositor
+    // thread could create a new semaphore with the same handle the GUI
+    // thread was about to destroy, destroying the NEW semaphore and causing
+    // a NULL-deref in the NVIDIA driver.
+    //
+    // Instead, we RECYCLE them: used semaphores are stored in this pool and
+    // the cycle (signal → wait → signal → wait → ... ) continues without
+    // ever destroying and recreating handles.  The pool is drained (freed)
+    // only during shutdownGpu().
+    std::vector<VkSemaphore> m_recycledSemaphores;
+
     // ── Viewport zoom & pan ─────────────────────────────────────────────
     float m_viewZoom{1.0f};
     float m_viewPanX{0.0f};
@@ -231,6 +253,27 @@ private:
     // Updated by resizeEvent (UI thread), read by handleResize (render thread).
     std::atomic<uint32_t> m_cachedWidth{1};
     std::atomic<uint32_t> m_cachedHeight{1};
+
+    // ── Resize debounce ──────────────────────────────────────────────────
+    // QWidget::resizeEvent fires per-pixel during dock animations / drags.
+    // Each fire used to trigger a full swapchain recreate + vkDeviceWaitIdle,
+    // which thrashes the NVIDIA driver and caused VK_ERROR_DEVICE_LOST during
+    // playback.  Now we cache the latest dimensions and start a 100ms
+    // single-shot timer; the swapchain is rebuilt once, after the user stops
+    // resizing.  The old swapchain keeps presenting (stretched) in the
+    // meantime — exactly how Premiere/Resolve handle resize during drag.
+    QTimer* m_resizeDebounceTimer{nullptr};
+    static constexpr int kResizeDebounceMs = 100;
+
+    // ── Deferred-redraw coalescing ───────────────────────────────────────
+    // Zoom/pan/wheel handlers schedule a queued-connection redraw rather
+    // than calling presentFrame() directly.  Without this, the UI thread
+    // would block on m_presentMtx (held by the FramePresenter thread doing
+    // a 60fps composite-present cycle), which manifested as ~100ms
+    // pollTimer gaps in the captured perf log.  This flag coalesces
+    // multiple back-to-back UI requests into a single deferred present.
+    std::atomic<bool> m_redrawQueued{false};
+    void scheduleDeferredRedraw();
 };
 
 } // namespace rt

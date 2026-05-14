@@ -147,9 +147,19 @@ private:
     // Last good frame (for re-publish on cache miss)
     std::shared_ptr<CachedFrame> m_lastGoodFrame;
 
-    // Backpressure: true when kMaxPendingFrames or more are queued.
-    // FrameClock checks this to skip ticks the compositor can't keep up with.
-    std::atomic<bool> m_backpressure{false};
+    // Backpressure: true when the compositor is too slow to keep up with
+    // FrameClock.  Old logic only triggered when kMaxPendingFrames had
+    // accumulated, but the queue is coalesced (newer ticks replace older
+    // ones) so size rarely exceeds 1 — the flag almost never fired in
+    // practice and the producer thrashed the compositor on every tick.
+    //
+    // New logic: count the number of consecutive requestFrame() calls that
+    // arrive while a previous request is still pending.  Two or more
+    // replacements in a row means the producer hasn't picked up the last
+    // request before the clock issued a new one — i.e. we're a frame behind.
+    std::atomic<bool>     m_backpressure{false};
+    int                   m_consecutiveReplacements{0};
+    static constexpr int  kBackpressureLagFrames = 2;
 
     // Use-after-free guard
     std::atomic<bool> m_destroying{false};

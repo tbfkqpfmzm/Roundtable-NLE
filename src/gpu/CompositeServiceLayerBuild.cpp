@@ -55,7 +55,7 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
 
     std::vector<LayerInfo> layers;
 
-    clipsAtTick = 0;   // count enabled clips
+    clipsAtTick = 0;
     m_gpuSpineCount = 0;
     m_gpuSpineInsertedLayer = -1;
     m_gpuSpinePrevLayer = -1;
@@ -318,7 +318,7 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
 
                     // If that fails, try resolving common search paths
                     if (handle == 0) {
-                        // Try alternate extensions Ã¢â‚¬â€ prefer .mp4 packed-alpha
+                        // Try alternate video extensions Ã¢â‚¬â€ prefer .mp4 packed-alpha
                         // (NVDEC hardware decode) over .webm (software VP9).
                         std::vector<fs::path> altExts;
                         if (p.extension() == ".webm") {
@@ -330,6 +330,13 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
                         } else if (p.extension() == ".mp4") {
                             altExts.push_back(fs::path(mediaPath).replace_extension(".webm"));
                             altExts.push_back(fs::path(mediaPath).replace_extension(".mov"));
+                        }
+
+                        // Common image extensions — for background images referenced
+                        // as bare filenames without extension (e.g. "TABLE_LARGE_FINAL")
+                        const fs::path imgExts[] = {".png", ".jpg", ".jpeg"};
+                        for (const auto& imgExt : imgExts) {
+                            altExts.push_back(fs::path(mediaPath).replace_extension(imgExt));
                         }
 
                         // Search paths for unresolved media (bare filenames or

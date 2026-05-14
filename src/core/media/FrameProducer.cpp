@@ -5,6 +5,7 @@
 #include "media/FrameProducer.h"
 #include "media/FrameCache.h"  // CachedFrame
 #include "media/PlaybackController.h"
+#include "GpuContext.h"
 
 #include <spdlog/spdlog.h>
 #include <algorithm>
@@ -63,19 +64,25 @@ void FrameProducer::requestFrame(int64_t tick)
 {
     {
         std::lock_guard lock(m_reqMtx);
-        // Cap the queue at kMaxPendingFrames to prevent unbounded growth
-        // when the compositor is slower than the clock.  When the cap is
-        // reached, replace the LAST entry (most recent tick) so the
-        // producer always works on the latest request, and signal
-        // backpressure so FrameClock can skip future ticks.
-        const bool overLimit = m_pendingTicks.size() >= kMaxPendingFrames;
-        if (overLimit) {
+        // Coalesce: a non-empty queue means the producer hasn't picked up
+        // the previous request yet, so we're a frame behind.  Replace the
+        // back entry (always work on the latest tick) and count the
+        // replacement.  When we've replaced kBackpressureLagFrames times
+        // in a row without the producer dequeuing, set backpressure so
+        // FrameClock skips the next tick instead of piling more on.
+        if (!m_pendingTicks.empty()) {
             m_pendingTicks.back() = tick;
-            m_backpressure.store(true, std::memory_order_release);
-        } else if (!m_pendingTicks.empty()) {
-            m_pendingTicks.back() = tick;
+            ++m_consecutiveReplacements;
+            if (m_consecutiveReplacements >= kBackpressureLagFrames) {
+                m_backpressure.store(true, std::memory_order_release);
+            }
         } else {
             m_pendingTicks.push_back(tick);
+            // Keep the hard ceiling as a sanity bound — the new lag-based
+            // logic above should already have engaged backpressure, but
+            // this is a belt-and-suspenders cap.
+            if (m_pendingTicks.size() >= kMaxPendingFrames)
+                m_backpressure.store(true, std::memory_order_release);
         }
     }
     m_reqCV.notify_one();
@@ -120,6 +127,7 @@ void FrameProducer::producerLoop()
 
             // Clear backpressure — the producer is about to process a frame.
             m_backpressure.store(false, std::memory_order_release);
+            m_consecutiveReplacements = 0;
 
             // Scrub requests have priority over clock ticks
             if (m_pendingScrub.has_value()) {
@@ -144,16 +152,36 @@ void FrameProducer::producerLoop()
             }
         } catch (const std::exception& e) {
             spdlog::error("[FrameProducer] Exception in produceFrame: {}", e.what());
-            // Publish null frame so presenter doesn't wait forever
-            publishFrame(nullptr, tick);
+            // Publish the last good frame instead of nullptr so the presenter
+            // keeps displaying a valid frame.  Publishing nullptr causes the
+            // presenter to skip presenting entirely — the viewport freezes on
+            // whatever was last displayed while the playhead continues advancing,
+            // creating an unrecoverable freeze-in-playback state.
+            //
+            // CRITICAL: Clear the inter-queue semaphore on the cached frame.
+            // The old gpuSemaphore was already consumed (waited on) when this
+            // frame was first presented.  Re-using it would be Vulkan UB and
+            // would crash the NVIDIA driver.
+            if (m_lastGoodFrame) {
+                m_lastGoodFrame->gpuSemaphore = 0;
+                publishFrame(m_lastGoodFrame, tick);
+            }
+            // If there is no last good frame yet (first frame failed), skip
+            // publishing — the presenter will hold its current (null) state
+            // and retry on the next deadline.
         } catch (...) {
             spdlog::error("[FrameProducer] Unknown exception in produceFrame");
-            publishFrame(nullptr, tick);
+            if (m_lastGoodFrame) {
+                m_lastGoodFrame->gpuSemaphore = 0;
+                publishFrame(m_lastGoodFrame, tick);
+            }
         }
     }
 
     spdlog::info("[FrameProducer] Thread exiting");
 }
+
+
 
 void FrameProducer::produceFrameImpl(int64_t tick)
 {
@@ -197,6 +225,23 @@ void FrameProducer::produceFrameImpl(int64_t tick)
         spdlog::info("[DIAG-PRODUCER] tick={} composite={:.1f}ms -> NULL, re-publish lastGood "
                      "gpuView=0x{:X}",
                      tick, compMs, m_lastGoodFrame->gpuImageView);
+        // Clear the inter-queue semaphore on the cached frame — the old
+        // gpuSemaphore was already consumed (waited on) when this frame
+        // was first presented.  Re-using it as a wait semaphore would be
+        // undefined behaviour (binary semaphore cannot be waited on twice)
+        // and would crash the NVIDIA Vulkan driver.
+        m_lastGoodFrame->gpuSemaphore = 0;
+
+        // If the GPU has entered Failed state (device-lost), the cached
+        // gpuImageView / gpuSampler are stale handles into a destroyed
+        // VkDevice.  Clear them and gpuReady so downstream consumers fall
+        // through to the CPU display path (which uses lazyReadback / pixels).
+        if (!GpuContext::get().isOperational()) {
+            m_lastGoodFrame->gpuImageView = 0;
+            m_lastGoodFrame->gpuSampler   = 0;
+            m_lastGoodFrame->gpuReady     = false;
+        }
+
         publishFrame(m_lastGoodFrame, tick);
     }
     // else: no frame at all (first frame of playback, cache cold) — skip
@@ -222,6 +267,10 @@ void FrameProducer::produceScrubFrameImpl(const ScrubRequest& req)
     }
     // Always publish whatever we got (even if empty) so the
     // presenter shows the correct state for that tick.
+    // If falling back to m_lastGoodFrame, clear its stale semaphore
+    // (already consumed by the previous present — re-use is Vulkan UB).
+    if (!frame && m_lastGoodFrame)
+        m_lastGoodFrame->gpuSemaphore = 0;
     publishFrame(frame ? frame : m_lastGoodFrame, req.tick);
 }
 

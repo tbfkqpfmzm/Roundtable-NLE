@@ -5,7 +5,7 @@
   "cameraY": 0.000000,
   "backgrounds": [
     {
-      "path": "TABLE_OVERLAY",
+      "path": "TABLE_OVERLAY.png",
       "posX": 0.014619,
       "posY": 0.374217,
       "scale": 2.100364,
@@ -23,7 +23,7 @@
       "blur": 0.000000
     },
     {
-      "path": "TABLE_LARGE_FINAL",
+      "path": "TABLE_LARGE_FINAL.png",
       "posX": 0.014619,
       "posY": 0.374217,
       "scale": 2.100364,

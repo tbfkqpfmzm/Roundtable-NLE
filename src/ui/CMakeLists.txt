@@ -250,6 +250,11 @@ set_source_files_properties(
     PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON
 )
 
+# /EHa for AudioMixer.cpp — catch(...) catches SEH access violations
+# from dangling m_timeline / m_audioEngine pointers during project
+# close / timeline destruction.
+set_source_files_properties(panels/audio/AudioMixer.cpp PROPERTIES COMPILE_FLAGS "/EHa")
+
 target_include_directories(roundtable_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 # PCH — enabled May 3, 2026.

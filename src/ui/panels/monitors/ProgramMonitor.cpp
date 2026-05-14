@@ -30,6 +30,7 @@
 #include <QApplication>
 #include <QShowEvent>
 #include <QKeyEvent>
+#include <QResizeEvent>
 #include <QFrame>
 #include <QThread>
 
@@ -109,6 +110,24 @@ void ProgramMonitor::stopPolling()
     if (m_pipeline)
         m_pipeline->stop();
     spdlog::info("[PM-TRACE] stopPolling() called");
+}
+
+void ProgramMonitor::stopPlaybackPipeline()
+{
+    // A10: idempotent stop — safe to call from App::~App Phase 1 even
+    // if stopPolling() was already invoked by other shutdown paths.
+    if (m_pollTimer)
+        m_pollTimer->stop();
+    m_destroying.store(true, std::memory_order_release);
+    if (m_pipeline) {
+        m_pipeline->stop();
+        // Drop the callbacks so any in-flight presenter notifications
+        // can't re-enter this widget while MainWindow is being torn down.
+        m_pipeline->setPresentCallback(nullptr);
+        m_pipeline->setPresentNotify(nullptr);
+        m_pipeline->setCompositeCallback(nullptr);
+    }
+    spdlog::info("[PM-TRACE] stopPlaybackPipeline() called");
 }
 
 void ProgramMonitor::refresh()
@@ -468,8 +487,20 @@ bool ProgramMonitor::presentFrame(const std::shared_ptr<CachedFrame>& frame)
 
     if (!frame) return false;
 
+    // Refuse GPU-direct display path when the GPU has entered Failed state
+    // (VK_ERROR_DEVICE_LOST). The raw gpuImageView/gpuSampler in `frame`
+    // points at handles whose VkDevice no longer exists; using them would
+    // crash inside nvoglv64.dll.  When in safe mode the frame's CPU pixels
+    // are populated by the safe-mode compositor, so the CPU path works.
+    //
+    // NOTE: we do NOT check frame->gpuTextureOwner here. That field is only
+    // set on media-layer frames (uploaded video / character textures from
+    // CompositeServiceLayerBuild), not on the compositor's output frames
+    // that reach the presenter. The device-lost gate above is sufficient.
+    const bool gpuOk = GpuContext::get().isOperational();
+
     if (frame->width > 0) {
-        if (m_gpuDisplay && m_vulkanViewport && frame->gpuReady) {
+        if (gpuOk && m_gpuDisplay && m_vulkanViewport && frame->gpuReady) {
             // DIAG: log which display path we take
             {
                 static int s_presPathLog = 0;
@@ -484,7 +515,7 @@ bool ProgramMonitor::presentFrame(const std::shared_ptr<CachedFrame>& frame)
                 reinterpret_cast<VkImageView>(frame->gpuImageView),
                 reinterpret_cast<VkSampler>(frame->gpuSampler),
                 frame->width, frame->height,
-                reinterpret_cast<VkSemaphore>(frame->gpuSemaphore));
+                reinterpret_cast<VkSemaphore>(frame->gpuSemaphore.load()));
             m_lastDirectFrame = frame;
             return true;
         }
@@ -909,9 +940,16 @@ void ProgramMonitor::updateDisplay()
         uint32_t vpH = m_outputHeight / static_cast<uint32_t>(resDivisor);
         vpW = std::clamp(vpW, 64u, 3840u);
         vpH = std::clamp(vpH, 36u, 2160u);
-        // Edit settle uses scrub=true for blocking decode + LRU bypass,
-        // but full resolution (m_isScrubbing stays false above).
-        const bool useScrub = m_isScrubbing || editSettleActive;
+        // A7: edit-settle no longer forces scrub=true.  The old behavior
+        // ran blocking getFrame() inside resolveMediaFrame, which held the
+        // composite mutex for 50–500ms on cold decodes — the visible
+        // "after-edit pause" that didn't feel Premiere-snappy.  Now we
+        // keep non-blocking fetch, and the A1 composite settle-window
+        // (CompositeService::kSettleWindowMs) holds the previous full
+        // composite while the prefetch workers warm the cache.  Only
+        // active user scrubbing forces scrub-mode.
+        const bool useScrub = m_isScrubbing;
+        (void)editSettleActive; // kept for future telemetry / diagnostics
 
         ensurePipelineStarted();
         if (m_pipeline)
@@ -936,6 +974,71 @@ void ProgramMonitor::updateTimecodeDisplay()
                                   m_controller->frameRate());
         m_durationLabel->setText(QString::fromStdString(dur.toString()));
     }
+}
+
+void ProgramMonitor::resizeEvent(QResizeEvent* event)
+{
+    QWidget::resizeEvent(event);
+    // On Windows, a window-edge drag puts the main thread into a modal
+    // WM_SIZE message loop where Qt's queued update() paint events do not
+    // process — but the dock widget still receives WM_PAINT directly from
+    // Windows and repaints itself with stale content over our control
+    // strip, producing the "echo" gap between the Playback Resolution
+    // bar and the transport buttons.  update() alone only resolves after
+    // the user releases the drag and ambient paints (playback ticks)
+    // arrive; that's why the issue appears stuck while paused.
+    //
+    // Three-pronged fix:
+    //   1) repaint() — synchronous: bypasses the queued event path so the
+    //      paint runs even inside the modal drag loop.
+    //   2) updateDisplay() + editSettleCounter — forces a fresh composite
+    //      at the new widget size AND keeps the poll timer re-rendering
+    //      after the resize settles (paused path would otherwise early-
+    //      return and never correct the native Vulkan child HWND position).
+    //      Without this the "echo" persists until playback starts.
+    //   3) singleShot(0, update) — fallback: re-invalidates once the
+    //      event loop resumes, in case any late dock paint sneaks in
+    //      after the WM_SIZE settles.
+    auto forceRepaint = [this]() {
+        repaint();
+        if (auto* lay = layout()) {
+            for (int i = 0; i < lay->count(); ++i) {
+                auto* item = lay->itemAt(i);
+                auto* w = item ? item->widget() : nullptr;
+                if (!w || !w->isVisible()) continue;
+                // Skip the Vulkan viewport's host container — its paint
+                // is owned by the native swapchain, not by Qt.
+                if (m_viewport && w == m_viewport->parentWidget()) continue;
+                w->repaint();
+            }
+        }
+    };
+    forceRepaint();
+
+    // Force a fresh composite at the new size so the viewport and native
+    // Vulkan child HWND reposition to match.  This is critical when paused
+    // — the poll timer would otherwise early-return without calling
+    // updateDisplay(), leaving the echo visible indefinitely.
+    m_lastRenderedTick = -1;
+    updateDisplay();
+    // Keep the poll timer active for a settle window after resize stops,
+    // ensuring any late composite results or HWND corrections take effect.
+    if (m_editSettleCounter < 15)
+        m_editSettleCounter = 15;
+
+    QTimer::singleShot(0, this, [this]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
+        update();
+        if (auto* lay = layout()) {
+            for (int i = 0; i < lay->count(); ++i) {
+                auto* item = lay->itemAt(i);
+                auto* w = item ? item->widget() : nullptr;
+                if (!w || !w->isVisible()) continue;
+                if (m_viewport && w == m_viewport->parentWidget()) continue;
+                w->update();
+            }
+        }
+    });
 }
 
 void ProgramMonitor::showEvent(QShowEvent* event)

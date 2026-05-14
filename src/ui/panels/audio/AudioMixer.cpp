@@ -244,6 +244,14 @@ void AudioMixer::resetPan(ChannelStrip& strip)
 
 void AudioMixer::updateMeters()
 {
+    // ── Safety net: catch any exception (including SEH access violations
+    //    from dangling m_timeline / m_audioEngine pointers during project
+    //    switch or timeline destruction) and silently recover.  The meter
+    //    timer will be reaped when the AudioMixer is next set up with a
+    //    valid project, so a spurious catch is harmless — just a visual
+    //    meter freeze until playback resumes.
+    try {
+
     if (!m_audioEngine) return;
 
     // If audio is not actively playing, decay meters to silence
@@ -281,8 +289,24 @@ void AudioMixer::updateMeters()
 
     // Per-track meters: the audio engine currently only does master metering.
     // Show proportional levels based on track volume/pan for visual feedback.
+    // Guard against dangling track pointers (use-after-free when tracks are
+    // removed from timeline without rebuildStrips() being called).
     for (auto& strip : m_strips) {
         if (!strip.track || !strip.vuMeter) continue;
+        // Validate track pointer is still in the timeline before accessing
+        if (m_timeline) {
+            bool found = false;
+            for (size_t ti = 0; ti < m_timeline->trackCount(); ++ti) {
+                if (m_timeline->track(ti) == strip.track) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                strip.track = nullptr;
+                continue;
+            }
+        }
         const float vol = strip.track->volume();
         const float pan = strip.track->pan();
         // Approximate per-track levels from master meter scaled by volume
@@ -292,6 +316,14 @@ void AudioMixer::updateMeters()
         const float avgPeak = (m.peakL + m.peakR) * 0.5f;
         strip.vuMeter->setLevel(0, avgPeak * leftGain);
         strip.vuMeter->setLevel(1, avgPeak * rightGain);
+    }
+
+    } catch (...) {
+        // Swallow any exception (SEH access violation from dangling pointers
+        // during project close / timeline destruction).  Stop the timer to
+        // avoid flooding the log with repeated crashes.
+        if (m_meterTimer)
+            m_meterTimer->stop();
     }
 }
 

@@ -224,6 +224,11 @@ void GpuTextureCache::evictUntilFits(size_t needed)
                 continue;
             }
             m_used -= mapIt->second.bytes;
+            // A4: recycle the Texture instead of destroying it, if a
+            // recycle callback is installed (typically by GpuUploadManager).
+            if (m_recycleFn && mapIt->second.texture) {
+                m_recycleFn(mapIt->second.texture);
+            }
             m_map.erase(mapIt);
             it = m_lru.erase(it);
         }

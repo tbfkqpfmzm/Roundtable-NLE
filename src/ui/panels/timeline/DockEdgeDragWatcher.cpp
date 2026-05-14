@@ -495,6 +495,7 @@ void DockEdgeDragWatcher::commitEdgeDrop()
         edgeMW->setObjectName(QStringLiteral("EdgeColumn"));
         edgeMW->setWindowFlags(Qt::Widget);
         edgeMW->setDockNestingEnabled(true);
+        edgeMW->setAnimated(false);
         edgeMW->setMinimumWidth(150);
         edgeMW->setTabPosition(Qt::TopDockWidgetArea, QTabWidget::North);
         edgeMW->setTabPosition(Qt::BottomDockWidgetArea, QTabWidget::North);

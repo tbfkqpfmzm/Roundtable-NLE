@@ -150,9 +150,16 @@ QSize MiniTimeline::minimumSizeHint() const
 
 void MiniTimeline::paintEvent(QPaintEvent* event)
 {
+    // Re-entrancy guard. The previous version forgot to decrement
+    // s_paintDepth on the normal-paint path, so after 5 paints the widget
+    // silently no-op'd every subsequent paintEvent — the stale framebuffer
+    // was left in place, producing the "visual echo" between the control
+    // bar and transport bar when the monitor was resized vertically.
     static thread_local int s_paintDepth = 0;
-    if (++s_paintDepth > 5) {
-        --s_paintDepth;
+    struct DepthGuard {
+        int& d; explicit DepthGuard(int& v) : d(v) { ++d; } ~DepthGuard() { --d; }
+    } depthGuard(s_paintDepth);
+    if (s_paintDepth > 5) {
         QWidget::paintEvent(event);
         return;
     }

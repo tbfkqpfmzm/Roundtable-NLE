@@ -121,6 +121,16 @@ int main(int argc, char* argv[])
     // Windows timer resolution (1ms for accurate QTimer)
 #ifdef _WIN32
     timeBeginPeriod(1);
+
+    // Prevent OBS graphics hook from injecting into Roundtable's Vulkan
+    // swapchain.  OBS's ow-graphics-hook64.dll can cause ACCESS_VIOLATION
+    // when it tries to hook Vulkan present calls during playback, as seen
+    // in crash logs (CODE=0xC0000005 at ow-graphics-hook64.dll+0x89b1).
+    // This env var tells the OBS hook DLL to skip this process entirely.
+    // Also set DISABLE_OGL_HOOK as a belt-and-suspenders measure — some
+    // OBS versions check both names.
+    ::SetEnvironmentVariableW(L"DISABLE_VULKAN_HOOK", L"1");
+    ::SetEnvironmentVariableW(L"DISABLE_OGL_HOOK", L"1");
 #endif
 
     // Silence FFmpeg logging

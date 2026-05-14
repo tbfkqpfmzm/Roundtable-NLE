@@ -6,11 +6,16 @@
 #include <volk.h>
 #include "vulkan/Swapchain.h"
 #include "vulkan/Device.h"
+#include "GpuContext.h"
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <limits>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace rt {
 
@@ -154,7 +159,14 @@ bool Swapchain::create(const Device& device, const SwapchainConfig& config)
 
 bool Swapchain::recreate(const Device& device, uint32_t width, uint32_t height)
 {
-    device.waitIdle();
+    // NOTE: caller is responsible for waiting on any in-flight submits that
+    // reference the old swapchain images BEFORE calling recreate().  We used
+    // to call device.waitIdle() here, but that stalled the entire device
+    // (compute queue, transfer queue, etc.) on every dock-animation resize
+    // step and contributed to VK_ERROR_DEVICE_LOST during playback.
+    //
+    // VulkanViewport::handleResize() now waits only on its own fences
+    // (m_inFlightFence + m_uploadSlots[*].fence) before invoking this.
 
     SwapchainConfig config{};
     config.surface         = m_surface;
@@ -187,9 +199,35 @@ uint32_t Swapchain::acquireNextImage(VkDevice device, VkSemaphore imageAvailable
                                       uint64_t timeout)
 {
     uint32_t imageIndex = 0;
-    VkResult result = vkAcquireNextImageKHR(device, m_swapchain, timeout,
-                                             imageAvailable, VK_NULL_HANDLE,
-                                             &imageIndex);
+    VkResult result = VK_SUCCESS;
+
+    // SEH guard: NVIDIA App (nvspcap64.dll) may hook vkAcquireNextImageKHR
+    // to detect frame boundaries.  A null-pointer deref inside the hook
+    // brings down the process if unhandled.
+#ifdef _WIN32
+    __try
+    {
+        result = vkAcquireNextImageKHR(device, m_swapchain, timeout,
+                                        imageAvailable, VK_NULL_HANDLE,
+                                        &imageIndex);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        // SEH caught inside vkAcquireNextImageKHR.  Used to just set
+        // m_needsRecreation, but that silently kept the app trying forever.
+        // Treat as fatal — see GpuContext::tryRecover comment.
+        spdlog::error("[SWAPCHAIN] Access violation in vkAcquireNextImageKHR "
+                      "— marking GPU Failed.");
+        m_needsRecreation = true;
+        GpuContext::get().signalDeviceLost();
+        GpuContext::get().tryRecover();
+        return UINT32_MAX;
+    }
+#else
+    result = vkAcquireNextImageKHR(device, m_swapchain, timeout,
+                                    imageAvailable, VK_NULL_HANDLE,
+                                    &imageIndex);
+#endif
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
     {
@@ -220,7 +258,31 @@ VkResult Swapchain::present(VkQueue presentQueue, uint32_t imageIndex,
     presentInfo.pSwapchains        = &m_swapchain;
     presentInfo.pImageIndices      = &imageIndex;
 
-    VkResult result = vkQueuePresentKHR(presentQueue, &presentInfo);
+    VkResult result = VK_SUCCESS;
+
+    // SEH guard: external hooks (e.g. OBS ow-graphics-hook64.dll) may crash
+    // when intercepting vkQueuePresentKHR — typically a null-pointer deref
+    // at offset 0x18 inside the hook DLL.  We catch the exception, log it,
+    // and mark the swapchain for recreation so the app can recover.
+#ifdef _WIN32
+    __try
+    {
+        result = vkQueuePresentKHR(presentQueue, &presentInfo);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        // SEH caught inside vkQueuePresentKHR.  Same reasoning as
+        // vkAcquireNextImageKHR above — treat as fatal.
+        spdlog::error("[SWAPCHAIN] Access violation in vkQueuePresentKHR "
+                      "— marking GPU Failed.");
+        m_needsRecreation = true;
+        GpuContext::get().signalDeviceLost();
+        GpuContext::get().tryRecover();
+        return VK_ERROR_OUT_OF_DATE_KHR;
+    }
+#else
+    result = vkQueuePresentKHR(presentQueue, &presentInfo);
+#endif
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
     {

@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <list>
@@ -96,7 +97,12 @@ struct CachedFrame
     // in GPU code.
     uint64_t gpuImageView{0};   // VkImageView handle
     uint64_t gpuSampler{0};     // VkSampler handle
-    uint64_t gpuSemaphore{0};   // VkSemaphore handle (inter-queue sync, 0=none)
+    /// VkSemaphore handle for inter-queue sync (compute→graphics).
+    /// Atomic so the producer thread can clear it on a cached frame
+    /// (m_lastGoodFrame re-publish) without racing with the presenter
+    /// thread that reads it in ProgramMonitor::presentFrame.
+    /// 0 = VK_NULL_HANDLE (no semaphore).
+    mutable std::atomic<uint64_t> gpuSemaphore{0};
     bool     gpuReady{false};
 
     /// Opaque shared ownership of GPU resources (e.g., shared_ptr<Texture>).
@@ -223,6 +229,17 @@ public:
     /// and preferentially evict frames behind it.
     void setPlayhead(uint64_t mediaId, int64_t frameNumber);
 
+    /// Phase B: declare a protected playback window for a media source.
+    /// Frames inside [playheadFrame - behindCount, playheadFrame + aheadCount]
+    /// are excluded from pass-1 eviction (behind-playhead sweep).  This is
+    /// the data-side complement to UnifiedCache::setPlayheadWindow — call
+    /// either; UnifiedCache forwards here.  Defaults (5 behind, 0 ahead)
+    /// preserve historical behavior.
+    void setPlayheadWindow(uint64_t mediaId,
+                           int64_t playheadFrame,
+                           int aheadCount,
+                           int behindCount);
+
     // ── Bulk operations ─────────────────────────────────────────────────
 
     /// Evict all frames for a specific media file.
@@ -294,6 +311,12 @@ private:
 
     // Playhead positions per media handle (for smart eviction)
     std::unordered_map<uint64_t, int64_t>                      m_playheads;
+
+    // Phase B: protected window extent per media handle (frames behind /
+    // ahead of the playhead that are excluded from pass-1 eviction).
+    // Default = 5 behind / 0 ahead to preserve pre-Phase-B behavior.
+    struct WindowExtent { int behind{5}; int ahead{0}; };
+    std::unordered_map<uint64_t, WindowExtent>                 m_windows;
 
     // Stats
     mutable size_t m_hits{0};

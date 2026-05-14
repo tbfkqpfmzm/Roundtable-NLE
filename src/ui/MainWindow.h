@@ -208,6 +208,12 @@ protected:
 public slots:
     void switchSequence(size_t index);
 
+    /// Show the "GPU error — please restart" modal dialog.  Invoked via
+    /// QMetaObject::invokeMethod(Qt::QueuedConnection) from the GpuContext
+    /// fatal-failure callback (which may fire on any thread).  Stops
+    /// playback, offers Restart / Quit / Continue-in-safe-mode.
+    void showGpuFatalError();
+
 private slots:
     void onPageTabChanged(int index);
     void onNewProject();

@@ -17,6 +17,7 @@
 // Media / timeline
 #include "media/FrameCache.h"
 #include "media/MediaPool.h"
+#include "media/UnifiedCache.h"
 #include "Constants.h"
 #include "timeline/AudioClip.h"
 #include "timeline/ImageClip.h"
@@ -86,8 +87,18 @@ try
     // FrameProducer is the sole compositor thread, so this should never
     // trigger in normal operation.  Kept as defense-in-depth against
     // signal re-entrancy or callback chains.
+    //
+    // A2: Allow exactly ONE level of legitimate recursion (nested
+    // SequenceClip composition).  The buildLayersForFrame path swaps
+    // m_timeline to the inner sequence and recursively calls
+    // compositeFrame to render the inner timeline.  Without this
+    // allowance, the previous depth>0 → return-lastGood logic caused
+    // nested sequences to silently show stale frames.  Two levels of
+    // nesting is enough for almost any real project; deeper recursion
+    // is treated as runaway re-entry and short-circuits.
     auto& depth = compositeDepth();
-    if (depth > 0) {
+    constexpr int kMaxCompositeDepth = 2;
+    if (depth >= kMaxCompositeDepth) {
         std::lock_guard lg(m_lastCompositeMtx);
         return m_lastGoodComposite;
     }
@@ -141,6 +152,17 @@ try
     // Uses unique_lock (not lock_guard) because buildLayersForFrame()
     // temporarily unlocks to allow async media opens.
     std::unique_lock lock(m_compositeMutex);
+
+    // Phase B: advance the UnifiedCache generation counter and run its
+    // throttled eviction + adaptive-budget passes.  These are very cheap
+    // — eviction is gated by a 3s throttle, rebalance is gated by a
+    // 30-frame throttle — but having the call site here ensures every
+    // composite tick contributes to its LRU view.
+    if (m_unifiedCache) {
+        m_unifiedCache->onFrameStart();
+        m_unifiedCache->runEvictionPass();
+        m_unifiedCache->rebalanceBudgets();
+    }
 
     // Check deferred cache invalidation request (set by requestCacheInvalidation
     // from the UI thread via atomic flag, avoiding deadlock).
@@ -232,8 +254,23 @@ try
                                               ? ResolutionTier::Half
                                               : playbackTier();
                         if (!m_mediaPool->isFrameCached(handle, srcFrame, warmTier)) {
+                            // Two-stage prefetch on shot boundary: a small
+                            // *urgent* batch (the current + previous frame)
+                            // followed by a non-urgent fan-out for the next
+                            // half-second.  The previous version requested
+                            // count=8 urgent per new clip, which at a typical
+                            // multi-clip boundary (2-3 new clips + Spine
+                            // atlas upload happening in parallel) flooded
+                            // NVDEC + the graphics queue with ~16-24
+                            // simultaneous urgent decodes and tripped TDR.
+                            // The urgent pair guarantees the frame we are
+                            // about to composite is hot; the deferred batch
+                            // covers the upcoming playhead motion without
+                            // sharing a single contention window.
                             m_mediaPool->schedulePrefetch(handle, srcFrame - 1,
-                                /*count=*/8, /*urgent=*/true, warmTier);
+                                /*count=*/2, /*urgent=*/true, warmTier);
+                            m_mediaPool->schedulePrefetch(handle, srcFrame + 1,
+                                /*count=*/6, /*urgent=*/false, warmTier);
                             ++uncachedCount;
                         }
                     }
@@ -326,6 +363,46 @@ try
     layers = buildLayersForFrame(tick, outW, outH, scrubMode, playbackNonBlocking,
                                  clipsAtTick, perfLog, lock, gpuSpineUsedThisFrame);
 
+    // ── A1: Settle-window fallback (Premiere-style hold) ─────────────────
+    // If we resolved FEWER layers than the active clip count, the composite
+    // would render with missing layers — the visible "layers build up over
+    // several frames" symptom.  Hold the prior complete composite for up to
+    // kSettleWindowMs ms instead.  After that timeout, accept the partial
+    // composite so we don't freeze indefinitely if a clip is permanently
+    // unresolvable (e.g. missing media file).
+    //
+    // Skip during scrub (the user wants immediate feedback on every drag
+    // step, partial frames are fine) and during export (forceFullResolution,
+    // which always blocks until full).
+    if (!scrubMode && !m_forceFullResolution.load() &&
+        clipsAtTick > 0 && static_cast<int>(layers.size()) < clipsAtTick)
+    {
+        using namespace std::chrono;
+        const auto now = steady_clock::now();
+        std::shared_ptr<CachedFrame> hold;
+        bool withinSettle = false;
+        {
+            std::lock_guard lg(m_lastCompositeMtx);
+            if (m_lastGoodComposite && m_lastFullCompositeAt.time_since_epoch().count() != 0)
+            {
+                const auto elapsed = duration_cast<milliseconds>(
+                    now - m_lastFullCompositeAt).count();
+                if (elapsed < kSettleWindowMs) {
+                    hold = m_lastGoodComposite;
+                    withinSettle = true;
+                }
+            }
+        }
+        if (withinSettle && hold) {
+            static int s_settleLog = 0;
+            if (++s_settleLog % 30 == 0) {
+                spdlog::info("[SETTLE] tick={} resolved={}/{} — holding prior composite",
+                             tick, layers.size(), clipsAtTick);
+            }
+            return hold;
+        }
+    }
+
     if (layers.empty()) {
         static int s_emptyLog = 0;
         if (++s_emptyLog <= 20 || s_emptyLog % 60 == 0) {
@@ -337,7 +414,13 @@ try
         if (clipsAtTick > 0) {
             std::lock_guard lg(m_lastCompositeMtx);
             if (m_lastGoodComposite && m_lastGoodCompositeTick >= 0) {
-                constexpr int64_t kMaxStaleTicks = 48000 / 12;
+                // Allow at most 2 stale frames so the viewport doesn't
+                // freeze on the previous shot for multiple frame durations
+                // while the new shot's first frame decodes.  At 24fps each
+                // frame is 2000 ticks (48000/24); at 60fps it's 800 ticks.
+                // Use 2000 ticks which is 1 frame at 24fps or ~2.5 frames
+                // at 60fps — brief enough to avoid visible freeze.
+                constexpr int64_t kMaxStaleTicks = 48000 / 24;
                 int64_t tickDelta = std::abs(tick - m_lastGoodCompositeTick);
                 if (tickDelta <= kMaxStaleTicks)
                     return m_lastGoodComposite;
@@ -347,13 +430,25 @@ try
             }
         }
 
-        auto emptyFrame = std::make_shared<CachedFrame>();
+        // ── Shot boundary: return empty sentinel ────────────────────────
+        // The stale frame was shown for at most 1-2 frames (kMaxStaleTicks
+        // above), then the new clip's first frame still isn't decoded.
+        // Return an empty frame (width=0) which propagates through the
+        // FrameProducer → FramePresenter → ProgramMonitor chain as a
+        // "clear viewport" signal.  Meanwhile the async prefetch workers
+        // (started by the shot-boundary detection above) continue decoding
+        // the new clip's frames; when they arrive, the next composite tick
+        // will produce the correct frame.
+        spdlog::info("[COMPOSITE] Shot boundary tick={}: returning empty sentinel "
+                     "({} clips present, no decoded frames available)",
+                     tick, clipsAtTick);
         {
+            auto emptyFrame = std::make_shared<CachedFrame>();
             std::lock_guard lg(m_lastCompositeMtx);
             m_lastGoodComposite.reset();
             m_lastGoodCompositeTick = -1;
+            return emptyFrame;
         }
-        return emptyFrame;
     }
 
     // Log layer details for packed-alpha diagnostics
@@ -475,6 +570,15 @@ try
         std::lock_guard lg(m_lastCompositeMtx);
         m_lastGoodComposite = result;
         m_lastGoodCompositeTick = tick;
+        // A1: record that this composite was "complete" (all expected
+        // layers resolved) so the settle-window check above can use it as
+        // the hold frame for subsequent partial composites.  A composite
+        // is complete when layers.size() >= clipsAtTick — i.e. every clip
+        // present at this tick contributed a layer.
+        if (clipsAtTick > 0 && static_cast<int>(layers.size()) >= clipsAtTick) {
+            m_lastFullLayerCount = static_cast<int>(layers.size());
+            m_lastFullCompositeAt = std::chrono::steady_clock::now();
+        }
     }
     return result;
 }

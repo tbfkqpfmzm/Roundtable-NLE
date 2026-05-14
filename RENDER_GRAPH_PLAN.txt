@@ -1,11 +1,58 @@
 ================================================================================
   RENDER_GRAPH_PLAN — DAG-based Render Graph for Roundtable NLE
   Created: May 13, 2026
+  Last Updated: May 13, 2026
   Target: Phase 6 of RENDER_FIX_PLAN (long-term architecture rewrite)
   Based on: codebase audit of src/gpu/, FINAL_SUMMARY_v1.txt,
             RENDER_FIX_PLAN.txt, RENDER_FIX.txt, architecture.md,
             repo memory notes
 ================================================================================
+
+╔══════════════════════════════════════════════════════════════════════════╗
+║  IMPLEMENTATION STATUS                                                 ║
+║                                                                        ║
+║  ɶ Phase A (data structures)  — COMPLETE                               ║
+║    src/gpu/render_graph/RenderPass.h, RenderResource.h                 ║
+║                                                                        ║
+║  ɶ Phase B (DAG dispatcher)   — COMPLETE                               ║
+║    src/gpu/render_graph/GpuRenderGraph.h/.cpp                          ║
+║    (topo sort, auto barriers, execution loop, timestamp queries)       ║
+║                                                                        ║
+║  ɶ Phase C (pass porting)     — COMPLETE (toggle-able feature flag)    ║
+║    src/gpu/CompositeEngine.h/.cpp — compositeViaRenderGraph()          ║
+║    Feature flag: CompositeEngine::s_useRenderGraph (now true)          ║
+║    All passes ported: Upload, Effect, Transition, Composite, Readback, ║
+║    Present.  Graph-computed barriers disabled — renderers manage       ║
+║    their own.  Global transfer→compute barrier inserted for safety.    ║
+║    Toggled to true on May 13 for crash investigation.  Set back to     ║
+║    false if the bug persists in both paths and more diagnosis needed.  ║
+║                                                                        ║
+║  ɶ Phase D (fault isolation) — NOT STARTED                             ║
+║                                                                        ║
+║  ɶ Phase E (unified cache)   — NOT STARTED                             ║
+║                                                                        ║
+║  ɶ Phase F (telemetry)       — NOT STARTED                             ║
+║                                                                        ║
+║  === Crash handler hardening done during Phase C testing ===          ║
+║  Fixed: crash log not being generated, m_destroying not reset in      ║
+║  start(), resetViewState() killing pipeline, SEH handler not firing    ║
+║  on Win8+.  All pushed to main.                                        ║
+║                                                                        ║
+║  === Known blocker ===                                                ║
+║  Playback crash is a HEAP CORRUPTION (0xC0000374 in crash log), not   ║
+║  a composite pipeline bug.  Semaphore fix (per-slot signalSemaphore)   ║
+║  applied May 13 — correct but not the cause of this crash.            ║
+║                                                                        ║
+║  The render graph path (s_useRenderGraph=true) works correctly when    ║
+║  it executes — the DAG dispatches all passes, submit succeeds, and     ║
+║  the frame is produced.  The crash is non-deterministic heap           ║
+║  corruption that occurs between frames, probably in presenter path     ║
+║  (VulkanViewport::presentFrame) or media resource management.          ║
+║                                                                        ║
+║  To diagnose: run setup_appverif.ps1 as Administrator, then launch     ║
+║  the app and reproduce the crash.  AppVerif will catch the heap        ║
+║  corruption at the exact source line.                                 ║
+╚══════════════════════════════════════════════════════════════════════════╝
 
 TABLE OF CONTENTS
   A. CURRENT STATE ASSESSMENT

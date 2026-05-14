@@ -344,6 +344,13 @@ private:
     /// Flush the composite result LRU cache (call when transforms change).
     void invalidateCompositeCache();
 
+    /// A3: drop only LRU entries whose tick is in [fromTick, toTick].
+    /// Edit commands that affect a known time slice (trim, split, ripple
+    /// of a single clip) should call this instead of the full-flush form,
+    /// to keep cached frames outside the affected range alive across
+    /// stepping/scrubbing — a major Premiere-vs-current responsiveness gap.
+    void invalidateCompositeCacheRange(int64_t fromTick, int64_t toTick);
+
 #ifdef ROUNDTABLE_HAS_SPINE
     /// Schedule an async spine shared-data load (runs on UI thread via Qt).
     void scheduleSpineSharedLoad(const std::string& charName,

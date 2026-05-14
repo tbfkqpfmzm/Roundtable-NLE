@@ -70,6 +70,15 @@ void MediaPool::schedulePrefetch(MediaHandle handle, int64_t afterFrame, int cou
         if (m_cache->contains(handle, 0, tier))
             return;
         count = 1;
+        // CONSUMERS (CompositeServiceLayerBuild, FrameRenderer, …) always
+        // look up still images at frame 0.  If we left afterFrame as-is
+        // (e.g. 20 because the timeline playhead is on tick 20), the task
+        // below sets task.frameNumber = afterFrame, the decoded result is
+        // stored under (handle, 20, tier), and every subsequent consumer
+        // lookup at frame 0 misses the cache and triggers another full
+        // PNG software-decode (~150 ms for a 4K still).  Force-align the
+        // prefetch index to 0 so the producer and consumer agree.
+        afterFrame = 0;
     }
 
     // Skip if loop pre-decode already finished for this handle.
@@ -346,8 +355,15 @@ void MediaPool::prefetchWorker(int workerId)
 
             // Sequential follow-up: decode next consecutive frames while decoder is positioned.
             constexpr int kMaxFollowUp = 30;
+            // For stills (frameCount 0 or 1) there is no "next consecutive
+            // frame" — the previous version defaulted to INT64_MAX when
+            // frameCount <= 1, which made the follow-up loop decode 30
+            // phantom frames against an image2 demuxer (each producing the
+            // same PNG over and over, hundreds of ms of wasted software
+            // decode per still per scheduling cycle).
             const int64_t maxFollow = (task.info.frameCount > 1)
-                ? task.info.frameCount - 1 : INT64_MAX;
+                ? task.info.frameCount - 1
+                : (task.info.frameCount == 1 ? 0 : -1);
 
             ResolutionTier followTier = task.tier;
             {

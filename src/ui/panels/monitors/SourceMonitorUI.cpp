@@ -49,6 +49,12 @@ SourceMonitor::SourceMonitor(QWidget* parent)
     : QWidget(parent)
     , m_controller(std::make_unique<PlaybackController>())
 {
+    setAutoFillBackground(true);
+    {
+        QPalette p = palette();
+        p.setColor(QPalette::Window, Theme::colors().surface0);
+        setPalette(p);
+    }
     setupUI();
 
     // Polling timer for playback position updates
@@ -144,6 +150,12 @@ void SourceMonitor::setupUI()
 
     // ── Viewport / Waveform stacked area ──────────────────────────────
     auto* viewContainer = new QWidget(this);
+    viewContainer->setAutoFillBackground(true);
+    {
+        QPalette vp = viewContainer->palette();
+        vp.setColor(QPalette::Window, Theme::colors().surface0);
+        viewContainer->setPalette(vp);
+    }
     m_viewStack = new QStackedLayout(viewContainer);
     m_viewStack->setContentsMargins(0, 0, 0, 0);
 
@@ -390,9 +402,8 @@ void SourceMonitor::setupUI()
     controlLayout->addWidget(m_durationLabel, 0, Qt::AlignVCenter);
 
     mainLayout->addWidget(controlBar);
-    mainLayout->addSpacing(rt::UiScale::px(4));   // gap between control bar and mini-timeline
 
-    // Give the mini-timeline a distinct background
+    // ── Mini-timeline scrub bar ─────────────────────────────────────────
     m_miniTimeline->setMinimumHeight(rt::UiScale::px(56));
     mainLayout->addWidget(m_miniTimeline);
 

@@ -16,6 +16,7 @@
 #include "vulkan/Allocator.h"
 
 #include <cstdint>
+#include <functional>
 #include <list>
 #include <memory>
 #include <unordered_map>
@@ -115,6 +116,16 @@ public:
         return m_budget > 0 ? static_cast<int>(m_used * 100 / m_budget) : 0;
     }
 
+    // ── Recycling hook (A4) ────────────────────────────────────────────
+    /// When the LRU evicts an entry, invoke this callback with the
+    /// unique_ptr<Texture>.  The callback may steal the texture (move-from)
+    /// to return it to a recycled-texture pool, avoiding the
+    /// vmaCreateImage/vmaDestroyImage churn that fresh allocations cause
+    /// during heavy scrubbing.  Whatever the callback leaves in the
+    /// unique_ptr is destroyed normally.  Default: null (no recycling).
+    using RecycleFn = std::function<void(std::unique_ptr<Texture>&)>;
+    void setRecycleFn(RecycleFn fn) noexcept { m_recycleFn = std::move(fn); }
+
 private:
     struct CacheKey {
         uint64_t mediaId;
@@ -159,6 +170,8 @@ private:
     size_t m_used{0};
     size_t m_hits{0};
     size_t m_misses{0};
+
+    RecycleFn m_recycleFn;
 };
 
 } // namespace rt

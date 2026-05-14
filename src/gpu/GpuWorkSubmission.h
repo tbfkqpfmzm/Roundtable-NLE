@@ -29,6 +29,12 @@ public:
         VkFence         fence{VK_NULL_HANDLE};
         uint64_t        submissionIndex{0};
         bool            inFlight{false};
+
+        /// Per-slot binary semaphore signaled when this slot's GPU work
+        /// completes.  Used for inter-queue sync (compute→graphics).
+        /// Each slot has its OWN semaphore so that multiple in-flight
+        /// submissions never collide on a single semaphore signal.
+        VkSemaphore     signalSemaphore{VK_NULL_HANDLE};
     };
 
     GpuWorkSubmission() = default;
@@ -94,6 +100,14 @@ public:
     [[nodiscard]] bool isValid() const noexcept { return m_device != VK_NULL_HANDLE; }
     [[nodiscard]] int currentSlot() const noexcept { return m_currentSlot; }
     [[nodiscard]] uint64_t globalSubmissionIndex() const noexcept { return m_globalSubmissionIndex; }
+
+    /// Returns the semaphore for the MOST RECENTLY SUBMITTED slot
+    /// (the one we just advanced from).  Used by CompositeEngine to
+    /// hand off to the presenter for inter-queue synchronization.
+    [[nodiscard]] VkSemaphore submissionSemaphore() const noexcept {
+        int prevSlot = (m_currentSlot - 1 + kRingSize) % kRingSize;
+        return m_slots[prevSlot].signalSemaphore;
+    }
 
 private:
     VkDevice                m_device{VK_NULL_HANDLE};

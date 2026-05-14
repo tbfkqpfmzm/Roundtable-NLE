@@ -129,11 +129,33 @@ void GpuContext::shutdown()
 {
     if (!m_initialized) return;
 
+    // Invariant: shutdown() is called EXACTLY ONCE per process, during
+    // App::~App.  It is NOT called from tryRecover() anymore (see comment
+    // on tryRecover): destroying these subsystems mid-flight invalidates
+    // every raw VkImage / VkSemaphore / VkPipeline handle held by external
+    // consumers (VulkanViewport, FrameProducer::m_lastGoodFrame, cached
+    // CompositeEngine state, etc.) and the next Vulkan call from any of
+    // them crashes in nvoglv64.dll.  Keep it that way.
+
     spdlog::info("GpuContext: Shutting down Vulkan...");
 
     // Wait for GPU to finish
     if (m_device.handle())
         m_device.waitIdle();
+
+    // Drain the inter-queue binary-semaphore pool before destroying the
+    // device.  These semaphores are owned process-wide and shared between
+    // CompositeEngine (acquire) and VulkanViewport (release); the only
+    // safe time to destroy them is here, after waitIdle and before
+    // m_device.destroy().
+    {
+        std::lock_guard lock(m_binarySemaphorePoolMutex);
+        for (VkSemaphore sem : m_binarySemaphorePool) {
+            if (sem != VK_NULL_HANDLE)
+                vkDestroySemaphore(m_device.handle(), sem, nullptr);
+        }
+        m_binarySemaphorePool.clear();
+    }
 
     // Destroy in reverse order.
     // m_resourceManager must be destroyed BEFORE the VMA allocator and
@@ -165,36 +187,81 @@ void GpuContext::shutdown()
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  Device-lost Recovery (Phase 2.B)
+//  Device-lost — fatal failure (was: tryRecover with full in-place re-init)
 // ═════════════════════════════════════════════════════════════════════════════
-
+//
+// The previous implementation tore down the entire VkInstance / VkDevice
+// inside a worker thread, slept 50ms, then re-init()'d.  Two fatal problems:
+//
+//   1. Every other component (VulkanViewport, FrameProducer's lastGoodFrame,
+//      cached subsystems) still held raw VkImageView / VkSemaphore / VkFence
+//      handles from the destroyed device.  The very next vkSomething() call
+//      with one of those handles crashed inside the NVIDIA dispatch table
+//      (nvoglv64.dll!vkGetInstanceProcAddr+0xf36db7 — exactly the crash in
+//      the captured dump).
+//
+//   2. The 50ms sleep was nowhere near long enough for WDDM to release the
+//      wedged device.  In the captured log the re-init returned
+//      VK_ERROR_INITIALIZATION_FAILED, after which we marched on with a
+//      VkInstance::handle() == VK_NULL_HANDLE singleton.
+//
+// Every major NLE (Premiere, Resolve, AE) treats device-lost as fatal.  Now
+// we do too: transition to Failed, fire the callback (which is expected to
+// present a modal restart dialog on the UI thread), and return false.
 bool GpuContext::tryRecover()
 {
-    GpuState expected = GpuState::DeviceLost;
-    if (!m_gpuState.compare_exchange_strong(expected, GpuState::Recovering))
-        return false;
+    m_gpuState.store(GpuState::Failed, std::memory_order_release);
 
-    spdlog::warn("[GPU] Device lost — attempting recovery");
+    spdlog::error("[GPU] Device lost — fatal. Application must be restarted.");
 
-    // Step 1: Shutdown current GPU state
-    // Note: this resets m_initialized to false
-    shutdown();
-
-    // Step 2: Wait a brief moment for driver to settle
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-    // Step 3: Full re-initialize (same init sequence as startup)
-    bool ok = init();
-
-    m_gpuState.store(ok ? GpuState::Healthy : GpuState::Failed,
-                     std::memory_order_release);
-
-    if (ok) {
-        spdlog::info("[GPU] Recovery successful");
-    } else {
-        spdlog::error("[GPU] Recovery failed — falling back to safe mode");
+    bool expected = false;
+    if (m_fatalFailureCallback &&
+        m_fatalFailureFired.compare_exchange_strong(expected, true))
+    {
+        try {
+            m_fatalFailureCallback();
+        } catch (const std::exception& e) {
+            spdlog::error("[GPU] Fatal-failure callback threw: {}", e.what());
+        } catch (...) {
+            spdlog::error("[GPU] Fatal-failure callback threw unknown exception");
+        }
     }
-    return ok;
+    return false;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Shared binary-semaphore pool (compositor→presenter inter-queue sync)
+// ═════════════════════════════════════════════════════════════════════════════
+
+VkSemaphore GpuContext::acquireBinarySemaphore()
+{
+    {
+        std::lock_guard lock(m_binarySemaphorePoolMutex);
+        if (!m_binarySemaphorePool.empty()) {
+            VkSemaphore sem = m_binarySemaphorePool.back();
+            m_binarySemaphorePool.pop_back();
+            return sem;
+        }
+    }
+    // Pool empty — allocate.  Outside the mutex so vkCreateSemaphore can't
+    // re-enter through any logging/allocator path.
+    if (!m_initialized || m_device.handle() == VK_NULL_HANDLE)
+        return VK_NULL_HANDLE;
+    VkSemaphoreCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    VkSemaphore sem = VK_NULL_HANDLE;
+    if (vkCreateSemaphore(m_device.handle(), &info, nullptr, &sem) != VK_SUCCESS) {
+        spdlog::warn("GpuContext: vkCreateSemaphore failed for binary pool");
+        return VK_NULL_HANDLE;
+    }
+    return sem;
+}
+
+void GpuContext::releaseBinarySemaphore(VkSemaphore sem)
+{
+    if (sem == VK_NULL_HANDLE) return;
+    std::lock_guard lock(m_binarySemaphorePoolMutex);
+    m_binarySemaphorePool.push_back(sem);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -329,6 +396,24 @@ SpineRenderer* GpuContext::spineRenderer(uint32_t width, uint32_t height)
             spdlog::error("GpuContext: Failed to init shared SpineRenderer");
             m_spineRenderer.reset();
             return nullptr;
+        }
+
+        // Plumb the graphics-queue mutex so Spine's submit serializes with
+        // other graphics-queue users (VulkanViewport, EffectProcessor).
+        m_spineRenderer->setQueueMutex(&graphicsQueueMutex());
+
+        // When graphics and compute queue families differ, register the
+        // compute queue so SpineRenderer's beginFrame() can drain any
+        // in-flight compositor sampling of the shared framebuffer before
+        // re-transitioning it to COLOR_ATTACHMENT.  See SpineRenderer.cpp
+        // beginFrame() for the full hazard description.
+        if (qf.graphics.has_value() && qf.compute.has_value() &&
+            qf.graphics.value() != qf.compute.value()) {
+            m_spineRenderer->setComputeQueue(m_device.computeQueue(),
+                                             &computeQueueMutex());
+            spdlog::info("GpuContext: Spine cross-queue sync enabled "
+                         "(graphics family {} → compute family {})",
+                         qf.graphics.value(), qf.compute.value());
         }
 
         spdlog::info("GpuContext: Shared SpineRenderer created ({}x{})", width, height);

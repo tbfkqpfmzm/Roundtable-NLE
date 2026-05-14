@@ -51,6 +51,13 @@ MainWindow::MainWindow(QWidget* parent)
 
     setDocumentMode(true);
 
+    // Disable QMainWindow dock animations. The dock-undock + auto-resize
+    // animations fire QPropertyAnimation steps that re-emit setGeometry on
+    // child widgets ~60 times in 300ms. For the VulkanViewport that means
+    // 60 swapchain recreations, which can wedge the NVIDIA driver and trip
+    // VK_ERROR_DEVICE_LOST mid-playback.
+    setAnimated(false);
+
     // Install global event filter for JKL transport keys
     if (qApp) qApp->installEventFilter(this);
 

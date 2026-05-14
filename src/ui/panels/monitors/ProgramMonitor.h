@@ -106,6 +106,13 @@ public:
     /// Stop polling.
     void stopPolling();
 
+    /// A10: explicitly stop the PlaybackScheduler (clock + producer +
+    /// presenter threads).  Called from App::~App Phase 1 before the
+    /// MainWindow widget tree is destroyed in Phase 3.  Without this,
+    /// the presenter thread could still call into a partially-destroyed
+    /// CompositeService when MainWindow tears down.
+    void stopPlaybackPipeline();
+
     /// Force a display refresh at the current playhead position.
     void refresh();
 
@@ -234,6 +241,7 @@ private:
     void ensurePipelineStarted();
     void showEvent(QShowEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
     bool eventFilter(QObject* obj, QEvent* event) override;
 
     // Widgets

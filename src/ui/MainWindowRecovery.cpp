@@ -62,6 +62,8 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFrame>
+#include <QAbstractButton>
+#include <QCoreApplication>
 #include <QKeyEvent>
 #include <QMenuBar>
 #include <QInputDialog>
@@ -428,6 +430,54 @@ void MainWindow::updateRecentFilesMenu()
         s.remove("RecentFiles");
         updateRecentFilesMenu();
     });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Fatal GPU failure — VK_ERROR_DEVICE_LOST or any non-recoverable Vulkan
+//  error reported by GpuContext::tryRecover().  See GpuContext.cpp for why
+//  we never try to re-init in-place.
+// ─────────────────────────────────────────────────────────────────────────────
+
+void MainWindow::showGpuFatalError()
+{
+    static bool s_alreadyShown = false;
+    if (s_alreadyShown) return;
+    s_alreadyShown = true;
+
+    // Stop playback immediately so the FrameProducer / FramePresenter stop
+    // hammering Vulkan with stale handles while the user reads the dialog.
+    if (m_playbackController) {
+        m_playbackController->pause();
+    }
+
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Critical);
+    box.setWindowTitle("GPU Error");
+    box.setText("The GPU renderer has crashed and cannot continue.");
+    box.setInformativeText(
+        "Roundtable detected an unrecoverable Vulkan device error "
+        "(typically VK_ERROR_DEVICE_LOST from the graphics driver). "
+        "The application will continue running in CPU safe mode for "
+        "this session, but playback and effects will be very slow.\n\n"
+        "Please save your work and restart Roundtable.\n\n"
+        "If this happens repeatedly, update your graphics driver or "
+        "disable third-party overlays (NVIDIA App, OBS, Discord overlay).");
+    QPushButton* btnRestart  = box.addButton("Restart Now",       QMessageBox::AcceptRole);
+    QPushButton* btnQuit     = box.addButton("Quit",              QMessageBox::DestructiveRole);
+    box.addButton("Continue in safe mode",                        QMessageBox::RejectRole);
+    box.setDefaultButton(btnRestart);
+    box.exec();
+
+    QAbstractButton* clicked = box.clickedButton();
+    if (clicked == btnRestart) {
+        const QString exe  = QCoreApplication::applicationFilePath();
+        const QStringList args = QCoreApplication::arguments().mid(1);
+        QProcess::startDetached(exe, args);
+        QCoreApplication::quit();
+    } else if (clicked == btnQuit) {
+        QCoreApplication::quit();
+    }
+    // Continue: drop back into the running app; compositor will use safe mode.
 }
 
 } // namespace rt

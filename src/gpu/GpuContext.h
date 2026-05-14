@@ -28,9 +28,11 @@
 #include "vulkan/CommandPool.h"
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 
 namespace rt {
 
@@ -87,15 +89,33 @@ public:
         return m_gpuState.load(std::memory_order_acquire) == GpuState::Healthy;
     }
 
-    /// Attempt full GPU re-initialization after device lost.
-    /// Returns true on success, false if recovery failed.
+    /// Transition to the Failed state.  Previously this tried a full re-init
+    /// of the VkInstance / VkDevice in-place, but in practice (a) WDDM needs
+    /// hundreds of ms to release a wedged device, far more than the 50ms
+    /// sleep we used; and (b) every caller still holding raw VkImageView /
+    /// VkSemaphore / VkFence handles from the old device would crash on its
+    /// next Vulkan call.  Premiere/Resolve/UnrealEditor all treat device-lost
+    /// as fatal and require a process restart — we do the same.
+    ///
+    /// Always returns false.  The fatal-failure callback (if installed) is
+    /// invoked once; it should marshal to the UI thread and present a
+    /// "GPU error — please restart" modal.
     bool tryRecover();
 
     /// Signal that a GPU error (e.g. VK_ERROR_DEVICE_LOST) was detected.
-    /// Safe to call from any thread. Next composite call will attempt recovery.
+    /// Safe to call from any thread. Next composite call will treat the
+    /// device as failed.
     void signalDeviceLost() noexcept {
         GpuState expected = GpuState::Healthy;
         m_gpuState.compare_exchange_strong(expected, GpuState::DeviceLost);
+    }
+
+    /// Install a callback invoked exactly once when the GPU enters the
+    /// Failed state.  The callback may be called from any thread — it
+    /// MUST marshal to the UI thread itself (e.g. via
+    /// QMetaObject::invokeMethod) before touching Qt widgets.
+    void setFatalFailureCallback(std::function<void()> cb) {
+        m_fatalFailureCallback = std::move(cb);
     }
 
     // ── Accessors ───────────────────────────────────────────────────────
@@ -195,6 +215,29 @@ public:
                          uint32_t width, uint32_t height,
                          std::vector<uint8_t>& outPixels);
 
+    // ── Shared binary-semaphore pool ────────────────────────────────────
+    //
+    // Used for the inter-queue compositor→presenter signal/wait pair.
+    // Owned here (process-wide singleton) rather than on CompositeEngine
+    // because the consumer (VulkanViewport, on the GUI thread) needs to
+    // return semaphores to the same pool the producer (CompositeEngine,
+    // on the FrameProducer thread) pulls from — and routing it through
+    // a singleton avoids cross-module ownership / lifetime issues.
+    //
+    // Semaphores are NEVER destroyed mid-session; only when GpuContext
+    // shuts down.  This avoids the destroy/create handle-reuse race that
+    // crashed nvoglv64.dll in earlier revisions: if a different thread
+    // created a new VkSemaphore at the moment we were about to destroy
+    // one, the driver could hand back the recycled handle and we'd
+    // destroy the *new* semaphore.
+    //
+    // Both calls are thread-safe.  Acquire prefers an existing pool entry;
+    // it allocates a new semaphore only when the pool is empty.  Release
+    // pushes the (presumed unsignaled) semaphore back into the pool for
+    // the next acquire.
+    [[nodiscard]] VkSemaphore acquireBinarySemaphore();
+    void releaseBinarySemaphore(VkSemaphore sem);
+
 private:
     GpuContext() = default;
     ~GpuContext();
@@ -215,9 +258,17 @@ private:
 
     bool m_initialized{false};
     std::atomic<GpuState> m_gpuState{GpuState::Healthy};
+    std::function<void()> m_fatalFailureCallback{};
+    std::atomic<bool>     m_fatalFailureFired{false};
     mutable std::mutex m_graphicsQueueMutex;  ///< Serialise graphics queue submits
     mutable std::mutex m_computeQueueMutex;   ///< Serialise compute queue submits
     mutable std::mutex m_subsystemMutex;      ///< Serialise lazy subsystem creation
+
+    /// Shared binary-semaphore pool for inter-queue compositor→presenter sync.
+    /// Acquired by CompositeEngine, released by VulkanViewport once the
+    /// presenter's fence indicates the wait has been consumed.
+    std::vector<VkSemaphore> m_binarySemaphorePool;
+    mutable std::mutex       m_binarySemaphorePoolMutex;
 
     uint64_t m_effectProcessorRequests{0};
     uint64_t m_effectProcessorCacheHits{0};
@@ -225,6 +276,7 @@ private:
     uint64_t m_nv12ConverterRequests{0};
     uint64_t m_nv12ConverterCacheHits{0};
     uint64_t m_nv12ConverterCreations{0};
+
 };
 
 } // namespace rt

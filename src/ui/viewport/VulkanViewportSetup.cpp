@@ -157,6 +157,13 @@ void VulkanViewport::shutdownGpu()
     VkDevice device = gpu.vkDevice();
     vkDeviceWaitIdle(device);
 
+    // Destroy all recycled inter-queue semaphores (safe after vkDeviceWaitIdle)
+    for (VkSemaphore sem : m_recycledSemaphores) {
+        if (sem != VK_NULL_HANDLE)
+            vkDestroySemaphore(device, sem, nullptr);
+    }
+    m_recycledSemaphores.clear();
+
     // Destroy private upload textures before swapchain/surface teardown
     for (auto& slot : m_uploadSlots) {
         slot.texture.reset();

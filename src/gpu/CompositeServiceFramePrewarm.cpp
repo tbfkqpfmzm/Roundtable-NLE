@@ -91,7 +91,14 @@ void CompositeService::prewarmThreadLoop()
         // Run the actual prewarm work on this background thread.
         // Uses m_openMediaHandlesMutex (not m_compositeMutex) so it
         // never blocks compositeFrame() on the FrameProducer thread.
-        doPrewarmPlaybackResources(req.tick, req.outW, req.outH);
+        try {
+            doPrewarmPlaybackResources(req.tick, req.outW, req.outH);
+        } catch (const std::exception& e) {
+            spdlog::error("[PREWARM] Exception in background prewarm: {}",
+                          e.what());
+        } catch (...) {
+            spdlog::error("[PREWARM] Unknown exception in background prewarm");
+        }
     }
 }
 
@@ -319,10 +326,18 @@ void CompositeService::doPrewarmPlaybackResources(int64_t tick, uint32_t outW, u
                 if (!videoClip) continue;
                 const auto& mediaPath = videoClip->mediaPath();
                 if (mediaPath.empty()) continue;
-                {
-                    std::lock_guard hl(m_openMediaHandlesMutex);
-                    if (m_openMediaHandles.count(mediaPath)) continue;
-                }
+                // Outer `lock` at the top of doPrewarmPlaybackResources()
+                // ALREADY holds m_openMediaHandlesMutex on this thread.
+                // A nested std::lock_guard on the same non-recursive
+                // mutex throws std::system_error("resource deadlock would
+                // occur").  When that exception unwinds, the prewarm
+                // thread leaves the timeline scan half-finished and
+                // (worse) the spawned background bulk-open thread keeps
+                // calling MediaPool::open in parallel with the
+                // FrameProducer's composite path — over the next second
+                // a partially-decoded frame slips into the GPU pipeline
+                // and the NVIDIA driver returns VK_ERROR_DEVICE_LOST.
+                if (m_openMediaHandles.count(mediaPath)) continue;
                 pathsToOpen.push_back(mediaPath);
             }
         }

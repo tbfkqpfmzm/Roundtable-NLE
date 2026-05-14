@@ -99,6 +99,13 @@ std::shared_ptr<CachedFrame> MediaPool::decodeFrame(
     double targetTime = frameNumber / fps;
 
     bool isStillImage = (entry.info.duration <= 0.0 || entry.info.frameCount <= 1);
+    // Still images are timeless — every "frame" produces the same pixels.
+    // Pin them under index 0 so producers and consumers all look up the
+    // single canonical entry instead of caching N copies under arbitrary
+    // playhead frame numbers (which then expire from the LRU and trigger
+    // another full software PNG decode — visible in the log as repeated
+    // SLOW DECODE warnings for the same handle at frame=0, 20, 31, etc).
+    if (isStillImage) frameNumber = 0;
 
     // â”€â”€ Sequential-playback fast path â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // During forward playback the frames come in order (N, N+1, N+2â€¦).

@@ -219,6 +219,33 @@ void CompositeService::invalidateCacheDirect()
     m_cacheInvalidateRequested.store(false, std::memory_order_release);
 }
 
+void CompositeService::requestCacheInvalidationRange(int64_t fromTick, int64_t toTick)
+{
+    // Try to acquire m_compositeMutex non-blockingly.  If the composite
+    // thread is mid-frame, fall back to the existing atomic-flag mechanism
+    // (which drops the full LRU on next compositeFrame entry).  This avoids
+    // deadlocking the UI thread on a long composite.
+    std::unique_lock lock(m_compositeMutex, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        // Compositor is busy.  Fall back to full invalidation.
+        requestCacheInvalidation();
+        return;
+    }
+    if (m_engine)
+        m_engine->invalidateLruRange(fromTick, toTick);
+    {
+        std::lock_guard lg(m_lastCompositeMtx);
+        // If the held last-good frame happens to be in the affected range,
+        // drop it too — otherwise keep it to bridge the next composite.
+        if (m_lastGoodComposite && m_lastGoodCompositeTick >= fromTick &&
+            m_lastGoodCompositeTick <= toTick)
+        {
+            m_lastGoodComposite.reset();
+            m_lastGoodCompositeTick = -1;
+        }
+    }
+}
+
 // ── Cache coordinator ───────────────────────────────────────────────────────
 
 void CompositeService::setCacheCoordinator(rt::CacheCoordinator* coordinator)

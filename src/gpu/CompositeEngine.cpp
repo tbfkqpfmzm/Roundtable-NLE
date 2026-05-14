@@ -39,10 +39,7 @@
 
 using namespace rt;
 
-// Render graph feature flag — default off.  Set to true to use the
-// DAG-based pipeline.  Must produce pixel-identical output before
-// switching the default.
-bool CompositeEngine::s_useRenderGraph = false;
+// s_useRenderGraph was removed in T3.14 — the DAG path is now the only path.
 
 // ============================================================================
 // Static helpers: Timeline TransitionType -> GpuTransitionType mapping
@@ -129,18 +126,126 @@ void CompositeEngine::init(VkDevice device)
 {
     m_device = device;
 
-    if (device != VK_NULL_HANDLE) {
-        VkSemaphoreCreateInfo semInfo{};
-        semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-        if (vkCreateSemaphore(device, &semInfo, nullptr, &m_compositeSemaphore) != VK_SUCCESS) {
-            spdlog::warn("CompositeEngine: failed to create composite semaphore");
-            m_compositeSemaphore = VK_NULL_HANDLE;
-        }
-    }
+    // The inter-queue semaphore pool now lives on GpuContext (so the
+    // presenter can return semaphores to it across threads).  We don't
+    // pre-populate; the first acquire allocates on demand and the pool
+    // self-warms within the first 3-4 frames.
 
     m_stagingRing = std::make_unique<StagingRing>();
     m_uploadManager = std::make_unique<GpuUploadManager>(
         GpuContext::get(), *m_stagingRing);
+
+    initTimingPools(device);
+}
+
+// ── GPU timing query pools (per-ring-slot) ──────────────────────────────────
+
+void CompositeEngine::initTimingPools(VkDevice device)
+{
+    if (device == VK_NULL_HANDLE) return;
+
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(GpuContext::get().physicalDevice(), &props);
+    m_timestampPeriodNs = static_cast<double>(props.limits.timestampPeriod);
+
+    // Driver may not support GPU timestamps on the compute queue.  If the
+    // valid bits for the compute queue family are 0, we just skip telemetry.
+    const auto& families = GpuContext::get().device().queueFamilies();
+    const uint32_t computeQF = families.compute.value_or(families.graphics.value_or(0));
+    VkQueueFamilyProperties qprops{};
+    {
+        uint32_t qCount = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(GpuContext::get().physicalDevice(), &qCount, nullptr);
+        std::vector<VkQueueFamilyProperties> all(qCount);
+        vkGetPhysicalDeviceQueueFamilyProperties(GpuContext::get().physicalDevice(), &qCount, all.data());
+        if (computeQF < qCount) qprops = all[computeQF];
+    }
+    if (qprops.timestampValidBits == 0) {
+        spdlog::info("[GPU-TIMING] Compute queue does not support timestamps — skipping telemetry");
+        return;
+    }
+
+    VkQueryPoolCreateInfo qpci{};
+    qpci.sType      = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+    qpci.queryType  = VK_QUERY_TYPE_TIMESTAMP;
+    qpci.queryCount = kTimingMarkers;
+
+    for (int i = 0; i < kTimingRingSize; ++i) {
+        if (vkCreateQueryPool(device, &qpci, nullptr, &m_timingPools[i]) != VK_SUCCESS) {
+            spdlog::warn("[GPU-TIMING] vkCreateQueryPool failed for slot {}", i);
+            // Tear down any pools already created and bail out — telemetry
+            // is best-effort, never fatal.
+            destroyTimingPools();
+            return;
+        }
+        m_timingPoolUsed[i] = false;
+    }
+    m_timingInitialized = true;
+    spdlog::info("[GPU-TIMING] Query pools initialized "
+                 "(period={:.2f}ns, ring={})",
+                 m_timestampPeriodNs, kTimingRingSize);
+}
+
+void CompositeEngine::destroyTimingPools()
+{
+    for (int i = 0; i < kTimingRingSize; ++i) {
+        if (m_timingPools[i] != VK_NULL_HANDLE) {
+            vkDestroyQueryPool(m_device, m_timingPools[i], nullptr);
+            m_timingPools[i] = VK_NULL_HANDLE;
+        }
+        m_timingPoolUsed[i] = false;
+    }
+    m_timingInitialized = false;
+}
+
+void CompositeEngine::resolveTimingsForSlot(int slotIdx)
+{
+    if (!m_timingInitialized || slotIdx < 0 || slotIdx >= kTimingRingSize) return;
+    if (!m_timingPoolUsed[slotIdx]) return;  // pool not yet populated
+
+    uint64_t ts[kTimingMarkers]{};
+    VkResult r = vkGetQueryPoolResults(
+        m_device, m_timingPools[slotIdx],
+        0, kTimingMarkers,
+        sizeof(ts), ts, sizeof(uint64_t),
+        VK_QUERY_RESULT_64_BIT);
+    if (r != VK_SUCCESS) return;  // not ready (driver bug?) — skip
+
+    const double tickToMs = m_timestampPeriodNs * 1e-6;
+    GpuStageTimings t;
+    t.uploadMs  = static_cast<double>(ts[1] - ts[0]) * tickToMs;
+    t.effectMs  = static_cast<double>(ts[2] - ts[1]) * tickToMs;
+    t.composeMs = static_cast<double>(ts[3] - ts[2]) * tickToMs;
+    t.frameMs   = static_cast<double>(ts[3] - ts[0]) * tickToMs;
+    t.valid     = true;
+    {
+        std::lock_guard l(m_timingMtx);
+        m_lastTimings = t;
+    }
+
+    static int s_logCounter = 0;
+    if (++s_logCounter % 30 == 0) {
+        spdlog::info("[GPU-TIMING] upload={:.2f}ms effect={:.2f}ms "
+                     "compose={:.2f}ms frame={:.2f}ms",
+                     t.uploadMs, t.effectMs, t.composeMs, t.frameMs);
+    }
+}
+
+VkSemaphore CompositeEngine::acquireFrameSemaphore()
+{
+    // Delegate to the GpuContext-owned pool so the presenter (VulkanViewport,
+    // running on the GUI thread) can return semaphores to the same pool we
+    // pull from here on the FrameProducer thread.  The previous design had
+    // the pool living locally on CompositeEngine, with the presenter pushing
+    // consumed semaphores onto an unrelated `m_recycledSemaphores` vector
+    // that was never drained — the result was a ~60 VkSemaphore/sec leak
+    // over the whole session.
+    return GpuContext::get().acquireBinarySemaphore();
+}
+
+void CompositeEngine::releaseFrameSemaphore(VkSemaphore sem)
+{
+    GpuContext::get().releaseBinarySemaphore(sem);
 }
 
 void CompositeEngine::shutdown()
@@ -148,11 +253,11 @@ void CompositeEngine::shutdown()
     if (m_device != VK_NULL_HANDLE)
         vkDeviceWaitIdle(m_device);
 
-    if (m_compositeSemaphore != VK_NULL_HANDLE) {
-        vkDestroySemaphore(m_device, m_compositeSemaphore, nullptr);
-        m_compositeSemaphore = VK_NULL_HANDLE;
-    }
+    // Inter-queue semaphores are owned by GpuContext now and destroyed
+    // from GpuContext::shutdown after device waitIdle — see the matching
+    // block there.  Nothing to do for them here.
 
+    destroyTimingPools();
     destroyCompositeSlot();
     clearGpuTexCache();
     m_gpuLayerTextures.clear();
@@ -203,6 +308,23 @@ void CompositeEngine::clearLru()
     m_compositeLru.clear();
     m_compositeLru.resize(kCacheSize);
     m_compositeLruIdx = 0;
+}
+
+// A3: Only invalidate composite entries whose tick falls inside [fromTick, toTick].
+// Used by edit commands that mutate a known time range — keeps cached
+// frames from the rest of the timeline alive so seeking elsewhere doesn't
+// trigger a full re-composite chain.
+void CompositeEngine::invalidateLruRange(int64_t fromTick, int64_t toTick)
+{
+    if (fromTick > toTick) std::swap(fromTick, toTick);
+    for (auto& ce : m_compositeLru) {
+        if (ce.frame && ce.tick >= fromTick && ce.tick <= toTick) {
+            ce.frame.reset();
+            ce.tick = -1;
+            ce.w = 0;
+            ce.h = 0;
+        }
+    }
 }
 
 // ============================================================================
@@ -276,19 +398,23 @@ std::shared_ptr<CachedFrame> CompositeEngine::composite(
         m_gpuCompositeState = GpuContext::get().isInitialized() ? 1 : -1;
     }
 
-    // -- GPU device-lost recovery --
+    // -- GPU device-lost / failed --
+    // tryRecover() now transitions to Failed and fires the fatal-failure
+    // callback exactly once.  We never resume the GPU path on the same
+    // process — the user is expected to restart.  Returning nullptr lets
+    // CompositeService fall through to safe-mode CPU compositing.
     {
         auto& gpu = GpuContext::get();
-        if (gpu.gpuState() == GpuState::DeviceLost) {
-            spdlog::warn("[COMPOSITE] GPU device lost detected -- attempting recovery");
-            if (gpu.tryRecover()) {
-                m_gpuCompositeState = 1;
-                m_gpuBackoffAttempts = 0;
-                m_gpuBackoffUntil = {};
-            } else {
-                m_gpuCompositeState = -1;
-                return nullptr;
-            }
+        const GpuState st = gpu.gpuState();
+        if (st == GpuState::DeviceLost) {
+            spdlog::warn("[COMPOSITE] GPU device lost detected");
+            gpu.tryRecover();  // marks Failed + fires fatal callback
+            m_gpuCompositeState = -1;
+            return nullptr;
+        }
+        if (st == GpuState::Failed) {
+            m_gpuCompositeState = -1;
+            return nullptr;
         }
     }
 
@@ -305,465 +431,24 @@ std::shared_ptr<CachedFrame> CompositeEngine::composite(
         }
     }
 
-    if (m_gpuCompositeState != 1 || !compositor || !compositor->isInitialized())
-        return nullptr;
-
-    // ── Render graph alternative path ──────────────────────────────
-    if (s_useRenderGraph) {
-        return compositeViaRenderGraph(
-            layers, outW, outH, tick, scrubMode, gpuDisplayMode,
-            compositor, effectProcessor, transitionRenderer,
-            perfLog, perfT0, perfTlayers, perfTgpuUp, perfTcomp,
-            effectLayerCount, effectPassCount, transitionCount);
-    }
-
-    auto& ctx = GpuContext::get();
-
-    // -- Ensure texture pool is large enough --
-    while (m_gpuLayerTextures.size() < layers.size())
-        m_gpuLayerTextures.push_back(std::make_unique<Texture>());
-    m_gpuLayerTexKeys.resize(m_gpuLayerTextures.size());
-    while (m_gpuMaskTextures.size() < layers.size())
-        m_gpuMaskTextures.push_back(std::make_unique<Texture>());
-
-    std::vector<CompositorLayer> gpuLayers;
-    gpuLayers.reserve(layers.size());
-    bool uploadOk = true;
-
-    // -- Set up command buffer --
-    if (!m_gpuSubmission) {
-        m_gpuSubmission = std::make_unique<GpuWorkSubmission>();
-        m_gpuSubmission->init(ctx.vkDevice(), ctx.cmdPool().handle());
-    }
-    auto& slot = *m_gpuSubmission;
-    slot.beginRecording();
-    VkCommandBuffer uploadCmd = slot.cmdBuffer();
-
-    m_uploadManager->beginFrame(uploadCmd);
-    m_uploadManager->setTextureCache(m_gpuTexCache.get());
-
-    if (m_stagingRing && !m_stagingRing->isInitialized())
-        m_stagingRing->init(ctx.allocator().handle(), 64u * 1024u * 1024u);
-
-    if (!m_gpuTexCache) {
-        const auto memStats = ctx.allocator().queryStats();
-        const size_t gpuVram = memStats.deviceLocalBudgetBytes;
-
-        // Use CacheCoordinator for system-adaptive budget if available,
-        // otherwise fall back to a reasonable default.
-        size_t budget;
-        if (m_cacheCoordinator) {
-            budget = m_cacheCoordinator->recommendedGpuTexCacheBudget(gpuVram);
-            m_cacheCoordinator->onGpuAvailable(gpuVram);
-        } else {
-            budget = std::clamp<size_t>(
-                gpuVram / 4, 512ull * 1024 * 1024, 8ull * 1024 * 1024 * 1024);
-        }
-
-        m_gpuTexCache = std::make_unique<GpuTextureCache>(budget);
-        m_uploadManager->setTextureCache(m_gpuTexCache.get());
-
-        // Register VRAM pressure callback with the coordinator
-        if (m_cacheCoordinator) {
-            m_cacheCoordinator->setVramPressureFn(
-                [this](size_t* budgetOut) -> bool {
-                    if (!m_gpuTexCache) return false;
-                    *budgetOut = m_gpuTexCache->budget();
-                    return m_gpuTexCache->isUnderPressure();
-                });
-        }
-
-        spdlog::info("[PERF] GpuTexCache budget: {:.0f} MB (GPU VRAM: {:.0f} MB)",
-                     budget / 1048576.0, gpuVram / 1048576.0);
-    }
-
-    // -- Upload each layer --
-    for (size_t li = 0; li < layers.size(); ++li) {
-        const auto& layer = layers[li];
-
-        if (layer.gpuTextureReady) {
-            CompositorLayer cl;
-            cl.textureInfo = layer.gpuDescriptor;
-            uint32_t srcW = layer.frameWidth  ? layer.frameWidth  : outW;
-            uint32_t srcH = layer.frameHeight ? layer.frameHeight : outH;
-            if (layer.isPacked && srcH > 1) srcH /= 2;
-            cl.transform = Compositor::buildViewportTransform(
-                srcW, srcH, outW, outH,
-                layer.posX, layer.posY, layer.scX, layer.scY, layer.rot,
-                layer.containFit);
-            cl.opacity   = layer.opacity;
-            cl.blendMode = static_cast<BlendMode>(layer.blendMode);
-            cl.enabled   = true;
-            cl.isPacked  = layer.isPacked;
-            cl.isPMA     = layer.isPMA;
-            cl.needsSwapRB = layer.needsSwapRB;
-            cl.cropLeft   = layer.cropL / 100.0f;
-            cl.cropRight  = layer.cropR / 100.0f;
-            cl.cropTop    = layer.cropT / 100.0f;
-            cl.cropBottom = layer.cropB / 100.0f;
-            gpuLayers.push_back(cl);
-            continue;
-        }
-
-        auto uploadResult = m_uploadManager->uploadLayer(
-            layer, *m_gpuLayerTextures[li],
-            m_gpuLayerTexKeys[li].mediaId,
-            m_gpuLayerTexKeys[li].frameNumber,
-            scrubMode);
-
-        if (uploadResult.success) {
-            CompositorLayer cl;
-            cl.textureInfo = uploadResult.descriptor;
-            cl.transform = Compositor::buildViewportTransform(
-                uploadResult.srcW, uploadResult.srcH, outW, outH,
-                layer.posX, layer.posY, layer.scX, layer.scY, layer.rot,
-                layer.containFit);
-            cl.opacity   = layer.opacity;
-            cl.blendMode = static_cast<BlendMode>(layer.blendMode);
-            cl.enabled   = true;
-            cl.isPacked  = uploadResult.cacheHit ? uploadResult.isPacked : layer.isPacked;
-            cl.isPMA     = layer.isPMA;
-            cl.needsSwapRB = layer.needsSwapRB;
-            cl.cropLeft   = layer.cropL / 100.0f;
-            cl.cropRight  = layer.cropR / 100.0f;
-            cl.cropTop    = layer.cropT / 100.0f;
-            cl.cropBottom = layer.cropB / 100.0f;
-            gpuLayers.push_back(cl);
-        } else {
-            spdlog::warn("compositeFrame: layer {} upload failed, skipping", li);
-            CompositorLayer emptyCl;
-            emptyCl.enabled = false;
-            gpuLayers.push_back(emptyCl);
-            uploadOk = false;
-            break;
-        }
-    }
-
-    if (!uploadOk) {
-        m_uploadManager->endFrame();
+    if (m_gpuCompositeState != 1 || !compositor || !compositor->isInitialized()) {
         return nullptr;
     }
 
-    // -- Upload mask textures --
-    for (size_t li = 0; li < layers.size() && li < gpuLayers.size(); ++li) {
-        const auto& layer = layers[li];
-        if (!layer.clipPtr || layer.clipPtr->maskCount() == 0)
-            continue;
-        auto maskPixels = rasterizeMasks(layer.clipPtr->masks(), outW, outH);
-        VkDescriptorImageInfo maskDesc{};
-        if (m_uploadManager->uploadMask(
-                maskPixels, *m_gpuMaskTextures[li], outW, outH, maskDesc))
-        {
-            gpuLayers[li].hasMask = true;
-            gpuLayers[li].maskTextureInfo = maskDesc;
-        }
-    }
-
-    // -- Pipeline barrier: transfer -> compute --
-    {
-        VkMemoryBarrier barrier{};
-        barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-        vkCmdPipelineBarrier(uploadCmd,
-            VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            0, 1, &barrier, 0, nullptr, 0, nullptr);
-    }
-
-    // -- Effects pass --
-    if (effectProcessor && effectProcessor->isInitialized()) {
-        for (size_t li = 0; li < layers.size(); ++li) {
-            const auto& layer = layers[li];
-            if (layer.effects.empty()) continue;
-
-            auto* fx = effectProcessor;
-            if (!fx->isInitialized()) continue;
-
-            ++effectLayerCount;
-            effectPassCount += static_cast<int>(layer.effects.size());
-
-            for (const auto& snap : layer.effects) {
-                if (snap.type == EffectType::LUT && layer.clipPtr) {
-                    for (size_t ei = 0; ei < layer.clipPtr->effects().effectCount(); ++ei) {
-                        auto& clipFx = layer.clipPtr->effects().effect(ei);
-                        if (clipFx.effectType() == EffectType::LUT && clipFx.isEnabled()) {
-                            auto* lutFx = static_cast<LUT*>(&clipFx);
-                            if (lutFx->hasLUT())
-                                fx->uploadLUT3D(lutFx->lutData(), lutFx->lutSize());
-                            break;
-                        }
-                    }
-                    break;
-                }
-            }
-
-            VkDescriptorImageInfo srcInfo = gpuLayers[li].textureInfo;
-            if (fx->process(uploadCmd, srcInfo, layer.effects)) {
-                gpuLayers[li].textureInfo = fx->outputDescriptorInfo();
-            }
-
-            VkMemoryBarrier fxBarrier{};
-            fxBarrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-            fxBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-            fxBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-            vkCmdPipelineBarrier(uploadCmd,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                0, 1, &fxBarrier, 0, nullptr, 0, nullptr);
-        }
-    }
-
-    // -- Wipe transitions --
-    bool compOk = false;
-    bool readbackOk = false;
-
-    if (transitionRenderer && transitionRenderer->isInitialized()) {
-        for (size_t wi = 0; wi < layers.size(); ++wi) {
-            if (layers[wi].wipeProgress < 0.0f)
-                continue;
-
-            const bool isSingletonIncoming =
-                !layers[wi].isWipeOutgoing
-                && layers[wi].wipePeerClipId == 0
-                && layers[wi].wipeType == TransitionType::CrossDissolve;
-            if (!layers[wi].isWipeOutgoing && !isSingletonIncoming)
-                continue;
-            if (!gpuLayers[wi].enabled) continue;
-
-            auto* tr = transitionRenderer;
-            if (!tr || !tr->isInitialized()) continue;
-
-            TransitionSourceInfo srcA{};
-            TransitionSourceInfo srcB{};
-            srcA.textureInfo = gpuLayers[wi].textureInfo;
-            srcA.transform   = gpuLayers[wi].transform;
-            srcA.crop        = glm::vec4(gpuLayers[wi].cropLeft,
-                                         gpuLayers[wi].cropRight,
-                                         gpuLayers[wi].cropTop,
-                                         gpuLayers[wi].cropBottom);
-            srcA.isPacked    = gpuLayers[wi].isPacked;
-
-            size_t pi = SIZE_MAX;
-            if (layers[wi].wipePeerClipId == 0) {
-                if (layers[wi].wipeType == TransitionType::FadeToWhite) {
-                    srcB.textureInfo = tr->whiteDescriptorInfo();
-                } else if (layers[wi].wipeType == TransitionType::FadeFromWhite) {
-                    srcB = srcA;
-                    srcA = TransitionSourceInfo{};
-                    srcA.textureInfo = tr->whiteDescriptorInfo();
-                } else if (layers[wi].wipeType == TransitionType::FadeToBlack) {
-                    srcB.textureInfo = tr->blackDescriptorInfo();
-                } else if (layers[wi].wipeType == TransitionType::FadeFromBlack) {
-                    srcB = srcA;
-                    srcA = TransitionSourceInfo{};
-                    srcA.textureInfo = tr->blackDescriptorInfo();
-                } else if (layers[wi].wipeType == TransitionType::CrossDissolve
-                           && !layers[wi].isWipeOutgoing) {
-                    srcB = srcA;
-                    srcA = TransitionSourceInfo{};
-                    srcA.textureInfo = tr->transparentDescriptorInfo();
-                } else {
-                    srcB.textureInfo = tr->transparentDescriptorInfo();
-                }
-            } else {
-                for (size_t wj = 0; wj < layers.size(); ++wj) {
-                    if (wj != wi && layers[wj].clipId == layers[wi].wipePeerClipId) {
-                        pi = wj;
-                        break;
-                    }
-                }
-                if (pi == SIZE_MAX || !gpuLayers[pi].enabled) continue;
-                srcB.textureInfo = gpuLayers[pi].textureInfo;
-                srcB.transform   = gpuLayers[pi].transform;
-                srcB.crop        = glm::vec4(gpuLayers[pi].cropLeft,
-                                             gpuLayers[pi].cropRight,
-                                             gpuLayers[pi].cropTop,
-                                             gpuLayers[pi].cropBottom);
-                srcB.isPacked    = gpuLayers[pi].isPacked;
-            }
-
-            GpuTransitionType gt = toGpuTransitionType(layers[wi].wipeType);
-            int32_t dirOvr = transitionDirectionOverride(layers[wi].wipeType);
-
-            if (tr->render(uploadCmd, srcA, srcB,
-                               gt, layers[wi].wipeProgress,
-                               dirOvr, 0.0f, layers[wi].wipeSoftness))
-            {
-                ++transitionCount;
-                gpuLayers[wi].textureInfo = tr->outputDescriptorInfo();
-                gpuLayers[wi].opacity     = 1.0f;
-                gpuLayers[wi].isPacked    = false;
-                gpuLayers[wi].isPMA       = false;
-                gpuLayers[wi].cropLeft    = 0.0f;
-                gpuLayers[wi].cropRight   = 0.0f;
-                gpuLayers[wi].cropTop     = 0.0f;
-                gpuLayers[wi].cropBottom  = 0.0f;
-                gpuLayers[wi].blendMode   = BlendMode::Normal;
-                gpuLayers[wi].transform   = Compositor::buildViewportTransform(
-                    outW, outH, outW, outH,
-                    0.0f, 0.0f, 1.0f, 1.0f, 0.0f, false);
-                if (pi != SIZE_MAX)
-                    gpuLayers[pi].enabled = false;
-
-                VkMemoryBarrier trBarrier{};
-                trBarrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-                trBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-                trBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-                vkCmdPipelineBarrier(uploadCmd,
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    0, 1, &trBarrier, 0, nullptr, 0, nullptr);
-            }
-        }
-    }
-
-    // -- Build A/B pairs --
-    std::vector<ABPair> abPairs;
-    abPairs.reserve((gpuLayers.size() + 1) / 2);
-    for (size_t pi = 0; pi < gpuLayers.size(); pi += 2) {
-        ABPair pair;
-        pair.background = gpuLayers[pi];
-        pair.background.pairIndex = static_cast<uint32_t>(pi / 2);
-        pair.background.isBackground = true;
-        if (pi + 1 < gpuLayers.size()) {
-            pair.foreground = gpuLayers[pi + 1];
-            pair.foreground.pairIndex = static_cast<uint32_t>(pi / 2);
-            pair.foreground.isBackground = false;
-        } else {
-            pair.foreground.enabled = false;
-            pair.foreground.opacity = 0.0f;
-            pair.foreground.pairIndex = static_cast<uint32_t>(pi / 2);
-            pair.foreground.isBackground = false;
-        }
-        pair.transition.type = -1;
-        abPairs.push_back(pair);
-    }
-
-    // -- Composite + readback --
-    compositor->setPairs(abPairs);
-    compOk = compositor->composite(uploadCmd);
-    if (compOk) {
-        if (!gpuDisplayMode || scrubMode)
-            readbackOk = compositor->recordReadback(uploadCmd);
-    }
-
-    // -- Single submit --
-    slot.endRecording();
-    bool gpuSubmitOk = false;
-    {
-        std::lock_guard qLock(ctx.computeQueueMutex());
-        VkSemaphore compSem = m_compositeSemaphore;
-        if (compSem != VK_NULL_HANDLE) {
-            gpuSubmitOk = slot.submit(ctx.computeQueue(), compSem);
-        } else {
-            gpuSubmitOk = slot.submit(ctx.computeQueue());
-        }
-    }
-
-    if (!gpuSubmitOk) {
-        GpuContext::get().signalDeviceLost();
-        int backoffMs = kGpuBackoffInitialMs * (1 << m_gpuBackoffAttempts);
-        if (backoffMs > kGpuBackoffMaxMs) backoffMs = kGpuBackoffMaxMs;
-        m_gpuBackoffUntil = std::chrono::steady_clock::now()
-                          + std::chrono::milliseconds(backoffMs);
-        ++m_gpuBackoffAttempts;
-        spdlog::error("[COMPOSITE] GPU submit/wait failed (attempt {}) -- backoff {}ms",
-                      m_gpuBackoffAttempts, backoffMs);
-        compOk = false;
-        readbackOk = false;
-    } else {
-        m_gpuBackoffAttempts = 0;
-        m_gpuBackoffUntil = {};
-    }
-
-    m_uploadManager->endFrame();
-
-    perfTgpuUp = std::chrono::high_resolution_clock::now();
-
-    // -- Build result frame --
-    if (compOk) {
-        auto result = std::make_shared<CachedFrame>();
-        result->width  = outW;
-        result->height = outH;
-        result->stride = outW * 4;
-
-        if (gpuDisplayMode && !scrubMode) {
-            result->gpuReady     = true;
-            result->gpuImageView = reinterpret_cast<uint64_t>(compositor->outputImageView());
-            result->gpuSampler   = reinterpret_cast<uint64_t>(compositor->outputSampler());
-            result->gpuSemaphore = reinterpret_cast<uint64_t>(m_compositeSemaphore);
-        }
-
-        if (readbackOk && gpuDisplayMode && !scrubMode) {
-            auto compPtr = compositor;
-            uint32_t rW = outW, rH = outH;
-            result->lazyReadback = [compPtr, rW, rH](std::vector<uint8_t>& px) -> bool {
-                const size_t imgBytes = static_cast<size_t>(rW) * rH * 4;
-                px.resize(imgBytes);
-                return compPtr->mapAndCopyReadback(px);
-            };
-        } else if (readbackOk) {
-            const size_t imgBytes = static_cast<size_t>(outW) * outH * 4;
-            if (m_compositeLru.size() >= kCacheSize) {
-                auto& victim = m_compositeLru[m_compositeLruIdx];
-                if (victim.frame && victim.frame.use_count() == 1 &&
-                    victim.frame->pixels.size() == imgBytes)
-                {
-                    result->pixels = std::move(victim.frame->pixels);
-                }
-            }
-            compositor->mapAndCopyReadback(result->pixels);
-        }
-
-        if (!result->gpuReady) {
-            insertLru(tick, outW, outH, result);
-        }
-
-        perfTcomp = std::chrono::high_resolution_clock::now();
-
-        if (perfLog) {
-            auto ms = [](auto a, auto b) {
-                return std::chrono::duration<double, std::milli>(b - a).count();
-            };
-            spdlog::info("[PERF] compositeFrame (GPU): layers={} | "
-                         "decode+spine={:.1f}ms  gpu={:.1f}ms  TOTAL={:.1f}ms  "
-                         "gpuDisplay={}  effectLayers={}  effectPasses={}  transitions={}",
-                         layers.size(),
-                         ms(perfT0, perfTlayers),
-                         ms(perfTlayers, perfTcomp),
-                         ms(perfT0, perfTcomp),
-                         gpuDisplayMode,
-                         effectLayerCount, effectPassCount, transitionCount);
-            int gpuHitCount = 0, uploadCount = 0;
-            for (const auto& l : layers) {
-                if (l.gpuTextureReady) ++gpuHitCount;
-                else ++uploadCount;
-            }
-            spdlog::info("[PERF]   layer breakdown: gpuCacheHit={} uploaded={}",
-                         gpuHitCount, uploadCount);
-            if (m_gpuTexCache) {
-                spdlog::info("[PERF] GpuTexCache: {} entries, {:.0f}MB / {:.0f}MB budget, "
-                             "hits={} misses={}",
-                             m_gpuTexCache->entryCount(),
-                             m_gpuTexCache->memoryUsed() / 1048576.0,
-                             m_gpuTexCache->budget() / 1048576.0,
-                             m_gpuTexCache->hits(), m_gpuTexCache->misses());
-            }
-        }
-
-        // Notify CacheCoordinator for VRAM pressure check
-        if (m_cacheCoordinator)
-            m_cacheCoordinator->onFrameCompleted();
-
-        return result;
-    }
-
-    return nullptr;
+    // The DAG-based path is now the only path.  The legacy monolithic
+    // composite() body (~450 lines of inline command-buffer recording) was
+    // deleted after the DAG path reached parity (May 2026).  See
+    // RENDER_GRAPH_PLAN.txt Phase 6 / Section I.2 ("Feature Flag Lifecycle
+    // — Phase 6+: Remove toggle, delete old code").
+    return compositeViaRenderGraph(
+        layers, outW, outH, tick, scrubMode, gpuDisplayMode,
+        compositor, effectProcessor, transitionRenderer,
+        perfLog, perfT0, perfTlayers, perfTgpuUp, perfTcomp,
+        effectLayerCount, effectPassCount, transitionCount);
 }
 
 // ============================================================================
-// Render graph alternative path — DAG-based compositing (Phase 6)
+// Render graph path (formerly the "alternative path"; now the only path)
 // ============================================================================
 
 std::shared_ptr<CachedFrame> CompositeEngine::compositeViaRenderGraph(
@@ -799,10 +484,34 @@ std::shared_ptr<CachedFrame> CompositeEngine::compositeViaRenderGraph(
         m_gpuSubmission->init(ctx.vkDevice(), ctx.cmdPool().handle());
     }
     auto& slot = *m_gpuSubmission;
-    slot.beginRecording();
+    if (!slot.beginRecording()) {
+        // beginRecording() fails when the previous frame's fence cannot be
+        // waited on — almost always VK_ERROR_DEVICE_LOST surfacing through
+        // vkWaitForFences.  If we ignore this and keep recording, every
+        // subsequent vkCmd* call writes into an unstarted command buffer
+        // and the driver raises an SEH exception inside FrameProducer
+        // ("Unknown exception in produceFrame").  Surface device-lost so
+        // the next composite call short-circuits into CPU safe mode and
+        // we stop spamming the same failure 60+ times per second.
+        GpuContext::get().signalDeviceLost();
+        m_gpuCompositeState = -1;
+        return nullptr;
+    }
     VkCommandBuffer cmd = slot.cmdBuffer();
+    const int timingSlot = slot.currentSlot();
 
-    m_uploadManager->beginFrame(cmd);
+    // Resolve last frame's timestamps from this ring slot.  beginRecording()
+    // above waited for the fence so the queries are guaranteed ready.
+    resolveTimingsForSlot(timingSlot);
+
+    // Reset + write start timestamp for THIS frame.
+    if (m_timingInitialized && m_timingPools[timingSlot] != VK_NULL_HANDLE) {
+        vkCmdResetQueryPool(cmd, m_timingPools[timingSlot], 0, kTimingMarkers);
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                            m_timingPools[timingSlot], 0);
+    }
+
+    m_uploadManager->beginFrame(cmd, slot.currentSlot());
     m_uploadManager->setTextureCache(m_gpuTexCache.get());
 
     if (m_stagingRing && !m_stagingRing->isInitialized())
@@ -828,6 +537,17 @@ std::shared_ptr<CachedFrame> CompositeEngine::compositeViaRenderGraph(
                     if (!m_gpuTexCache) return false;
                     *budgetOut = m_gpuTexCache->budget();
                     return m_gpuTexCache->isUnderPressure();
+                });
+            // Bidirectional pressure: when the CPU FrameCache is over its
+            // high-water mark, CacheCoordinator calls this to shrink the
+            // GPU budget (which evicts cold textures and releases their
+            // shared_ptr ownerships).  GpuTextureCache::setBudget triggers
+            // eviction down to the new size.  Called back to restore the
+            // original budget when CPU pressure subsides.
+            m_cacheCoordinator->setGpuBudgetFn(
+                [this](size_t newBudget) {
+                    if (m_gpuTexCache)
+                        m_gpuTexCache->setBudget(newBudget);
                 });
         }
         spdlog::info("[PERF] GpuTexCache budget: {:.0f} MB (GPU VRAM: {:.0f} MB)",
@@ -1113,6 +833,16 @@ std::shared_ptr<CachedFrame> CompositeEngine::compositeViaRenderGraph(
     // renderers manage their own internal barriers.  We insert only
     // the global transfer→compute barrier that the old monolithic path
     // had between upload and compute stages.
+    //
+    // GPU-TIMING stage markers (written into m_timingPools[timingSlot]):
+    //   0: frame start (already written before the loop)
+    //   1: after all uploads, before first effect/transition
+    //   2: after all effects+transitions, before composite
+    //   3: after composite+readback (written after the loop)
+    bool uploadTimestampWritten = false;
+    bool effectTimestampWritten = false;
+    const bool timingActive = m_timingInitialized &&
+                              m_timingPools[timingSlot] != VK_NULL_HANDLE;
     for (uint32_t passIdx : graph.topologicalOrder()) {
         const auto& pass = graph.pass(passIdx);
 
@@ -1128,6 +858,31 @@ std::shared_ptr<CachedFrame> CompositeEngine::compositeViaRenderGraph(
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                 0, 1, &barrier, 0, nullptr, 0, nullptr);
             uploadsSeen = false; // only insert once
+        }
+
+        // Stage-boundary timestamps.  Written *before* the first pass of
+        // each stage so the delta from the previous marker measures the
+        // previous stage's GPU work.
+        if (timingActive && !uploadTimestampWritten &&
+            pass.type != PassType::Upload && pass.type != PassType::External)
+        {
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                m_timingPools[timingSlot], 1);
+            uploadTimestampWritten = true;
+        }
+        if (timingActive && !effectTimestampWritten &&
+            (pass.type == PassType::Composite || pass.type == PassType::Readback))
+        {
+            // First non-upload marker may not have fired (no effects this
+            // frame).  Ensure marker 1 is written before marker 2.
+            if (!uploadTimestampWritten) {
+                vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                    m_timingPools[timingSlot], 1);
+                uploadTimestampWritten = true;
+            }
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                m_timingPools[timingSlot], 2);
+            effectTimestampWritten = true;
         }
 
         // ── Execute the pass ─────────────────────────────────────
@@ -1184,6 +939,14 @@ std::shared_ptr<CachedFrame> CompositeEngine::compositeViaRenderGraph(
                         if (!effectProcessor || !effectProcessor->isInitialized())
                             break;
 
+                        // Fault isolation: skip the effect if its source
+                        // layer's upload failed (gpuLayers[li].enabled was
+                        // cleared in the Upload case).  Sampling a null
+                        // descriptor would either crash the driver or
+                        // produce garbage that contaminates the composite.
+                        if (!gpuLayers[li].enabled)
+                            break;
+
                         ++effectLayerCount;
                         effectPassCount += static_cast<int>(layer.effects.size());
 
@@ -1219,6 +982,10 @@ std::shared_ptr<CachedFrame> CompositeEngine::compositeViaRenderGraph(
                 if (layerInfo[wi].transitionPassIdx != passIdx)
                     continue;
                 if (!transitionRenderer || !transitionRenderer->isInitialized())
+                    break;
+                // Fault isolation: skip transition if the A side never
+                // uploaded (peer-side enabled is checked further down).
+                if (!gpuLayers[wi].enabled)
                     break;
 
                 const auto& layer = layers[wi];
@@ -1341,24 +1108,45 @@ std::shared_ptr<CachedFrame> CompositeEngine::compositeViaRenderGraph(
     // STEP 4: Submit and build result (same as old path)
     // ══════════════════════════════════════════════════════════════════
 
-    if (!uploadOk) {
-        m_uploadManager->endFrame();
-        slot.endRecording();
-        return nullptr;
+    // Final GPU-TIMING marker (frame end).  Backfill any markers we did
+    // not reach (e.g. no effects this frame) so deltas remain monotonic.
+    if (timingActive) {
+        if (!uploadTimestampWritten) {
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                m_timingPools[timingSlot], 1);
+        }
+        if (!effectTimestampWritten) {
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                m_timingPools[timingSlot], 2);
+        }
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                            m_timingPools[timingSlot], 3);
+        m_timingPoolUsed[timingSlot] = true;
     }
 
-    slot.endRecording();
+    // Per-pass fault isolation: a failed Upload pass disables only that
+    // layer (see PassType::Upload case above, which sets gpuLayers[li].
+    // enabled = false on failure).  The compositor renders the surviving
+    // layers — the user sees one missing layer instead of a blank frame
+    // or a CPU-fallback regression.  This matches RenderPass::optional=true.
+    // The frame is only killed if the Composite pass itself failed below.
+    if (!uploadOk) {
+        spdlog::warn("[RENDER_GRAPH] one or more uploads failed — compositing "
+                     "surviving layers (fault-isolated)");
+    }
+
+    // Acquire a dedicated inter-queue semaphore for this frame
+    VkSemaphore frameSem = acquireFrameSemaphore();
+    const bool endOk = slot.endRecording();
     bool gpuSubmitOk = false;
-    {
+    if (endOk) {
         std::lock_guard qLock(ctx.computeQueueMutex());
-        VkSemaphore compSem = m_compositeSemaphore;
-        if (compSem != VK_NULL_HANDLE)
-            gpuSubmitOk = slot.submit(ctx.computeQueue(), compSem);
-        else
-            gpuSubmitOk = slot.submit(ctx.computeQueue());
+        gpuSubmitOk = slot.submit(ctx.computeQueue(), frameSem, nullptr);
     }
 
     if (!gpuSubmitOk) {
+        if (frameSem != VK_NULL_HANDLE)
+            releaseFrameSemaphore(frameSem);
         GpuContext::get().signalDeviceLost();
         int backoffMs = kGpuBackoffInitialMs * (1 << m_gpuBackoffAttempts);
         if (backoffMs > kGpuBackoffMaxMs) backoffMs = kGpuBackoffMaxMs;
@@ -1388,7 +1176,7 @@ std::shared_ptr<CachedFrame> CompositeEngine::compositeViaRenderGraph(
             result->gpuReady     = true;
             result->gpuImageView = reinterpret_cast<uint64_t>(compositor->outputImageView());
             result->gpuSampler   = reinterpret_cast<uint64_t>(compositor->outputSampler());
-            result->gpuSemaphore = reinterpret_cast<uint64_t>(m_compositeSemaphore);
+            result->gpuSemaphore = reinterpret_cast<uint64_t>(frameSem);
         }
 
         if (readbackOk && gpuDisplayMode && !scrubMode) {

@@ -66,6 +66,7 @@ add_library(roundtable_core STATIC
     media/AudioFile.cpp
     media/FrameCache.cpp
     media/CacheCoordinator.cpp
+    media/UnifiedCache.cpp
     media/DiskFrameCache.cpp
     media/WaveformCache.cpp
     media/AVSyncClock.cpp
@@ -117,6 +118,13 @@ add_library(roundtable_core STATIC
     # Subtitle
     SrtIO.cpp
 )
+
+# /EHa for FrameProducer.cpp only — catch(...) catches SEH exceptions
+# (access violations, etc.) so the producer thread survives GPU crashes
+# instead of aborting silently via std::terminate.
+if(MSVC)
+    set_source_files_properties(media/FrameProducer.cpp PROPERTIES COMPILE_FLAGS "/EHa")
+endif()
 
 target_include_directories(roundtable_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 

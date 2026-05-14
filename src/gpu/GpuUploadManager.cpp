@@ -35,17 +35,20 @@ GpuUploadManager::~GpuUploadManager()
 
 // ── Frame lifecycle ──────────────────────────────────────────────────────
 
-void GpuUploadManager::beginFrame(VkCommandBuffer cmd)
+void GpuUploadManager::beginFrame(VkCommandBuffer cmd, int submissionSlot)
 {
     m_cmd = cmd;
     m_stagingCleanups.clear();
+    m_currentSubmissionSlot = submissionSlot;
 
-    // Unpin all previously-pinned textures.  Since beginFrame() is called
-    // after the slot's fence wait (in the triple-buffering scheme), the
-    // previous GPU work using this slot is guaranteed complete, so all
-    // previously-pinned textures are safe to unpin.
-    if (m_texCache)
-        m_texCache->unpinAll();
+    // Unpin only the textures that were pinned during this slot's previous
+    // submission.  Since beginFrame() is called after the slot's fence wait
+    // (the triple-buffered slot guarantees GPU completion before reuse), we
+    // know all textures pinned by this slot's prior use are safe to unpin.
+    //
+    // Critically, this does NOT unpin textures pinned by OTHER in-flight
+    // slots — those textures remain protected until their own slot recycles.
+    releaseSlotPins(submissionSlot);
 
     // Reset the staging ring for this frame's allocations.
     m_ring.reset();
@@ -83,7 +86,10 @@ GpuUploadResult GpuUploadManager::uploadLayer(
             hit.height == layer.frame->height)
         {
             // Pin so the texture survives until the GPU fence signals.
-            m_texCache->pin(layer.frame->mediaId, layer.frame->frameNumber);
+            // Also record the pin in the current slot's tracker so that
+            // only this slot's pins are released on recycle — other
+            // in-flight slots' pins remain intact.
+            recordPin(layer.frame->mediaId, layer.frame->frameNumber);
 
             result.descriptor = hit.descriptor;
             result.success    = true;
@@ -115,7 +121,6 @@ GpuUploadResult GpuUploadManager::uploadLayer(
 
     if (cacheable && m_texCache) {
         // ── Cache-owned texture path ────────────────────────────────────
-        auto cacheTex = std::make_unique<Texture>();
         TextureConfig cfg;
         cfg.width  = layer.frame->width;
         cfg.height = layer.frame->height;
@@ -123,13 +128,49 @@ GpuUploadResult GpuUploadManager::uploadLayer(
         cfg.usage  = VK_IMAGE_USAGE_SAMPLED_BIT |
                      VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 
+        // A4: try the recycled-texture pool first.  Eviction from
+        // GpuTextureCache returns textures here via setRecycleFn — under
+        // steady-state churn (scrub through a long timeline) almost every
+        // allocation is a pool hit and we avoid vmaCreateImage entirely.
+        auto cacheTex = acquireFromPool(cfg.width, cfg.height,
+                                         cfg.format, cfg.usage);
+        const bool poolHit = (cacheTex != nullptr);
+        if (!cacheTex)
+            cacheTex = std::make_unique<Texture>();
+
+        // First-time install of the recycle hook.  Cheap (one if-check
+        // per upload) but unconditional install would lose the callback
+        // on re-binding to a different cache (does not happen today).
+        if (!m_recycleHookInstalled) {
+            const VkFormat poolFmt = cfg.format;
+            const VkImageUsageFlags poolUsage = cfg.usage;
+            m_texCache->setRecycleFn(
+                [this, poolFmt, poolUsage](std::unique_ptr<Texture>& evicted) {
+                    if (!evicted) return;
+                    const uint32_t w = evicted->width();
+                    const uint32_t h = evicted->height();
+                    if (w == 0 || h == 0) return;
+                    releaseToPool(std::move(evicted), w, h, poolFmt, poolUsage);
+                });
+            m_recycleHookInstalled = true;
+        }
+
         bool usedRing = false;
-        if (uploadViaRingOrBatched(*cacheTex,
-                layer.frame->pixels.data(), dataSize,
-                cfg.width, cfg.height, cfg.format, cfg.usage, true))
-        {
-            usedRing = true;
+        bool uploadOk = false;
+        if (poolHit) {
+            // Reuse the existing VkImage — just stream new pixels via the
+            // staging ring.  Skips vmaCreateImage entirely.
+            uploadOk = updateViaRingOrBatched(*cacheTex,
+                                              layer.frame->pixels.data(),
+                                              dataSize);
+            usedRing = uploadOk;
         } else {
+            uploadOk = uploadViaRingOrBatched(*cacheTex,
+                layer.frame->pixels.data(), dataSize,
+                cfg.width, cfg.height, cfg.format, cfg.usage, true);
+            usedRing = uploadOk;
+        }
+        if (!uploadOk) {
             spdlog::warn("[UPLOAD] cache texture upload failed for mediaId={} frame={}",
                          layer.frame->mediaId, layer.frame->frameNumber);
             return result;
@@ -142,6 +183,12 @@ GpuUploadResult GpuUploadManager::uploadLayer(
                         std::move(cacheTex), static_cast<size_t>(dataSize),
                         layer.isPacked, layer.isPMA,
                         layer.frame->isLoopFrame);
+
+        // Pin the newly cached texture.  This prevents it from being
+        // evicted during subsequent put() calls in the same frame (e.g.
+        // for later layers) that might trigger LRU eviction.  The pin
+        // is tracked per-slot and released when the slot recycles.
+        recordPin(layer.frame->mediaId, layer.frame->frameNumber);
 
         result.descriptor = uploadedDescInfo;
         result.success    = true;
@@ -274,12 +321,89 @@ bool GpuUploadManager::uploadMask(
     return true;
 }
 
+// ── Per-slot pin tracking ──────────────────────────────────────────────
+
+void GpuUploadManager::recordPin(uint64_t mediaId, int64_t frameNumber)
+{
+    if (!m_texCache) return;
+
+    // A9: bound the per-slot pin count.  A 50-layer composite would pin
+    // 50 textures × 3 ring slots = 150 simultaneously-pinned textures
+    // which can prevent the LRU from evicting anything and push the cache
+    // into oversubscription.  When the slot reaches kMaxPinsPerSlot,
+    // unpin the OLDEST pin in this slot (FIFO) before adding the new one.
+    // The old texture's CachedFrame still keeps a shared_ptr while it's
+    // referenced, so unpinning here only allows LRU eviction once the
+    // last reference drops — not immediate destruction mid-flight.
+    if (m_currentSubmissionSlot >= 0 && m_currentSubmissionSlot < kRingSize) {
+        auto& pins = m_slotPins[m_currentSubmissionSlot];
+        if (pins.size() >= kMaxPinsPerSlot) {
+            auto& oldest = pins.front();
+            m_texCache->unpin(oldest.first, oldest.second);
+            pins.erase(pins.begin());
+        }
+        m_texCache->pin(mediaId, frameNumber);
+        pins.emplace_back(mediaId, frameNumber);
+    } else {
+        // No slot context — just pin without tracking.  This path is
+        // exercised only by tests / non-composite uploads.
+        m_texCache->pin(mediaId, frameNumber);
+    }
+}
+
+void GpuUploadManager::releaseSlotPins(int slotIndex)
+{
+    if (slotIndex < 0 || slotIndex >= kRingSize) return;
+    if (!m_texCache) {
+        m_slotPins[slotIndex].clear();
+        return;
+    }
+    for (const auto& [mediaId, frameNo] : m_slotPins[slotIndex]) {
+        m_texCache->unpin(mediaId, frameNo);
+    }
+    m_slotPins[slotIndex].clear();
+}
+
 // ── Shutdown ─────────────────────────────────────────────────────────────
 
 void GpuUploadManager::shutdown()
 {
     endFrame();
+    if (m_texCache) {
+        // Drop the recycle hook before m_texCache is cleared — it
+        // captures `this` and we don't want eviction during the cache's
+        // own destruction to dereference a destroyed pool.
+        m_texCache->setRecycleFn(nullptr);
+    }
+    m_texPool.clear();
     m_texCache = nullptr;
+}
+
+// ── A4: recycled-texture pool ────────────────────────────────────────────
+
+std::unique_ptr<Texture> GpuUploadManager::acquireFromPool(
+    uint32_t w, uint32_t h, VkFormat fmt, VkImageUsageFlags usage)
+{
+    PoolKey key{w, h, fmt, usage};
+    auto it = m_texPool.find(key);
+    if (it == m_texPool.end() || it->second.empty())
+        return nullptr;
+    std::unique_ptr<Texture> tex = std::move(it->second.back());
+    it->second.pop_back();
+    return tex;
+}
+
+void GpuUploadManager::releaseToPool(std::unique_ptr<Texture> tex,
+                                     uint32_t w, uint32_t h,
+                                     VkFormat fmt, VkImageUsageFlags usage)
+{
+    if (!tex) return;
+    PoolKey key{w, h, fmt, usage};
+    auto& bucket = m_texPool[key];
+    if (bucket.size() < kMaxPoolPerShape) {
+        bucket.push_back(std::move(tex));
+    }
+    // Else: drop on the floor — tex's destructor releases VMA memory.
 }
 
 // ── Private helpers ──────────────────────────────────────────────────────

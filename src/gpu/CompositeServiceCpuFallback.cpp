@@ -275,36 +275,18 @@ bool CompositeService::tryAutoRecoverFromSafeMode()
     }
 
     if (currentState == GpuState::DeviceLost) {
-        spdlog::info("[SAFEMODE] GPU device lost — attempting recovery");
-        if (gpu.tryRecover()) {
-            spdlog::info("[SAFEMODE] GPU recovery SUCCEEDED — exiting safe mode");
-            m_safeMode.store(false, std::memory_order_release);
-            m_lastSafeModeComposite = {};
-            m_lastRecoveryCheck = {};
-            if (m_safeModeCallback)
-                m_safeModeCallback(false);
-            return true;
-        }
+        // tryRecover() now just transitions to Failed and fires the fatal
+        // callback — there is no in-place recovery from VK_ERROR_DEVICE_LOST
+        // because that crashes the NVIDIA driver if any stale Vulkan handle
+        // outside GpuContext outlives the destroyed VkDevice.  We stay in
+        // safe mode until the user restarts.
+        gpu.tryRecover();
     }
 
-    if (currentState == GpuState::Failed) {
-        // GPU is in Failed state — try a full re-init via GpuContext
-        spdlog::info("[SAFEMODE] GPU is in Failed state — attempting full re-init");
-        gpu.shutdown();
-        if (gpu.init()) {
-            spdlog::info("[SAFEMODE] GPU re-init SUCCEEDED — exiting safe mode");
-            m_safeMode.store(false, std::memory_order_release);
-            m_lastSafeModeComposite = {};
-            m_lastRecoveryCheck = {};
-            if (m_safeModeCallback)
-                m_safeModeCallback(false);
-            return true;
-        }
-    }
+    // GpuState::Failed: no further attempts.  The fatal-failure callback
+    // installed by MainWindow shows a modal "GPU error — please restart"
+    // dialog the first time we get here.  Stay in safe mode.
 
-    // Still recovering or recovery failed
-    spdlog::info("[SAFEMODE] GPU still unavailable (state={}), staying in safe mode",
-                 static_cast<int>(currentState));
     return true; // check was attempted
 }
 

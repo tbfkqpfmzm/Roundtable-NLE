@@ -29,6 +29,7 @@ namespace rt {
 class AudioEngine;
 class AVSyncClock;
 class CacheCoordinator;
+class UnifiedCache;
 class CommandStack;
 class MainWindow;
 class MediaPool;
@@ -85,6 +86,12 @@ private:
 
     // ── Cache coordinator (system-adaptive budgets + VRAM pressure) ──
     std::unique_ptr<CacheCoordinator> m_cacheCoordinator;
+
+    // ── UnifiedCache (Phase B coordinator over CPU + GPU caches) ─────
+    // Provides generation tracking, playhead-window pinning, and
+    // coordinated eviction.  Does not own frames — it overlays the
+    // existing FrameCache + GpuTextureCache.  See UnifiedCache.h.
+    std::unique_ptr<UnifiedCache> m_unifiedCache;
 
     // ── Core subsystems (owned) ─────────────────────────────────────────
     std::unique_ptr<Timeline>        m_timeline;

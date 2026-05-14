@@ -131,6 +131,7 @@ void CacheCoordinator::onFrameCompleted()
     m_lastPressureCheck = now;
 
     checkVramPressure();
+    checkCpuPressure();
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -210,6 +211,44 @@ void CacheCoordinator::checkVramPressure()
     if (freed > 0) {
         spdlog::info("CacheCoordinator: freed {:.1f} MB from FrameCache (GPU-co-owned)",
                      freed / (1024.0 * 1024.0));
+    }
+}
+
+void CacheCoordinator::checkCpuPressure()
+{
+    if (!m_frameCache || !m_setGpuBudgetFn || m_vramBudget == 0)
+        return;
+
+    const auto s = m_frameCache->stats();
+    if (s.memoryCapacity == 0) return;
+
+    const double usage = static_cast<double>(s.memoryUsed) /
+                         static_cast<double>(s.memoryCapacity);
+
+    constexpr double kHighWater = 0.90;
+    constexpr double kLowWater  = 0.75;
+
+    if (!m_cpuPressureActive && usage >= kHighWater) {
+        // CPU cache is full.  Shrink the GPU texture cache to 60% of
+        // its normal budget — this evicts cold GPU textures (typically
+        // off-screen layers and pre-roll frames) and lets their
+        // CachedFrame::gpuTextureOwner shared_ptrs release, which can
+        // in turn free CPU memory if the FrameCache was the last owner.
+        const size_t shrunk = m_vramBudget * 6 / 10;
+        spdlog::warn("CacheCoordinator: CPU pressure {:.0f}% — shrinking GPU "
+                     "tex cache budget {:.1f}GB → {:.1f}GB",
+                     usage * 100.0,
+                     m_vramBudget / (1024.0 * 1024.0 * 1024.0),
+                     shrunk / (1024.0 * 1024.0 * 1024.0));
+        m_setGpuBudgetFn(shrunk);
+        m_cpuPressureActive = true;
+    } else if (m_cpuPressureActive && usage < kLowWater) {
+        spdlog::info("CacheCoordinator: CPU pressure relieved ({:.0f}%) — "
+                     "restoring GPU tex cache budget {:.1f}GB",
+                     usage * 100.0,
+                     m_vramBudget / (1024.0 * 1024.0 * 1024.0));
+        m_setGpuBudgetFn(m_vramBudget);
+        m_cpuPressureActive = false;
     }
 }
 

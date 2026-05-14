@@ -46,6 +46,17 @@ static std::filesystem::path resolveThumbnailPath(const std::filesystem::path& p
         fs::path candidate = dir / filename;
         if (fs::exists(candidate, ec)) return candidate;
     }
+    // Try appending common image extensions for bare filenames (e.g.
+    // "TABLE_LARGE_FINAL" → "TABLE_LARGE_FINAL.png" in backgrounds/)
+    if (filename.extension().empty()) {
+        const fs::path imgExts[] = {".png", ".jpg", ".jpeg"};
+        for (const auto& imgExt : imgExts) {
+            for (const auto& dir : searchDirs) {
+                fs::path candidate = dir / fs::path(filename.string() + imgExt.string());
+                if (fs::exists(candidate, ec)) return candidate;
+            }
+        }
+    }
     return path;  // fall through; caller will log a warning
 }
 

@@ -211,6 +211,7 @@ private slots:
     void onPollTimer();
 
 private:
+    void resizeEvent(QResizeEvent* event) override;
     void setupUI();
     void updateFrameDisplay();
     void updateTimecodeDisplay();

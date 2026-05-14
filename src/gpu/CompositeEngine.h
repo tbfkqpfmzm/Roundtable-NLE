@@ -68,6 +68,12 @@ public:
                    std::shared_ptr<rt::CachedFrame> frame);
     void flushLruOnResize(uint32_t w, uint32_t h);
     void clearLru();
+    /// A3: drop only composite-LRU entries whose tick falls inside the
+    /// inclusive range [fromTick, toTick].  Edits that affect a known
+    /// time slice (trim, split, ripple of a single clip) should call
+    /// this instead of clearLru() to preserve cached frames outside the
+    /// affected range.
+    void invalidateLruRange(int64_t fromTick, int64_t toTick);
 
     // ── Main GPU compositing entry point ────────────────────────────────
     [[nodiscard]] std::shared_ptr<rt::CachedFrame> composite(
@@ -106,16 +112,32 @@ public:
     void clearTextureCache();
     [[nodiscard]] int vramUsagePercent() const noexcept;
 
-    // ── Semaphore (inter-queue compute->graphics sync) ──────────────────
-    [[nodiscard]] VkSemaphore compositeSemaphore() const noexcept
-        { return m_compositeSemaphore; }
+    // ── Semaphore pool (inter-queue compute->graphics sync) ──────────────
+    /// Each composite frame acquires a dedicated binary semaphore to
+    /// avoid the ring-buffer wrap race: the per-slot semaphore in
+    /// GpuWorkSubmission can be re-signalled before the presenter has
+    /// consumed it — undefined behaviour in Vulkan.  A pool of
+    /// dedicated semaphores ensures each frame gets a unique handle
+    /// that is never re-signalled while still pending on the graphics
+    /// queue.  The pool starts small and grows as needed.
+    [[nodiscard]] VkSemaphore acquireFrameSemaphore();
+    void releaseFrameSemaphore(VkSemaphore sem);
 
-    // ── Render graph feature flag (Phase 6 — DAG-based pipeline) ─────────
-    /// When true, composite() uses the GpuRenderGraph DAG pipeline instead
-    /// of the monolithic single-submit path.  Set at startup or runtime.
-    /// Default: false (old path).  Switch to true after verifying pixel
-    /// identical output.
-    static bool s_useRenderGraph;
+    // ── GPU timing telemetry (per-stage VkQueryPool) ────────────────────
+    /// Most recent resolved per-stage GPU timings, in milliseconds.  Updated
+    /// once per frame, lagging by kRingSize submissions (we read the slot
+    /// whose fence just signaled when we begin the next recording).
+    struct GpuStageTimings {
+        double frameMs{0.0};
+        double uploadMs{0.0};
+        double effectMs{0.0};
+        double composeMs{0.0};
+        bool   valid{false};
+    };
+    [[nodiscard]] GpuStageTimings lastGpuTimings() const noexcept {
+        std::lock_guard l(m_timingMtx);
+        return m_lastTimings;
+    }
 
     // ── Resource cleanup helpers ────────────────────────────────────────
     void destroyCompositeSlot();
@@ -140,9 +162,12 @@ private:
     // GPU state machine: 0 = untested, 1 = enabled, -1 = permanently failed
     int m_gpuCompositeState{0};
 
-    // Inter-queue semaphore (compute->graphics)
-    VkSemaphore m_compositeSemaphore{nullptr};
-    VkDevice    m_device{nullptr};
+    // Inter-queue (compute → graphics) semaphores are pulled from and
+    // returned to GpuContext's shared binary-semaphore pool — see
+    // GpuContext::acquireBinarySemaphore.  The pool lives there so the
+    // VulkanViewport presenter (GUI thread) can return consumed semaphores
+    // to the same pool the FrameProducer thread acquires from.
+    VkDevice                 m_device{nullptr};
 
     // Exponential backoff state
     static constexpr int kGpuBackoffInitialMs = 100;
@@ -171,4 +196,27 @@ private:
     static constexpr size_t kCacheSize = 8;
     std::vector<CompositeCacheEntry> m_compositeLru;
     size_t m_compositeLruIdx{0};
+
+    // ── GPU timing query pools (one per ring slot) ───────────────────
+    // Four timestamp markers per frame:
+    //   [0] frame start (before any uploads/compute)
+    //   [1] after all PassType::Upload passes
+    //   [2] after all PassType::Effect + PassType::Transition passes
+    //   [3] after PassType::Composite + Readback (frame end)
+    // Deltas yield upload / effect / compose stage timings.
+    static constexpr uint32_t kTimingMarkers = 4;
+    static constexpr int      kTimingRingSize = 3;  // matches GpuWorkSubmission::kRingSize
+    VkQueryPool m_timingPools[kTimingRingSize]{};
+    bool        m_timingPoolUsed[kTimingRingSize]{};
+    double      m_timestampPeriodNs{1.0};
+    mutable std::mutex m_timingMtx;
+    GpuStageTimings   m_lastTimings;
+    bool              m_timingInitialized{false};
+
+    void initTimingPools(VkDevice device);
+    void destroyTimingPools();
+    /// Read query results for the slot we are about to record into
+    /// (data is from the previous use of that slot — fence is signaled by
+    /// the time GpuWorkSubmission::beginRecording() returns).
+    void resolveTimingsForSlot(int slotIdx);
 };

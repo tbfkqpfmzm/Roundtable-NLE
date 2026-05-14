@@ -100,6 +100,19 @@ VulkanViewport::VulkanViewport(QWidget* parent)
     if (!m_gpuActive) {
         spdlog::info("VulkanViewport: GPU display not available, using CPU fallback");
     }
+
+    // Resize debounce — see kResizeDebounceMs in the header.
+    m_resizeDebounceTimer = new QTimer(this);
+    m_resizeDebounceTimer->setSingleShot(true);
+    m_resizeDebounceTimer->setInterval(kResizeDebounceMs);
+    connect(m_resizeDebounceTimer, &QTimer::timeout, this, [this]() {
+        if (!m_gpuActive) return;
+        m_swapchainDirty = true;
+        if (m_sourceView != VK_NULL_HANDLE)
+            refresh();
+        else
+            presentClearFrame();
+    });
 }
 
 VulkanViewport::~VulkanViewport()
@@ -119,14 +132,34 @@ void VulkanViewport::handleResize()
 
     auto& gpu = GpuContext::get();
     VkDevice device = gpu.vkDevice();
-    vkDeviceWaitIdle(device);
+
+    // Wait only on the viewport's own in-flight submit before tearing down
+    // its framebuffers/swapchain.  Previously we called vkDeviceWaitIdle()
+    // here, which stalled the compute queue (compositor mid-frame) and the
+    // transfer queue (upload manager).  Under a dock-animation resize storm
+    // this happened many times per second and triggered VK_ERROR_DEVICE_LOST.
+    // The viewport is the only consumer of these swapchain images, so its
+    // own fence + the upload-slot fences are the only synchronization
+    // points that matter for swapchain recreate.
+    if (m_inFlightFence != VK_NULL_HANDLE) {
+        vkWaitForFences(device, 1, &m_inFlightFence, VK_TRUE, 100'000'000);
+    }
+    // Drain CPU-upload slots — their command buffers reference textures
+    // that we keep, not swapchain images, but their submits go through the
+    // graphics queue and we want them off the queue before we destroy
+    // framebuffers (the present submit waits on m_imageAvailable from a new
+    // swapchain image).
+    for (auto& slot : m_uploadSlots) {
+        if (slot.fence != VK_NULL_HANDLE)
+            vkWaitForFences(device, 1, &slot.fence, VK_TRUE, 100'000'000);
+    }
 
     // Destroy old framebuffers
     for (auto fb : m_framebuffers)
         if (fb) vkDestroyFramebuffer(device, fb, nullptr);
     m_framebuffers.clear();
 
-    // Recreate swapchain â€” use cached dimensions (thread-safe)
+    // Recreate swapchain — use cached dimensions (thread-safe)
     uint32_t w = m_cachedWidth.load();
     uint32_t h = m_cachedHeight.load();
     m_swapchain->recreate(gpu.device(), w, h);
@@ -134,6 +167,13 @@ void VulkanViewport::handleResize()
     // Recreate framebuffers
     createFramebuffers();
     m_swapchainDirty = false;
+
+    // Invalidate the source image so stale composite texture views aren't
+    // sampled at the new swapchain size.  The next displayGpuImage() call
+    // will set m_imageDirty and update the descriptor set.
+    m_sourceView    = VK_NULL_HANDLE;
+    m_sourceSampler = VK_NULL_HANDLE;
+    m_imageDirty    = true;
 }
 
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -149,6 +189,15 @@ void VulkanViewport::displayGpuImage(VkImageView imageView, VkSampler sampler,
 
     if (!m_gpuActive) {
         spdlog::warn("[DIAG-VIEWPORT] displayGpuImage: gpuActive=false, skipping");
+        return;
+    }
+
+    // If GpuContext has transitioned to Failed (VK_ERROR_DEVICE_LOST), every
+    // Vulkan handle in the caller's hands — including imageView and
+    // waitSemaphore — points at a destroyed device.  Refusing here means
+    // ProgramMonitor falls back to the CPU display path, which the safe-mode
+    // compositor populates with valid pixels.
+    if (!GpuContext::get().isOperational()) {
         return;
     }
 
@@ -176,29 +225,80 @@ void VulkanViewport::displayGpuImage(VkImageView imageView, VkSampler sampler,
     presentFrame(waitSemaphore);
 }
 
+// ── SEH-safe Vulkan wrappers ───────────────────────────────────────────────
+// These are plain free functions (no C++ object unwinding) so MSVC allows
+// __try/__except.  NVIDIA App (nvspcap64.dll) hooks these Vulkan entry
+// points and can crash with a null-pointer deref.
+
+#ifdef _WIN32
+static VkResult sehWaitForFences(VkDevice device, VkFence fence,
+                                  uint64_t timeoutNs)
+{
+    __try
+    {
+        return vkWaitForFences(device, 1, &fence, VK_TRUE, timeoutNs);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return VK_ERROR_UNKNOWN;
+    }
+}
+
+static VkResult sehQueueSubmit(VkQueue queue, VkSubmitInfo* submitInfo,
+                                VkFence fence)
+{
+    __try
+    {
+        return vkQueueSubmit(queue, 1, submitInfo, fence);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return VK_ERROR_UNKNOWN;
+    }
+}
+#endif
+
 void VulkanViewport::presentFrame(VkSemaphore waitSemaphore)
 {
     std::lock_guard lock(m_presentMtx);
 
     if (!m_gpuActive || !m_swapchain || m_sourceView == VK_NULL_HANDLE) {
+        recycleSemaphores();
         return;
     }
 
     auto& gpu = GpuContext::get();
     VkDevice device = gpu.vkDevice();
 
-    // Wait for previous frame — bounded timeout.  During playback the
-    // presenter thread (not the Qt event loop) calls this, so up to
-    // 16ms is acceptable.  The previous 2ms timeout caused silent frame
-    // drops when the GPU was busy with compositor texture uploads (~10ms
-    // for GPU-cache-miss frames), producing visible judder.
+    // Wait for previous frame — bounded timeout.
     {
         auto fenceStart = std::chrono::steady_clock::now();
-        VkResult fenceRes = vkWaitForFences(device, 1, &m_inFlightFence,
-                                            VK_TRUE, 16'000'000); // 16ms in ns
+        VkResult fenceRes;
+
+#ifdef _WIN32
+        fenceRes = sehWaitForFences(device, m_inFlightFence, 16'000'000);
+        if (fenceRes == VK_ERROR_UNKNOWN)
+        {
+            // SEH caught an access violation inside vkWaitForFences.  Either
+            // a third-party hook (NVIDIA App, OBS) NULL-deref'd, or our own
+            // device is dead.  Either way the only safe action is to mark
+            // the device as Failed and let the fatal-failure path show the
+            // restart dialog — we used to set m_swapchainDirty and limp
+            // along forever pretending to work.
+            spdlog::error("[VIEWPORT] Access violation in vkWaitForFences "
+                          "— marking GPU Failed.");
+            GpuContext::get().signalDeviceLost();
+            GpuContext::get().tryRecover();  // fires fatal callback
+            return;
+        }
+#else
+        fenceRes = vkWaitForFences(device, 1, &m_inFlightFence,
+                                    VK_TRUE, 16'000'000);
+#endif
+
         if (fenceRes == VK_TIMEOUT) {
             spdlog::warn("[DIAG-VIEWPORT] presentFrame: fence TIMEOUT (16ms)");
-            return; // previous frame still in flight — skip
+            return;
         }
         auto fenceEnd = std::chrono::steady_clock::now();
         double fenceMs = std::chrono::duration<double, std::milli>(fenceEnd - fenceStart).count();
@@ -208,13 +308,23 @@ void VulkanViewport::presentFrame(VkSemaphore waitSemaphore)
         }
     }
 
+    // Recycle consumed semaphores (kept alive to avoid handle-reuse race
+    // with compositor thread — nvoglv64.dll NULL-deref bug).
+    recycleSemaphores();
+
     // Handle resize
     if (m_swapchainDirty || m_swapchain->needsRecreation()) {
         handleResize();
         if (!m_swapchain || m_swapchain->needsRecreation()) return;
+
+        // handleResize() sets m_sourceView = VK_NULL_HANDLE to invalidate
+        // stale composite textures.  We can't proceed with a NULL image
+        // view — vkUpdateDescriptorSets would NULL-deref the driver.
+        if (m_sourceView == VK_NULL_HANDLE)
+            return;
     }
 
-    // Acquire swapchain image â€” bounded timeout prevents UI thread stall
+    // Acquire swapchain image
     uint32_t imageIndex = m_swapchain->acquireNextImage(device, m_imageAvailable,
                                                          5'000'000); // 5ms
     if (imageIndex == UINT32_MAX) {
@@ -326,7 +436,7 @@ void VulkanViewport::presentFrame(VkSemaphore waitSemaphore)
     // Submit
     VkPipelineStageFlags waitStages[2] = {
         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, // m_imageAvailable
-        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT              // compositor semaphore
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT           // compositor semaphore
     };
     VkSemaphore waitSemaphores[2] = { m_imageAvailable, VK_NULL_HANDLE };
     uint32_t waitCount = 1;
@@ -347,12 +457,66 @@ void VulkanViewport::presentFrame(VkSemaphore waitSemaphore)
 
     {
         std::lock_guard qLock(gpu.graphicsQueueMutex());
+
+#ifdef _WIN32
+        VkResult submitRes = sehQueueSubmit(gpu.graphicsQueue(), &submitInfo,
+                                             m_inFlightFence);
+        if (submitRes == VK_ERROR_UNKNOWN)
+        {
+            // Same reasoning as the vkWaitForFences SEH branch above:
+            // promote to fatal so the user sees the restart dialog instead
+            // of an app that's silently submitting nothing.
+            spdlog::error("[VIEWPORT] Access violation in vkQueueSubmit "
+                          "— marking GPU Failed.");
+            GpuContext::get().signalDeviceLost();
+            GpuContext::get().tryRecover();
+            return;
+        }
+#else
         vkQueueSubmit(gpu.graphicsQueue(), 1, &submitInfo, m_inFlightFence);
-        // Present inside mutex â€” presentQueue may alias graphicsQueue
+#endif
+
         m_swapchain->present(gpu.device().presentQueue(), imageIndex, m_renderFinished);
     }
 
+    // Recycle the just-used inter-queue semaphore by storing it so it
+    // stays alive (never destroyed mid-frame).  Semaphores are destroyed
+    // only during shutdownGpu() to avoid a handle-reuse race with the
+    // compositor thread (nvoglv64.dll NULL-deref at +0xf39ed4).
+    if (waitSemaphore != VK_NULL_HANDLE)
+        m_recycledSemaphores.push_back(waitSemaphore);
+
     emit frameDisplayed();
+}
+
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+//  Deferred semaphore recycling
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+void VulkanViewport::recycleSemaphores()
+{
+    if (m_recycledSemaphores.empty())
+        return;
+    // Return semaphores to GpuContext's shared binary-semaphore pool so
+    // CompositeEngine's next acquireFrameSemaphore() can reuse them
+    // instead of allocating a fresh VkSemaphore every frame (~60/sec of
+    // leaked handles over a session — eventually starves the driver).
+    //
+    // SAFETY: recycleSemaphores() is called at the top of presentFrame(),
+    // immediately AFTER vkWaitForFences on m_inFlightFence has succeeded.
+    // That fence corresponds to the PREVIOUS frame's submit, whose wait
+    // stage already consumed any semaphore that was pushed into this list
+    // from a still-earlier frame.  Anything currently in
+    // m_recycledSemaphores is therefore in the unsignaled state and safe
+    // to hand to the compositor for re-signaling.
+    //
+    // We deliberately do NOT destroy them: that was the path that
+    // previously caused the nvoglv64.dll NULL-deref handle-reuse race.
+    // Pool reuse avoids destroy/create entirely, so the race can't fire.
+    auto& gpu = GpuContext::get();
+    for (VkSemaphore sem : m_recycledSemaphores)
+        gpu.releaseBinarySemaphore(sem);
+    m_recycledSemaphores.clear();
 }
 
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -590,6 +754,9 @@ void VulkanViewport::presentClearFrame()
         }
     }
 
+    // Recycle consumed semaphores (kept alive to avoid handle-reuse race).
+    recycleSemaphores();
+
     if (m_swapchainDirty || m_swapchain->needsRecreation()) {
         handleResize();
         if (!m_swapchain || m_swapchain->needsRecreation()) return;
@@ -654,6 +821,22 @@ void VulkanViewport::refresh()
     } else {
         update();
     }
+}
+
+void VulkanViewport::scheduleDeferredRedraw()
+{
+    // Coalesce: if a redraw is already queued, don't queue another.
+    bool expected = false;
+    if (!m_redrawQueued.compare_exchange_strong(expected, true))
+        return;
+
+    QMetaObject::invokeMethod(this, [this]() {
+        m_redrawQueued.store(false, std::memory_order_release);
+        if (m_gpuActive)
+            refresh();
+        else
+            update();
+    }, Qt::QueuedConnection);
 }
 
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -724,16 +907,13 @@ void VulkanViewport::resizeEvent(QResizeEvent* event)
     // Cache dimensions for thread-safe handleResize (called from render thread)
     m_cachedWidth.store(std::max(1u, static_cast<uint32_t>(surfaceSize.width())));
     m_cachedHeight.store(std::max(1u, static_cast<uint32_t>(surfaceSize.height())));
-    if (m_gpuActive) {
-        m_swapchainDirty = true;
 
-        // Floating live-resizes can leave the native child surface showing
-        // stale stretched contents until another present arrives. Force an
-        // immediate re-present (or clear if no source image exists).
-        if (m_sourceView != VK_NULL_HANDLE)
-            refresh();
-        else
-            presentClearFrame();
+    // Debounce swapchain recreation. Dock animations / drags emit dozens of
+    // resize events per second; recreating the swapchain on each one wedges
+    // the driver. Restart the timer — when the user stops resizing for
+    // kResizeDebounceMs, the slot will rebuild the swapchain once.
+    if (m_gpuActive && m_resizeDebounceTimer) {
+        m_resizeDebounceTimer->start();
     }
     emit resized();
 
@@ -759,10 +939,7 @@ void VulkanViewport::resetZoomPan()
     m_viewZoom = 1.0f;
     m_viewPanX = 0.0f;
     m_viewPanY = 0.0f;
-    if (m_gpuActive)
-        presentFrame();
-    else
-        update();
+    scheduleDeferredRedraw();
     emit viewZoomChanged(m_viewZoom);
 }
 
@@ -770,10 +947,7 @@ void VulkanViewport::setViewPan(float px, float py)
 {
     m_viewPanX = px;
     m_viewPanY = py;
-    if (m_gpuActive)
-        presentFrame();
-    else
-        update();
+    scheduleDeferredRedraw();
 }
 
 void VulkanViewport::setViewZoom(float zoom)
@@ -781,10 +955,7 @@ void VulkanViewport::setViewZoom(float zoom)
     m_viewZoom = std::clamp(zoom, 0.1f, 20.0f);
     m_viewPanX = 0.0f;
     m_viewPanY = 0.0f;
-    if (m_gpuActive)
-        presentFrame();
-    else
-        update();
+    scheduleDeferredRedraw();
     emit viewZoomChanged(m_viewZoom);
 }
 
@@ -805,10 +976,7 @@ void VulkanViewport::zoomToFill()
 
     m_viewPanX = 0.0f;
     m_viewPanY = 0.0f;
-    if (m_gpuActive)
-        presentFrame();
-    else
-        update();
+    scheduleDeferredRedraw();
     emit viewZoomChanged(m_viewZoom);
 }
 
@@ -835,10 +1003,7 @@ void VulkanViewport::wheelEvent(QWheelEvent* event)
 
     m_viewZoom = newZoom;
 
-    if (m_gpuActive)
-        presentFrame();
-    else
-        update();
+    scheduleDeferredRedraw();
 
     emit viewZoomChanged(m_viewZoom);
     event->accept();
@@ -863,12 +1028,11 @@ bool VulkanViewport::eventFilter(QObject* watched, QEvent* event)
             const QSize surfaceSize = nativeSurfaceSize();
             m_cachedWidth.store(std::max(1u, static_cast<uint32_t>(surfaceSize.width())));
             m_cachedHeight.store(std::max(1u, static_cast<uint32_t>(surfaceSize.height())));
-            if (m_gpuActive && isVisible()) {
-                m_swapchainDirty = true;
-                if (m_sourceView != VK_NULL_HANDLE)
-                    refresh();
-                else
-                    presentClearFrame();
+            if (m_gpuActive && isVisible() && m_resizeDebounceTimer) {
+                // Same debounce as QWidget::resizeEvent — drags fire many
+                // resizes per second; recreating the swapchain on every one
+                // wedges the driver.
+                m_resizeDebounceTimer->start();
             }
             emit resized();
         }

@@ -224,7 +224,8 @@ void TimelineWorkspace::showEvent(QShowEvent* event)
         if (m_dockLayoutManager)
             m_dockLayoutManager->clearPendingState();
         updateGeometry();
-        QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+        // A6: targeted flush — see DockLayoutManager.cpp for rationale.
+        QApplication::sendPostedEvents(nullptr, QEvent::LayoutRequest);
         spdlog::info("showEvent: applying deferred default dock layout reset");
         doResetToDefaultDockLayout();
     } else if (m_dockLayoutManager) {

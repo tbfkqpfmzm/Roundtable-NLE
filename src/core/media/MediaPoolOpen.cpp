@@ -93,7 +93,7 @@ MediaHandle MediaPool::open(const std::filesystem::path& filePath)
         // Build a list of candidate paths to try
         std::vector<fs::path> candidates;
 
-        // Alternate extensions — prefer .mp4 (NVDEC hw decode) over .mov (ProRes sw decode)
+        // Alternate video extensions — prefer .mp4 (NVDEC hw decode) over .mov (ProRes sw decode)
         std::vector<fs::path> altExts;
         if (filePath.extension() == ".webm") {
             altExts.push_back(fs::path(filePath).replace_extension(".mp4"));
@@ -104,6 +104,13 @@ MediaHandle MediaPool::open(const std::filesystem::path& filePath)
         } else if (filePath.extension() == ".mp4") {
             altExts.push_back(fs::path(filePath).replace_extension(".webm"));
             altExts.push_back(fs::path(filePath).replace_extension(".mov"));
+        }
+
+        // Common image extensions — for presets that reference background
+        // images as bare filenames without extension (e.g. "TABLE_LARGE_FINAL")
+        const std::vector<fs::path> imgExts = {".png", ".jpg", ".jpeg"};
+        for (const auto& imgExt : imgExts) {
+            altExts.push_back(fs::path(filePath).replace_extension(imgExt));
         }
 
         // Asset search directories

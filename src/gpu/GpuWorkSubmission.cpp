@@ -7,6 +7,7 @@
 #include "GpuWorkSubmission.h"
 
 #include <volk.h>
+#include <spdlog/spdlog.h>
 #include <utility>
 
 namespace rt {
@@ -77,17 +78,33 @@ bool GpuWorkSubmission::init(VkDevice device, VkCommandPool cmdPool)
     if (vkAllocateCommandBuffers(device, &allocInfo, rawBuffers) != VK_SUCCESS)
         return false;
 
+    VkSemaphoreCreateInfo semInfo{};
+    semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
     for (int i = 0; i < kRingSize; ++i) {
         m_slots[i].cmdBuffer = rawBuffers[i];
 
         VkFenceCreateInfo fenceInfo{};
         fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-        // Create fences in signaled state so first beginRecording() doesn't wait
         fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
         if (vkCreateFence(device, &fenceInfo, nullptr, &m_slots[i].fence) != VK_SUCCESS) {
-            // Cleanup already-created fences
-            for (int j = 0; j < i; ++j)
+            for (int j = 0; j < i; ++j) {
                 vkDestroyFence(device, m_slots[j].fence, nullptr);
+                if (m_slots[j].signalSemaphore != VK_NULL_HANDLE)
+                    vkDestroySemaphore(device, m_slots[j].signalSemaphore, nullptr);
+            }
+            vkFreeCommandBuffers(device, cmdPool, kRingSize, rawBuffers);
+            for (auto& s : m_slots) s = Slot{};
+            return false;
+        }
+
+        // Create per-slot binary semaphore for inter-queue sync
+        if (vkCreateSemaphore(device, &semInfo, nullptr, &m_slots[i].signalSemaphore) != VK_SUCCESS) {
+            for (int j = 0; j < i; ++j) {
+                vkDestroyFence(device, m_slots[j].fence, nullptr);
+                vkDestroySemaphore(device, m_slots[j].signalSemaphore, nullptr);
+            }
+            vkDestroyFence(device, m_slots[i].fence, nullptr);
             vkFreeCommandBuffers(device, cmdPool, kRingSize, rawBuffers);
             for (auto& s : m_slots) s = Slot{};
             return false;
@@ -112,6 +129,10 @@ void GpuWorkSubmission::destroy()
             if (s.fence != VK_NULL_HANDLE) {
                 vkDestroyFence(m_device, s.fence, nullptr);
                 s.fence = VK_NULL_HANDLE;
+            }
+            if (s.signalSemaphore != VK_NULL_HANDLE) {
+                vkDestroySemaphore(m_device, s.signalSemaphore, nullptr);
+                s.signalSemaphore = VK_NULL_HANDLE;
             }
         }
         if (m_cmdPool != VK_NULL_HANDLE) {
@@ -140,9 +161,36 @@ bool GpuWorkSubmission::beginRecording()
     // Wait for this slot's fence if it's still in-flight from a previous
     // submission.  This is the core of triple-buffering: the CPU may have
     // wrapped around and is reusing a slot whose GPU work hasn't finished.
+    //
+    // A5: bounded timeout.  vkWaitForFences(UINT64_MAX) deadlocks the
+    // producer thread if the GPU hangs (driver TDR pre-state, infinite
+    // loop in a shader, etc.).  100 ms is well above 60fps frame time
+    // (16.7ms) but short enough to surface TDRs through the existing
+    // fatal-failure path rather than freeze the app.
     if (s.inFlight) {
-        if (vkWaitForFences(m_device, 1, &s.fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS)
+        // 1500 ms timeout.  Bumped from the original 100 ms because a
+        // realistic frame at a shot boundary can spend 30-80 ms on a
+        // synchronous Spine atlas upload + a couple of large texture
+        // copies on the same queue as the previous composite — perfectly
+        // healthy work that just happens to share the queue.  At 100 ms
+        // we were misclassifying those bursts as a hang and triggering
+        // the device-lost path ourselves, which then caused
+        // FrameProducer to record into an unstarted command buffer.
+        // Windows TDR is 2000 ms by default, so 1500 ms still surfaces
+        // a genuine driver hang well before the OS resets the device.
+        VkResult r = vkWaitForFences(m_device, 1, &s.fence, VK_TRUE,
+                                      1'500'000'000ull);  // 1.5 s
+        if (r == VK_TIMEOUT) {
+            // GPU is genuinely stuck — Windows TDR will fire next.
+            spdlog::warn("[GPU-SUBMIT] beginRecording: fence wait TIMED OUT after 1500ms slot={} — GPU is stuck",
+                         m_currentSlot);
             return false;
+        }
+        if (r != VK_SUCCESS) {
+            spdlog::error("[GPU-SUBMIT] beginRecording: vkWaitForFences failed VkResult={} slot={}",
+                          static_cast<int>(r), m_currentSlot);
+            return false;
+        }
         s.inFlight = false;
     }
 
@@ -164,10 +212,17 @@ bool GpuWorkSubmission::beginRecording()
 bool GpuWorkSubmission::endRecording()
 {
     Slot& s = slot();
-    if (s.cmdBuffer == VK_NULL_HANDLE || !m_recording)
+    if (s.cmdBuffer == VK_NULL_HANDLE || !m_recording) {
+        spdlog::warn("[GPU-SUBMIT] endRecording: bad state cmdBuffer={} recording={}",
+                     (void*)s.cmdBuffer, m_recording);
         return false;
-    if (vkEndCommandBuffer(s.cmdBuffer) != VK_SUCCESS)
+    }
+    VkResult r = vkEndCommandBuffer(s.cmdBuffer);
+    if (r != VK_SUCCESS) {
+        spdlog::error("[GPU-SUBMIT] vkEndCommandBuffer failed: VkResult={}", static_cast<int>(r));
+        m_recording = false;
         return false;
+    }
     m_recording = false;
     return true;
 }
@@ -198,7 +253,7 @@ bool GpuWorkSubmission::submit(VkQueue queue, std::mutex* queueLock)
 
 // ── submit (with signal semaphore) ──────────────────────────────────────────
 
-bool GpuWorkSubmission::submit(VkQueue queue, VkSemaphore signalSemaphore,
+bool GpuWorkSubmission::submit(VkQueue queue, VkSemaphore externalSemaphore,
                                 std::mutex* queueLock)
 {
     Slot& s = slot();
@@ -212,12 +267,27 @@ bool GpuWorkSubmission::submit(VkQueue queue, VkSemaphore signalSemaphore,
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers    = &s.cmdBuffer;
 
+    // Signal the dedicated per-frame semaphore (external) for inter-queue
+    // sync.  The external semaphore is created by CompositeEngine's pool and
+    // stored in CachedFrame — the presenter waits on it and destroys it after
+    // consumption.  This replaces the old per-slot semaphore approach which
+    // had a ring-buffer wrap race (per-slot semaphore re-signaled before the
+    // presenter consumed it).
+    //
+    // When no external semaphore is provided (legacy single-shot usage via
+    // submitAndWait or submit with default args), fall back to the per-slot
+    // internal semaphore.
     VkSemaphore signalSemaphores[1]{};
-    if (signalSemaphore != VK_NULL_HANDLE) {
-        signalSemaphores[0] = signalSemaphore;
-        submitInfo.signalSemaphoreCount = 1;
-        submitInfo.pSignalSemaphores    = signalSemaphores;
+    uint32_t signalCount = 0;
+    if (externalSemaphore != VK_NULL_HANDLE) {
+        signalSemaphores[0] = externalSemaphore;
+        signalCount = 1;
+    } else {
+        signalSemaphores[0] = s.signalSemaphore;
+        signalCount = 1;
     }
+    submitInfo.signalSemaphoreCount = signalCount;
+    submitInfo.pSignalSemaphores    = signalSemaphores;
 
     VkResult result;
     if (queueLock) {
@@ -227,8 +297,15 @@ bool GpuWorkSubmission::submit(VkQueue queue, VkSemaphore signalSemaphore,
         result = vkQueueSubmit(queue, 1, &submitInfo, s.fence);
     }
 
-    if (result != VK_SUCCESS)
+    if (result != VK_SUCCESS) {
+        // -4 = VK_ERROR_DEVICE_LOST (TDR / driver reset), -2/-3 = OOM,
+        // -8 = INITIALIZATION_FAILED.  Surface the code so future failures
+        // are diagnosable from logs alone (previously this silently returned
+        // false and callers had no way to know what kind of failure occurred).
+        spdlog::error("[GPU-SUBMIT] vkQueueSubmit failed: VkResult={} slot={} submission={}",
+                      static_cast<int>(result), m_currentSlot, m_globalSubmissionIndex);
         return false;
+    }
 
     s.inFlight = true;
     s.submissionIndex = m_globalSubmissionIndex;
