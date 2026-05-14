@@ -315,21 +315,24 @@ private:
                                               ResolutionTier tier, bool scrubMode = false);
 
     // ── Prefetch background worker ──────────────────────────────────────
-    // 6 workers with 64-frame lookahead give a ~2.7s buffer at 24fps.
-    // Workers 0-1 use NVDEC hardware decode (~5ms/frame) for the frames
-    // closest to the playhead.  Workers 2-5 use software decode with 2
-    // threads each for longer-range prefetch.  Handle-affinity scheduling
-    // routes tasks to the worker that owns the decoder for that handle.
-    // Increased from 32 to 64 to better absorb cold-start misses on
-    // long-GOP codecs (H.264/HEVC with 120-250 frame GOPs).
+    // PREFETCH_THREAD_COUNT total workers; workers [0 .. PREFETCH_NVDEC_
+    // WORKERS-1] are eligible for NVDEC hardware decode and the rest do
+    // software decode.  Per-worker eligibility/affinity rules live in
+    // MediaPoolPrefetchSchedule.cpp::acceptable() — that is the source
+    // of truth; this header just sizes the pools.
+    //
+    // P5 (CLAUDE_IMPROVEMENT_PLAN): PREFETCH_NVDEC_WORKERS was 4 prior
+    // to 2026-05-14.  Combined with 4 concurrent loop pre-decode workers
+    // and the on-demand playhead decoder, peak NVDEC pressure reached
+    // ~9 sessions — well past consumer NVDEC's 2-3 concurrent-decode
+    // budget.  The user's own comment in CompositeServiceFrame.cpp
+    // documented "count=8 urgent prefetch flooded NVDEC + the graphics
+    // queue with ~16-24 simultaneous urgent decodes and tripped TDR."
+    // Reduced to 2 to cap peak NVDEC sessions at ~4 (2 prefetch + 1
+    // loop + 1 playhead).
     static constexpr int PREFETCH_AHEAD_COUNT = 60;
     static constexpr int PREFETCH_THREAD_COUNT = 10;
-
-    /// Number of prefetch workers allowed to use NVDEC hardware decode.
-    /// Packed-alpha character clips MUST stay on NVDEC workers; software
-    /// decode of 2x-height packed-alpha is too slow for real-time prefetch.
-    /// Use 4 workers to improve cold-start for two-character shots.
-    static constexpr int PREFETCH_NVDEC_WORKERS = 4;
+    static constexpr int PREFETCH_NVDEC_WORKERS = 2;
 
     void startPrefetchThread();
     void stopPrefetchThread();
@@ -401,7 +404,16 @@ private:
     /// NVDEC on RTX 4090 supports 5+ concurrent sessions; 4 loop workers
     /// + 4 prefetch NVDEC workers = 8 potential sessions.  FFmpeg
     /// auto-falls back to software if the HW limit is hit — no crash risk.
-    static constexpr int LOOP_PREDECODE_MAX_CONCURRENT = 4;
+    // P5 (CLAUDE_IMPROVEMENT_PLAN): reduced from 4 to 1 on 2026-05-14.
+    // Loop pre-decode is background warm-up for looping clips (character
+    // idles); serializing it does not affect real-time playback (the
+    // first iteration through the loop still cold-decodes on demand
+    // and warm-starts the cache for subsequent iterations).  Reducing
+    // to 1 eliminates 3 concurrent NVDEC sessions that were contending
+    // with the playhead decoder + prefetch workers, contributing to
+    // shot-boundary TDR events (see perf_log.txt:3032 — 62.9 ms
+    // composite during atlas re-upload + simultaneous prefetch).
+    static constexpr int LOOP_PREDECODE_MAX_CONCURRENT = 1;
     struct LoopPreDecodeTask {
         int64_t                 priority;   // earliest playback start tick (lower = sooner)
         uint64_t                seq;        // FIFO tiebreaker
