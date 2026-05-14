@@ -10,7 +10,35 @@
 
 #include <cassert>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
 namespace rt {
+
+#ifdef _WIN32
+// SEH-guarded vkQueueSubmit.  The NVIDIA Vulkan ICD (nvoglv64.dll)
+// has been observed to raise STATUS_ACCESS_VIOLATION inside
+// vkQueueSubmit when the device is mid-TDR or a stale command buffer
+// is in flight.  Without SEH the violation propagates as an unhandled
+// SEH exception and the process dies silently.  With SEH we catch it,
+// return VK_ERROR_UNKNOWN, and let the caller surface device-lost
+// through the normal path.
+//
+// Must be a free function (or extern "C") with no C++ destructors in
+// scope — MSVC disallows mixing __try with stack-unwound objects.
+static VkResult vkQueueSubmitSeh(VkQueue queue, const VkSubmitInfo* submitInfo,
+                                  VkFence fence)
+{
+    __try {
+        return vkQueueSubmit(queue, 1, submitInfo, fence);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return VK_ERROR_UNKNOWN;
+    }
+}
+#endif
 
 bool GpuScheduler::init(
     VkDevice    device,
@@ -134,12 +162,32 @@ VkResult GpuScheduler::submit(const GpuSubmission& sub)
     submitInfo.pSignalSemaphores    = sub.signalSemaphores;
 
     VkResult result;
+#ifdef _WIN32
+    // Always SEH-guard on Windows.  Cost is negligible; the safety net
+    // converts driver-side access violations (nvoglv64.dll mid-TDR)
+    // into a returnable error code instead of unhandled SEH process
+    // death.  The pre-P1 code had this guard only in VulkanViewport's
+    // presentFrame path; now every submission gets it for free.
+    if (slot.mutex) {
+        std::lock_guard lock(*slot.mutex);
+        result = vkQueueSubmitSeh(slot.queue, &submitInfo, sub.completionFence);
+    } else {
+        result = vkQueueSubmitSeh(slot.queue, &submitInfo, sub.completionFence);
+    }
+    if (result == VK_ERROR_UNKNOWN) {
+        spdlog::error("[GpuScheduler] SEH access violation in vkQueueSubmit "
+                      "(kind={} tag={}) — treating as device lost",
+                      static_cast<int>(sub.queue),
+                      sub.tag ? sub.tag : "<none>");
+    }
+#else
     if (slot.mutex) {
         std::lock_guard lock(*slot.mutex);
         result = vkQueueSubmit(slot.queue, 1, &submitInfo, sub.completionFence);
     } else {
         result = vkQueueSubmit(slot.queue, 1, &submitInfo, sub.completionFence);
     }
+#endif
 
     slot.submissions.fetch_add(1, std::memory_order_relaxed);
     m_totalSubmissions.fetch_add(1, std::memory_order_relaxed);

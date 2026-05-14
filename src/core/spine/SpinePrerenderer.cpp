@@ -18,6 +18,7 @@
 #include "media/HWAlphaEncoder.h"
 #include "media/ChromaKeyEncoder.h"
 #include "GpuContext.h"
+#include "GpuScheduler.h"
 #include "SpineRenderer.h"
 #include "vulkan/Buffer.h"
 
@@ -419,15 +420,18 @@ PrerenderResult SpinePrerenderer::renderGPU(const PrerenderJob& job,
                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                 0, 0, nullptr, 0, nullptr, 1, &barrier);
 
-            // Submit with queue mutex (shared graphics queue)
+            // P1.3: route through GpuScheduler.  No fence — we just
+            // wait for the queue to drain.  vkQueueWaitIdle still
+            // requires direct queue access; the scheduler's queue
+            // mutex protects the submit and the wait stays after.
             vkEndCommandBuffer(cmd);
-            VkSubmitInfo readbackSubmit{};
-            readbackSubmit.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-            readbackSubmit.commandBufferCount = 1;
-            readbackSubmit.pCommandBuffers    = &cmd;
+            GpuSubmission sub{};
+            sub.cmd   = cmd;
+            sub.queue = GpuQueueKind::Graphics;
+            sub.tag   = "SpinePrerenderer::readback";
+            GpuContext::get().scheduler().submit(sub);
             {
                 std::lock_guard qLock(gpu.graphicsQueueMutex());
-                vkQueueSubmit(gpu.graphicsQueue(), 1, &readbackSubmit, VK_NULL_HANDLE);
                 vkQueueWaitIdle(gpu.graphicsQueue());
             }
             localCmdPool.freeBuffer(cmd);

@@ -21,7 +21,27 @@
 #include <volk.h>
 #include <vk_mem_alloc.h>
 
+#include "GpuContext.h"
+#include "GpuScheduler.h"
+
 namespace rt {
+
+namespace {
+
+// Resolve VkQueue back to a GpuQueueKind for routing through the
+// scheduler.  See identical helper in GpuWorkSubmission.cpp /
+// CommandPool.cpp; could centralize once enough callers exist.
+GpuQueueKind kindForQueue(VkQueue queue) noexcept
+{
+    if (queue == VK_NULL_HANDLE) return GpuQueueKind::Graphics;
+    auto& gpu = GpuContext::get();
+    if (!gpu.scheduler().isInitialized()) return GpuQueueKind::Graphics;
+    if (queue == gpu.computeQueue())           return GpuQueueKind::Compute;
+    if (queue == gpu.device().transferQueue()) return GpuQueueKind::Transfer;
+    return GpuQueueKind::Graphics;
+}
+
+} // namespace
 
 struct VideoUploader::Impl
 {
@@ -231,12 +251,14 @@ struct VideoUploader::Impl
         VkFence fence = VK_NULL_HANDLE;
         vkCreateFence(device, &fenceCI, nullptr, &fence);
 
-        VkSubmitInfo submitInfo{};
-        submitInfo.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers    = &cmd;
+        // P1.3: route through GpuScheduler.
+        GpuSubmission sub{};
+        sub.cmd             = cmd;
+        sub.queue           = kindForQueue(queue);
+        sub.completionFence = fence;
+        sub.tag             = "VideoUploader::endSingleTime";
+        GpuContext::get().scheduler().submit(sub);
 
-        vkQueueSubmit(queue, 1, &submitInfo, fence);
         vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
 
         vkDestroyFence(device, fence, nullptr);

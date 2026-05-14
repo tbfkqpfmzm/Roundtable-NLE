@@ -9,6 +9,7 @@
 #include "viewport/VulkanViewport.h"
 #include "Theme.h"
 #include "GpuContext.h"
+#include "GpuScheduler.h"
 #include "vulkan/Swapchain.h"
 #include "vulkan/Texture.h"
 #include "media/FrameCache.h"
@@ -244,18 +245,7 @@ static VkResult sehWaitForFences(VkDevice device, VkFence fence,
     }
 }
 
-static VkResult sehQueueSubmit(VkQueue queue, VkSubmitInfo* submitInfo,
-                                VkFence fence)
-{
-    __try
-    {
-        return vkQueueSubmit(queue, 1, submitInfo, fence);
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER)
-    {
-        return VK_ERROR_UNKNOWN;
-    }
-}
+// sehQueueSubmit moved into GpuScheduler::submit (P1.2).
 #endif
 
 void VulkanViewport::presentFrame(VkSemaphore waitSemaphore)
@@ -456,16 +446,25 @@ void VulkanViewport::presentFrame(VkSemaphore waitSemaphore)
     submitInfo.pSignalSemaphores    = &m_renderFinished;
 
     {
-        std::lock_guard qLock(gpu.graphicsQueueMutex());
+        // P1.2: route through GpuScheduler.  The SEH guard that used
+        // to live here is now built into the scheduler, so a driver-
+        // side access violation still surfaces as VK_ERROR_UNKNOWN
+        // (which the scheduler logs as "SEH access violation"); we
+        // pick that up here and escalate to device-lost.
+        rt::GpuSubmission sub{};
+        sub.cmd                  = m_commandBuffer;
+        sub.queue                = rt::GpuQueueKind::Graphics;
+        sub.waitSemaphoreCount   = submitInfo.waitSemaphoreCount;
+        sub.waitSemaphores       = submitInfo.pWaitSemaphores;
+        sub.waitStages           = submitInfo.pWaitDstStageMask;
+        sub.signalSemaphoreCount = 1;
+        sub.signalSemaphores     = &m_renderFinished;
+        sub.completionFence      = m_inFlightFence;
+        sub.tag                  = "VulkanViewport::presentFrame";
 
+        VkResult submitRes = rt::GpuContext::get().scheduler().submit(sub);
 #ifdef _WIN32
-        VkResult submitRes = sehQueueSubmit(gpu.graphicsQueue(), &submitInfo,
-                                             m_inFlightFence);
-        if (submitRes == VK_ERROR_UNKNOWN)
-        {
-            // Same reasoning as the vkWaitForFences SEH branch above:
-            // promote to fatal so the user sees the restart dialog instead
-            // of an app that's silently submitting nothing.
+        if (submitRes == VK_ERROR_UNKNOWN) {
             spdlog::error("[VIEWPORT] Access violation in vkQueueSubmit "
                           "— marking GPU Failed.");
             GpuContext::get().signalDeviceLost();
@@ -473,9 +472,13 @@ void VulkanViewport::presentFrame(VkSemaphore waitSemaphore)
             return;
         }
 #else
-        vkQueueSubmit(gpu.graphicsQueue(), 1, &submitInfo, m_inFlightFence);
+        (void)submitRes;
 #endif
 
+        // Present runs on the present queue (not the scheduler's set yet
+        // — the swapchain owns it directly).  Future P1.x revision can
+        // pull this into the scheduler too once we model present as a
+        // submission kind.
         m_swapchain->present(gpu.device().presentQueue(), imageIndex, m_renderFinished);
     }
 
@@ -614,14 +617,16 @@ void VulkanViewport::displayFrame(std::shared_ptr<CachedFrame> frame)
         vkEndCommandBuffer(cmd);
 
         if (uploadOk) {
-            VkSubmitInfo submitInfo{};
-            submitInfo.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-            submitInfo.commandBufferCount = 1;
-            submitInfo.pCommandBuffers    = &cmd;
             vkResetFences(device, 1, &slot.fence);
             {
-                std::lock_guard qLock(ctx.graphicsQueueMutex());
-                VkResult submitResult = vkQueueSubmit(ctx.graphicsQueue(), 1, &submitInfo, slot.fence);
+                // P1.2: route through GpuScheduler (was: raw vkQueueSubmit
+                // under ctx.graphicsQueueMutex()).
+                rt::GpuSubmission sub{};
+                sub.cmd             = cmd;
+                sub.queue           = rt::GpuQueueKind::Graphics;
+                sub.completionFence = slot.fence;
+                sub.tag             = "VulkanViewport::uploadCpu";
+                VkResult submitResult = rt::GpuContext::get().scheduler().submit(sub);
                 if (submitResult != VK_SUCCESS) {
                     spdlog::warn("VulkanViewport: upload submit failed (VkResult={})", static_cast<int>(submitResult));
                     uploadOk = false;
@@ -654,14 +659,15 @@ void VulkanViewport::displayFrame(std::shared_ptr<CachedFrame> frame)
                 emptyBegin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
                 vkBeginCommandBuffer(emptyCmd, &emptyBegin);
                 vkEndCommandBuffer(emptyCmd);
-                VkSubmitInfo emptySubmit{};
-                emptySubmit.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-                emptySubmit.commandBufferCount = 1;
-                emptySubmit.pCommandBuffers    = &emptyCmd;
-                {
-                    std::lock_guard qLock(ctx.graphicsQueueMutex());
-                    vkQueueSubmit(ctx.graphicsQueue(), 1, &emptySubmit, slot.fence);
-                }
+                // P1.2: route through GpuScheduler.  Empty command
+                // buffer just re-signals the slot's fence so the slot
+                // stays usable after a failed upload.
+                rt::GpuSubmission emptySub{};
+                emptySub.cmd             = emptyCmd;
+                emptySub.queue           = rt::GpuQueueKind::Graphics;
+                emptySub.completionFence = slot.fence;
+                emptySub.tag             = "VulkanViewport::uploadFenceResignal";
+                rt::GpuContext::get().scheduler().submit(emptySub);
             }
         }
 
@@ -795,21 +801,24 @@ void VulkanViewport::presentClearFrame()
     vkEndCommandBuffer(m_commandBuffer);
 
     VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    VkSubmitInfo submitInfo{};
-    submitInfo.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo.waitSemaphoreCount   = 1;
-    submitInfo.pWaitSemaphores      = &m_imageAvailable;
-    submitInfo.pWaitDstStageMask    = &waitStage;
-    submitInfo.commandBufferCount   = 1;
-    submitInfo.pCommandBuffers      = &m_commandBuffer;
-    submitInfo.signalSemaphoreCount = 1;
-    submitInfo.pSignalSemaphores    = &m_renderFinished;
 
-    {
-        std::lock_guard qLock(gpu.graphicsQueueMutex());
-        vkQueueSubmit(gpu.graphicsQueue(), 1, &submitInfo, m_inFlightFence);
-        m_swapchain->present(gpu.device().presentQueue(), imageIndex, m_renderFinished);
-    }
+    // P1.2: route through GpuScheduler.  This is the empty-clear path
+    // used when no source frame is available — wait on image-available
+    // and signal render-finished so the swapchain present chain stays
+    // intact.
+    rt::GpuSubmission sub{};
+    sub.cmd                  = m_commandBuffer;
+    sub.queue                = rt::GpuQueueKind::Graphics;
+    sub.waitSemaphoreCount   = 1;
+    sub.waitSemaphores       = &m_imageAvailable;
+    sub.waitStages           = &waitStage;
+    sub.signalSemaphoreCount = 1;
+    sub.signalSemaphores     = &m_renderFinished;
+    sub.completionFence      = m_inFlightFence;
+    sub.tag                  = "VulkanViewport::clearPresent";
+    rt::GpuContext::get().scheduler().submit(sub);
+
+    m_swapchain->present(gpu.device().presentQueue(), imageIndex, m_renderFinished);
 
     emit frameDisplayed();
 }

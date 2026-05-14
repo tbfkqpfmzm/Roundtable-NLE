@@ -5,10 +5,32 @@
  */
 
 #include "GpuWorkSubmission.h"
+#include "GpuContext.h"
+#include "GpuScheduler.h"
 
 #include <volk.h>
 #include <spdlog/spdlog.h>
 #include <utility>
+
+namespace {
+
+// Resolve a raw VkQueue back to a GpuQueueKind for routing through
+// the scheduler.  GpuWorkSubmission's public submit() API takes a
+// VkQueue (legacy interface kept for source compatibility); the
+// scheduler routes by kind.  Falls back to Graphics if the handle
+// isn't recognized — shouldn't happen since every queue in this
+// process comes from Device.
+rt::GpuQueueKind kindForQueue(VkQueue queue) noexcept
+{
+    if (queue == VK_NULL_HANDLE) return rt::GpuQueueKind::Graphics;
+    auto& gpu = rt::GpuContext::get();
+    if (!gpu.scheduler().isInitialized()) return rt::GpuQueueKind::Graphics;
+    if (queue == gpu.computeQueue())           return rt::GpuQueueKind::Compute;
+    if (queue == gpu.device().transferQueue()) return rt::GpuQueueKind::Transfer;
+    return rt::GpuQueueKind::Graphics;
+}
+
+} // namespace
 
 namespace rt {
 
@@ -289,19 +311,27 @@ bool GpuWorkSubmission::submit(VkQueue queue, VkSemaphore externalSemaphore,
     submitInfo.signalSemaphoreCount = signalCount;
     submitInfo.pSignalSemaphores    = signalSemaphores;
 
-    VkResult result;
-    if (queueLock) {
-        std::lock_guard lock(*queueLock);
-        result = vkQueueSubmit(queue, 1, &submitInfo, s.fence);
-    } else {
-        result = vkQueueSubmit(queue, 1, &submitInfo, s.fence);
-    }
+    // P1.1: route through GpuScheduler.  The legacy `queueLock`
+    // parameter is now unused — the scheduler owns the queue mutex.
+    // Kept in the signature for source compatibility with callers
+    // that still pass it during the migration window.
+    (void)queueLock;
+
+    rt::GpuSubmission sub{};
+    sub.cmd                  = s.cmdBuffer;
+    sub.queue                = kindForQueue(queue);
+    sub.signalSemaphores     = signalSemaphores;
+    sub.signalSemaphoreCount = signalCount;
+    sub.completionFence      = s.fence;
+    sub.tag                  = "GpuWorkSubmission::submit";
+
+    VkResult result = rt::GpuContext::get().scheduler().submit(sub);
 
     if (result != VK_SUCCESS) {
         // -4 = VK_ERROR_DEVICE_LOST (TDR / driver reset), -2/-3 = OOM,
-        // -8 = INITIALIZATION_FAILED.  Surface the code so future failures
-        // are diagnosable from logs alone (previously this silently returned
-        // false and callers had no way to know what kind of failure occurred).
+        // -8 = INITIALIZATION_FAILED.  Scheduler already logs the
+        // generic failure; this line preserves the slot/submission
+        // context that CompositeEngine recovery looks for.
         spdlog::error("[GPU-SUBMIT] vkQueueSubmit failed: VkResult={} slot={} submission={}",
                       static_cast<int>(result), m_currentSlot, m_globalSubmissionIndex);
         return false;

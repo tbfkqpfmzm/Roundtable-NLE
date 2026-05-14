@@ -17,6 +17,7 @@
 #include <volk.h>
 #include "EffectProcessor.h"
 #include "GpuContext.h"
+#include "GpuScheduler.h"
 
 #define VMA_STATIC_VULKAN_FUNCTIONS 0
 #define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
@@ -306,16 +307,15 @@ bool EffectProcessor::processSync(const VkDescriptorImageInfo& sourceImage,
         }
         vkResetFences(m_device->handle(), 1, &m_syncFence);
 
-        VkSubmitInfo submitInfo{};
-        submitInfo.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers    = &cmd;
-        {
-            // EffectProcessor uses the compute queue by default.
-            // Lock the compute queue mutex before submitting.
-            std::lock_guard lock(rt::GpuContext::get().computeQueueMutex());
-            vkQueueSubmit(m_queue, 1, &submitInfo, m_syncFence);
-        }
+        // P1.1: route through GpuScheduler.  EffectProcessor's m_queue
+        // is the compute queue (set at init); scheduler dispatches to
+        // Compute kind explicitly so it owns the locking discipline.
+        rt::GpuSubmission sub{};
+        sub.cmd             = cmd;
+        sub.queue           = rt::GpuQueueKind::Compute;
+        sub.completionFence = m_syncFence;
+        sub.tag             = "EffectProcessor::sync";
+        rt::GpuContext::get().scheduler().submit(sub);
         if (vkWaitForFences(m_device->handle(), 1, &m_syncFence,
                              VK_TRUE, kFenceTimeoutNs) == VK_TIMEOUT)
         {

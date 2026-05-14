@@ -68,6 +68,12 @@ target_compile_definitions(roundtable_gpu PRIVATE WIN32_LEAN_AND_MEAN)
 # PCH — enabled May 3, 2026.
 target_precompile_headers(roundtable_gpu PRIVATE pch_gpu.h)
 
+# P1.5: GpuScheduler.cpp is the only TU allowed to call vkQueueSubmit
+# directly.  The pch_gpu.h macro guard replaces vkQueueSubmit elsewhere
+# with a sentinel that fails to compile.
+set_source_files_properties(GpuScheduler.cpp PROPERTIES
+    COMPILE_DEFINITIONS "ROUNDTABLE_ALLOW_VK_QUEUE_SUBMIT")
+
 # Use volk (runtime Vulkan loader — no Vulkan SDK install required)
 target_link_libraries(roundtable_gpu PUBLIC
     roundtable_core
