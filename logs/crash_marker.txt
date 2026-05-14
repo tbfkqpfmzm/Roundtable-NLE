@@ -1,0 +1,6 @@
+crash_time=20260514_114443
+exception=0xc0000005
+address=0x7ff7cca7e476
+summary=Unhandled exception: ACCESS_VIOLATION at address 0x7ff7cca7e476 in roundtable.exe (offset 0x10e476)
+dump=C:\Users\rmdou\Desktop\TIER_LIST_PROGRAM_NEW\logs\crash_20260514_114442.dmp
+log=C:\Users\rmdou\Desktop\TIER_LIST_PROGRAM_NEW\logs\crash_log.txt

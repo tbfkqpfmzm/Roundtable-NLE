@@ -465,15 +465,18 @@ try
             return gpuResult;
         }
     }
-    // P2: GPU compositing failed.  Surface device-lost so the fatal-
-    // failure modal can prompt the user to restart, and return the last
-    // good frame as a stopgap so the viewport doesn't flash black before
-    // the dialog appears.  No CPU blit fallback — see CLAUDE_IMPROVEMENT_
-    // PLAN P2 for the rationale (the legacy fallback didn't actually
-    // work when the device was lost, only when it briefly stalled).
-    spdlog::error("compositeFrame: GPU composite failed — signalling device lost");
-    GpuContext::get().signalDeviceLost();
-    GpuContext::get().tryRecover();
+    // P2 (corrected): GPU composite returned nullptr.  This is NOT
+    // necessarily device-lost — it can be a transient miss (first
+    // frame, no decoded inputs, allocation hiccup).  The actual
+    // device-lost signal is fired inside CompositeEngine::composite-
+    // ViaRenderGraph on submit failure (see GpuContext.signalDeviceLost
+    // call there).  Here we just return the last good frame and log at
+    // debug level so the path stays quiet during normal warm-up.
+    static thread_local int s_quietLogCounter = 0;
+    if (++s_quietLogCounter % 30 == 1) {
+        spdlog::debug("[COMPOSITE] tryCompositeOnGpu returned nullptr — "
+                      "returning last-good (counter={})", s_quietLogCounter);
+    }
     {
         std::lock_guard lg(m_lastCompositeMtx);
         if (m_lastGoodComposite) {

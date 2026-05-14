@@ -239,9 +239,14 @@ public:
     [[nodiscard]] int vramUsagePercent() const;
 
     // ── Composite mutex ──────────────────────────────────────────────────
-    // Protects compositeFrame() execution.  FrameProducer is the sole
-    // holder — the old try_to_lock pattern has been removed.
-    std::mutex& compositeMutex() { return m_compositeMutex; }
+    // Protects compositeFrame() execution.  Recursive because the A2
+    // change (WIP commit, RENDER_GRAPH_PLAN) allows nested SequenceClip
+    // recursion: an outer compositeFrame call temporarily unlocks before
+    // recursing, but if any inner path forgets to unlock the same thread
+    // re-acquires this mutex and MSVC's std::mutex throws EDEADLK.
+    // Using recursive_mutex makes the locking discipline forgiving while
+    // we finish migrating to a properly hierarchical lock model.
+    std::recursive_mutex& compositeMutex() { return m_compositeMutex; }
 
     // ── Last good composite ─────────────────────────────────────────────
     // Kept for safe-mode fallback and exception safety.  The normal
@@ -345,7 +350,7 @@ private:
     std::vector<LayerInfo> buildLayersForFrame(int64_t tick, uint32_t outW, uint32_t outH,
                                                 bool scrubMode, bool playbackNonBlocking,
                                                 int& clipsAtTick, bool perfLog,
-                                                std::unique_lock<std::mutex>& lock,
+                                                std::unique_lock<std::recursive_mutex>& lock,
                                                 bool& gpuSpineUsedThisFrame);
 
     // Per-clip-type layer builders (extracted to reduce CompositeServiceLayerBuild.cpp)
@@ -380,8 +385,8 @@ private:
 
     bool m_isCompositing{false};
 
-    std::mutex m_compositeMutex;
-    mutable std::mutex m_lastCompositeMtx;
+    std::recursive_mutex m_compositeMutex;
+    mutable std::mutex   m_lastCompositeMtx;
     std::shared_ptr<CachedFrame> m_lastGoodComposite;
     int64_t m_lastGoodCompositeTick{-1};
 

@@ -47,7 +47,7 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
     int64_t tick, uint32_t outW, uint32_t outH,
     bool scrubMode, bool playbackNonBlocking,
     int& clipsAtTick, bool perfLog,
-    std::unique_lock<std::mutex>& lock,
+    std::unique_lock<std::recursive_mutex>& lock,
     bool& gpuSpineUsedThisFrame)
 {
     // fetchMediaFrame lambda replaced by CompositeService::resolveMediaFrame()
