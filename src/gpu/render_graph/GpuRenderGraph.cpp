@@ -424,7 +424,8 @@ int GpuRenderGraph::findLastWriter(ResourceId resId) const
 
 bool GpuRenderGraph::execute(VkCommandBuffer cmd,
                              uint64_t frameIndex,
-                             GpuRenderGraphFrameStats* outStats)
+                             GpuRenderGraphFrameStats* outStats,
+                             std::unordered_set<std::string>* disabledPassNames)
 {
     if (!m_compiled) {
         spdlog::error("[RENDER_GRAPH] execute() called but graph not compiled");
@@ -445,6 +446,19 @@ bool GpuRenderGraph::execute(VkCommandBuffer cmd,
     // Walk passes in topological order
     for (uint32_t passIdx : m_topologicalOrder) {
         auto& pass = m_passes[passIdx];
+
+        // Phase D: session-disabled passes are skipped entirely.  These
+        // are optional passes that failed previously and have been
+        // permanently muted to avoid re-trying a broken shader 60 fps.
+        // Pre/post barriers are also skipped — downstream passes will
+        // see this pass's output texture in whatever layout the previous
+        // (successful) execution left it.
+        if (disabledPassNames && !disabledPassNames->empty() &&
+            disabledPassNames->count(pass.name) > 0)
+        {
+            ++stats.passesSkipped;
+            continue;
+        }
 
         // ── Timestamp start ──────────────────────────────────────
         if (m_timestampQueriesEnabled && pass.timestampQueryIndex != UINT32_MAX) {
@@ -471,8 +485,24 @@ bool GpuRenderGraph::execute(VkCommandBuffer cmd,
                 return false;
             }
             if (pass.optional) {
-                spdlog::debug("[RENDER_GRAPH] Optional pass '{}' failed — skipping",
-                              pass.name);
+                // Phase D: first-time failure of an optional pass.
+                // Disable it for the rest of the session — re-recording
+                // a known-broken shader 60 fps wastes CPU and clutters
+                // the log.  Caller's set is mutated (when provided) so
+                // the next frame's execute() short-circuits at the top.
+                bool firstTime = true;
+                if (disabledPassNames) {
+                    auto [it, inserted] = disabledPassNames->insert(pass.name);
+                    firstTime = inserted;
+                }
+                if (firstTime) {
+                    spdlog::warn("[RENDER_GRAPH] Optional pass '{}' failed "
+                                 "— disabled for the rest of this session",
+                                 pass.name);
+                } else {
+                    spdlog::debug("[RENDER_GRAPH] Optional pass '{}' failed (already disabled)",
+                                  pass.name);
+                }
                 ++stats.passesSkipped;
                 // Still write timestamp for skipped passes
                 goto write_timestamp;

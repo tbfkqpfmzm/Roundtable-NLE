@@ -341,11 +341,7 @@ void CompositeEngine::notifyDeviceLost() noexcept
     m_gpuCompositeState = -1;
 }
 
-void CompositeEngine::resetBackoff() noexcept
-{
-    m_gpuBackoffAttempts = 0;
-    m_gpuBackoffUntil = {};
-}
+// resetBackoff was removed in P2 — see CLAUDE_IMPROVEMENT_PLAN.
 
 // ============================================================================
 // Texture cache
@@ -370,8 +366,6 @@ void CompositeEngine::destroyCompositeSlot()
 {
     m_gpuSubmission.reset();
     m_gpuCompositeState = 0;
-    m_gpuBackoffAttempts = 0;
-    m_gpuBackoffUntil = {};
 }
 
 // ============================================================================
@@ -418,19 +412,8 @@ std::shared_ptr<CachedFrame> CompositeEngine::composite(
         }
     }
 
-    // -- GPU backoff check --
-    if (m_gpuCompositeState == 1) {
-        using namespace std::chrono;
-        if (m_gpuBackoffAttempts > 0 &&
-            steady_clock::now() < m_gpuBackoffUntil) {
-            return nullptr;
-        }
-        if (m_gpuBackoffAttempts > 0) {
-            spdlog::info("[COMPOSITE] GPU backoff expired after {} attempts, retrying",
-                         m_gpuBackoffAttempts);
-        }
-    }
-
+    // P2: GPU backoff retry was deleted.  GPU submit failures are now
+    // surfaced as device-lost in the submit path itself (see below).
     if (m_gpuCompositeState != 1 || !compositor || !compositor->isInitialized()) {
         return nullptr;
     }
@@ -846,6 +829,17 @@ std::shared_ptr<CachedFrame> CompositeEngine::compositeViaRenderGraph(
     for (uint32_t passIdx : graph.topologicalOrder()) {
         const auto& pass = graph.pass(passIdx);
 
+        // Phase D (CLAUDE_IMPROVEMENT_PLAN): session-disabled passes.
+        // Optional passes (Effect, Transition) that failed earlier in
+        // this session are skipped entirely.  gpuLayers[] keeps its
+        // pre-pass state — effectively a passthrough.  Prevents the
+        // engine from re-dispatching a known-broken shader 60 fps.
+        if (pass.optional && !m_disabledPasses.empty() &&
+            m_disabledPasses.count(pass.name) > 0)
+        {
+            continue;
+        }
+
         // Insert global transfer→compute barrier before first compute pass
         // when uploads have been recorded (mirrors old monolithic path).
         if (uploadsSeen && pass.type != PassType::Upload && pass.type != PassType::External) {
@@ -969,6 +963,15 @@ std::shared_ptr<CachedFrame> CompositeEngine::compositeViaRenderGraph(
                         VkDescriptorImageInfo srcInfo = gpuLayers[li].textureInfo;
                         if (effectProcessor->process(cmd, srcInfo, layer.effects)) {
                             gpuLayers[li].textureInfo = effectProcessor->outputDescriptorInfo();
+                        } else if (pass.optional) {
+                            // Phase D: effect failed.  Disable this pass
+                            // for the rest of the session — the input
+                            // descriptor stays bound (implicit passthrough).
+                            if (m_disabledPasses.insert(pass.name).second) {
+                                spdlog::warn("[RENDER_GRAPH] Effect pass '{}' failed "
+                                             "— disabled for the rest of this session",
+                                             pass.name);
+                            }
                         }
                         break;
                     }
@@ -1058,6 +1061,15 @@ std::shared_ptr<CachedFrame> CompositeEngine::compositeViaRenderGraph(
                         0.0f, 0.0f, 1.0f, 1.0f, 0.0f, false);
                     if (pi != SIZE_MAX)
                         gpuLayers[pi].enabled = false;
+                } else if (pass.optional) {
+                    // Phase D: transition failed.  Disable for the rest
+                    // of the session (gpuLayers[wi] keeps pre-transition
+                    // state — clean visual passthrough).
+                    if (m_disabledPasses.insert(pass.name).second) {
+                        spdlog::warn("[RENDER_GRAPH] Transition pass '{}' failed "
+                                     "— disabled for the rest of this session",
+                                     pass.name);
+                    }
                 }
                 break;
             }
@@ -1145,20 +1157,14 @@ std::shared_ptr<CachedFrame> CompositeEngine::compositeViaRenderGraph(
     }
 
     if (!gpuSubmitOk) {
+        // P2: no retry/backoff.  Submit failure means the device is lost
+        // or wedged; signalling it propagates to the fatal-failure modal.
         if (frameSem != VK_NULL_HANDLE)
             releaseFrameSemaphore(frameSem);
+        spdlog::error("[RENDER_GRAPH] GPU submit failed — signalling device lost");
         GpuContext::get().signalDeviceLost();
-        int backoffMs = kGpuBackoffInitialMs * (1 << m_gpuBackoffAttempts);
-        if (backoffMs > kGpuBackoffMaxMs) backoffMs = kGpuBackoffMaxMs;
-        m_gpuBackoffUntil = std::chrono::steady_clock::now()
-                          + std::chrono::milliseconds(backoffMs);
-        ++m_gpuBackoffAttempts;
-        spdlog::error("[RENDER_GRAPH] GPU submit failed (attempt {})", m_gpuBackoffAttempts);
         compOk = false;
         readbackOk = false;
-    } else {
-        m_gpuBackoffAttempts = 0;
-        m_gpuBackoffUntil = {};
     }
 
     m_uploadManager->endFrame();

@@ -333,39 +333,11 @@ public:
     void initAnimVideoCache(MediaPool* pool);
 #endif
 
-    // ── Safe mode (CPU compositor fallback) ─────────────────────────────
-    /// Enter safe mode after persistent GPU failure.  Produces one frame
-    /// at most every ~500ms for recovery purposes only — NOT for playback.
-    /// Safe mode composites the topmost visible video track using software
-    /// blend and displays via the CPU QWidget viewport.
-    void setSafeMode(bool on) { m_safeMode.store(on, std::memory_order_release); }
-    [[nodiscard]] bool isSafeMode() const noexcept {
-        return m_safeMode.load(std::memory_order_acquire);
-    }
-
-    /// Minimal safe-mode compositing: produces a single BGRA CachedFrame
-    /// from the topmost visible video track at the given tick.  Uses
-    /// blocking software decode + MemCpy blend.  Returns nullptr if no
-    /// video content is available.  Throttled internally to ~2 calls/sec.
-    std::shared_ptr<CachedFrame> compositeSafeMode(int64_t tick,
-                                                     uint32_t outW,
-                                                     uint32_t outH);
-
-    /// Attempt automatic recovery from safe mode.  Checks GPU health and
-    /// if the device is operational again, clears safe mode so the next
-    /// compositeFrame() uses the normal GPU path.  Callers should check
-    /// isSafeMode() afterward to see if recovery succeeded.
-    /// Returns true if recovery was attempted (success or fail); false
-    /// if it's too soon to retry (throttled).
-    bool tryAutoRecoverFromSafeMode();
-
-    /// Callback invoked when safe mode state changes (entered or exited).
-    /// The UI layer (ProgramMonitor) connects to this to show/hide the
-    /// safe mode banner.
-    using SafeModeCallback = std::function<void(bool safeModeActive)>;
-    void setSafeModeCallback(SafeModeCallback cb) { m_safeModeCallback = std::move(cb); }
-
     // ── Reset (new timeline / project close) ────────────────────────────
+    // P2 (CLAUDE_IMPROVEMENT_PLAN): CPU safe-mode fallback was removed.
+    // Device-lost is now fatal — GpuContext::tryRecover() fires the
+    // fatal-failure callback which the UI translates into a modal
+    // restart dialog.  Every major NLE behaves the same way.
     void reset();
 
 private:
@@ -405,9 +377,6 @@ private:
 
     // Composite engine (owns GPU compositing pipeline)
     std::unique_ptr<CompositeEngine> m_engine;
-
-    // Reusable composite buffer
-    std::shared_ptr<CachedFrame> m_compositeBuffer;
 
     bool m_isCompositing{false};
 
@@ -493,22 +462,10 @@ private:
     std::atomic<bool> m_compositorReady{false};
     std::atomic<bool> m_destroying{false};
 
-    // ── CPU Compositor Safe Mode (Phase 6) ────────────────────────────
-    // Set true when GPU compositing fails persistently and backoff is
-    // exhausted.  When active, compositeFrame() uses compositeSafeMode()
-    // which composites ONE track only at ~2 fps via software decode+blend.
-    // Cleared on reset() or when the user clicks "Reset GPU".
-    std::atomic<bool> m_safeMode{false};
-
-    // Throttle safe-mode compositing to at most once every 500ms.
-    // compositeSafeMode() checks this before doing heavy work.
-    std::chrono::steady_clock::time_point m_lastSafeModeComposite{};
-
-    // Callback invoked when safe mode is entered or exited.
-    SafeModeCallback m_safeModeCallback;
-
-    // Throttle auto-recovery checks to at most once every 5 seconds.
-    std::chrono::steady_clock::time_point m_lastRecoveryCheck{};
+    // P2 (CLAUDE_IMPROVEMENT_PLAN): the safe-mode CPU fallback state
+    // (m_safeMode, m_lastSafeModeComposite, m_safeModeCallback,
+    // m_lastRecoveryCheck) was deleted.  Device-lost is now treated
+    // as fatal — see CompositeServiceFrame.cpp.
 
     bool m_gpuDisplayMode{false};
     std::atomic<bool> m_shutdown{false};

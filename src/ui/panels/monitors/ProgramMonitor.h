@@ -92,11 +92,7 @@ public:
     void setGpuDisplayEnabled(bool enabled);
     [[nodiscard]] bool isGpuDisplayEnabled() const noexcept { return m_gpuDisplay; }
 
-    // ── CPU Safe Mode (Phase 6) ─────────────────────────────────────
-    /// Show or hide the safe mode yellow banner.
-    void setSafeModeBannerVisible(bool visible);
-    /// Called when user clicks "Reset GPU" in the safe mode banner.
-    void resetGpuAndExitSafeMode();
+    // CPU Safe Mode banner — removed in P2 of CLAUDE_IMPROVEMENT_PLAN.
 
     // ── Display control ─────────────────────────────────────────────────
 
@@ -361,10 +357,7 @@ private:
     std::atomic<bool> m_newFrameAvailable{false};
     std::shared_ptr<CachedFrame> m_pendingFrame;
 
-    // ── Safe mode banner (Phase 6) ──────────────────────────────────
-    QWidget*  m_safeModeBanner{nullptr};
-    QLabel*   m_safeModeLabel{nullptr};
-    QPushButton* m_btnResetGpu{nullptr};
+    // Safe mode banner widgets removed in P2.
 
     /// Present callback wired into the pipeline — called from present thread.
     bool presentFrame(const std::shared_ptr<CachedFrame>& frame);

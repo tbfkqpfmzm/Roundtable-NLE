@@ -55,8 +55,8 @@ add_library(roundtable_gpu STATIC
     # GPU composite orchestration (delegates to CompositeEngine)
     CompositeServiceGpuOrchestration.cpp
 
-    # CPU Compositor Safe Mode (Phase 6)
-    CompositeServiceCpuFallback.cpp
+    # CPU Compositor Safe Mode — removed in P2 of CLAUDE_IMPROVEMENT_PLAN.
+    # Device-lost is now treated as fatal; no per-frame CPU fallback.
 
     # Render graph DAG (Phase 6 — DAG-based render passes)
     render_graph/GpuRenderGraph.cpp

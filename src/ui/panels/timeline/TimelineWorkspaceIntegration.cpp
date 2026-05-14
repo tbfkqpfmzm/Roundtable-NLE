@@ -59,22 +59,7 @@ void TimelineWorkspace::setTimeline(Timeline* timeline) {
             });
 #endif
 
-        // ── Phase 7.B: Wire safe mode callback ──────────────────────
-        // When safe mode is entered or exited, update the ProgramMonitor's
-        // safe mode banner and viewport state automatically.  This is the
-        // seamless, invisible recovery mechanism — the user never needs to
-        // click a "Refresh" button.
-        m_compositeService->setSafeModeCallback(
-            [this](bool safeModeActive) {
-                if (m_programMonitor) {
-                    m_programMonitor->setSafeModeBannerVisible(safeModeActive);
-                }
-                if (safeModeActive) {
-                    spdlog::warn("[SAFEMODE] Safe mode ENTERED — using CPU fallback");
-                } else {
-                    spdlog::info("[SAFEMODE] Safe mode EXITED — GPU compositing restored");
-                }
-            });
+        // Safe-mode callback wiring removed in P2 of CLAUDE_IMPROVEMENT_PLAN.
     }
 
     // Forward to TimelinePanel so its track widgets and ensureDefaultTracks

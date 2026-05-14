@@ -33,6 +33,8 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace rt { class CacheCoordinator; }
@@ -95,8 +97,8 @@ public:
     // ── GPU state ───────────────────────────────────────────────────────
     [[nodiscard]] bool isGpuAvailable() const noexcept;
     void notifyDeviceLost() noexcept;
-    [[nodiscard]] int backoffAttempts() const noexcept { return m_gpuBackoffAttempts; }
-    void resetBackoff() noexcept;
+    // backoffAttempts() / resetBackoff() removed in P2.  GPU submit
+    // failures now go straight to signalDeviceLost; no per-frame retry.
     [[nodiscard]] bool isGpuCompositeEnabled() const noexcept
         { return m_gpuCompositeState > 0; }
 
@@ -169,11 +171,14 @@ private:
     // to the same pool the FrameProducer thread acquires from.
     VkDevice                 m_device{nullptr};
 
-    // Exponential backoff state
-    static constexpr int kGpuBackoffInitialMs = 100;
-    static constexpr int kGpuBackoffMaxMs     = 10000;
-    std::chrono::steady_clock::time_point m_gpuBackoffUntil{};
-    int  m_gpuBackoffAttempts{0};
+    // Exponential backoff state removed in P2 of CLAUDE_IMPROVEMENT_PLAN.
+
+    // ── Phase D: per-pass fault isolation ────────────────────────────
+    // When an optional render-graph pass fails, its name is added here
+    // and SKIPPED on every subsequent frame.  Prevents the executor
+    // from re-trying a broken shader 60 times per second.  Cleared on
+    // device reset only — a session is the failure scope.
+    std::unordered_set<std::string> m_disabledPasses;
 
     // ── Render graph alternative path ────────────────────────────────
     [[nodiscard]] std::shared_ptr<rt::CachedFrame> compositeViaRenderGraph(

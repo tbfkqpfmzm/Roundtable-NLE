@@ -107,43 +107,11 @@ try
         ~DepthGuard() { --compositeDepth(); }
     } depthGuard;
 
-    // ── CPU Safe Mode (Phase 6/7) ────────────────────────────────────
-    // When the GPU has failed persistently and backoff is exhausted, use
-    // the minimal safe-mode compositor instead.  Safe mode produces one
-    // frame every ~500ms using software decode + MemCpy — NOT for playback.
-    // It's a recovery bridge to get back to GPU operation.
-    // Phase 7.B: While in safe mode, periodically check GPU health and
-    // auto-recover when the GPU becomes operational again.
-    if (m_safeMode.load(std::memory_order_acquire)) {
-        // Attempt periodic auto-recovery (throttled to every 5s internally)
-        tryAutoRecoverFromSafeMode();
-
-        // If recovery succeeded, m_safeMode is now false — fall through
-        // to the normal GPU path below.
-        if (m_safeMode.load(std::memory_order_acquire)) {
-            // Still in safe mode — composite a safe-mode frame
-            auto safeFrame = compositeSafeMode(tick, outW, outH);
-            if (safeFrame) {
-                // Update last-good-composite for continuity
-                std::lock_guard lg(m_lastCompositeMtx);
-                m_lastGoodComposite = safeFrame;
-                m_lastGoodCompositeTick = tick;
-                return safeFrame;
-            }
-            // compositeSafeMode returned nullptr (throttled) — return last
-            // good frame if available
-            std::lock_guard lg(m_lastCompositeMtx);
-            if (m_lastGoodComposite) {
-                m_lastGoodComposite->gpuReady     = false;
-                m_lastGoodComposite->gpuImageView = 0;
-                m_lastGoodComposite->gpuSampler   = 0;
-                m_lastGoodComposite->gpuSemaphore = 0;
-            }
-            return m_lastGoodComposite;
-        }
-        // Recovery succeeded — fall through to normal GPU path
-        spdlog::info("[SAFEMODE] Auto-recovery complete — resuming GPU compositing");
-    }
+    // P2: CPU safe-mode fallback was deleted here.  When GPU compositing
+    // fails persistently, GpuContext::tryRecover() transitions to Failed
+    // and fires the fatal-failure callback (modal restart dialog).  No
+    // per-frame "safe-mode" compositor — every major NLE treats device-
+    // lost as fatal; we do the same.
 
     // Blocking lock — FrameProducer is now the sole compositor thread.
     // The old try_to_lock pattern (which returned stale m_lastGoodComposite
@@ -497,24 +465,16 @@ try
             return gpuResult;
         }
     }
-    // GPU failed — check for safe mode activation
-    int backoffAttempts = m_engine ? m_engine->backoffAttempts() : 0;
-    if (backoffAttempts >= 3) {
-        spdlog::warn("[SAFEMODE] GPU backoff exhausted ({} attempts) — entering CPU safe mode",
-                     backoffAttempts);
-        m_safeMode.store(true, std::memory_order_release);
-
-        if (m_safeModeCallback)
-            m_safeModeCallback(true);
-
-        auto safeFrame = compositeSafeMode(tick, outW, outH);
-        if (safeFrame) {
-            std::lock_guard lg(m_lastCompositeMtx);
-            m_lastGoodComposite = safeFrame;
-            m_lastGoodCompositeTick = tick;
-            return safeFrame;
-        }
-        spdlog::info("[SAFEMODE] compositeSafeMode throttled or null, using last good frame");
+    // P2: GPU compositing failed.  Surface device-lost so the fatal-
+    // failure modal can prompt the user to restart, and return the last
+    // good frame as a stopgap so the viewport doesn't flash black before
+    // the dialog appears.  No CPU blit fallback — see CLAUDE_IMPROVEMENT_
+    // PLAN P2 for the rationale (the legacy fallback didn't actually
+    // work when the device was lost, only when it briefly stalled).
+    spdlog::error("compositeFrame: GPU composite failed — signalling device lost");
+    GpuContext::get().signalDeviceLost();
+    GpuContext::get().tryRecover();
+    {
         std::lock_guard lg(m_lastCompositeMtx);
         if (m_lastGoodComposite) {
             m_lastGoodComposite->gpuReady     = false;
@@ -524,63 +484,6 @@ try
         }
         return m_lastGoodComposite;
     }
-
-    // Still in GPU cooldown — use legacy CPU fallback path.
-    int gpuBackoffCount = m_engine ? m_engine->backoffAttempts() : 0;
-    spdlog::warn("compositeFrame: GPU composite FAILED (backoff {}/3) — using legacy CPU path",
-                 gpuBackoffCount);
-
-    if (!m_compositeBuffer || m_compositeBuffer->width != outW ||
-        m_compositeBuffer->height != outH) {
-        m_compositeBuffer = std::make_shared<CachedFrame>();
-        m_compositeBuffer->width  = outW;
-        m_compositeBuffer->height = outH;
-        m_compositeBuffer->stride = outW * 4;
-        m_compositeBuffer->pixels.resize(static_cast<size_t>(outW) * outH * 4);
-    }
-    {
-        uint32_t* pixels32 = reinterpret_cast<uint32_t*>(m_compositeBuffer->pixels.data());
-        const size_t nPixels = static_cast<size_t>(outW) * outH;
-        std::fill_n(pixels32, nPixels, 0xFF000000u);
-    }
-    auto result = m_compositeBuffer;
-
-    for (const auto& layer : layers) {
-        if (!layer.frame) continue;
-        auto& src = *layer.frame;
-        if (!src.ensurePixels()) continue;
-
-        const uint32_t srcStride = src.stride > 0 ? src.stride : src.width * 4;
-
-        blitLayerWithTransform(
-            result->pixels.data(), outW, outH,
-            src.pixels.data(), src.width, src.height, srcStride,
-            layer.opacity,
-            layer.posX, layer.posY,
-            layer.scX, layer.scY,
-            layer.rot,
-            layer.cropL, layer.cropR, layer.cropT, layer.cropB,
-            layer.containFit);
-    }
-
-    if (m_engine)
-        m_engine->insertLru(tick, outW, outH, result);
-
-    {
-        std::lock_guard lg(m_lastCompositeMtx);
-        m_lastGoodComposite = result;
-        m_lastGoodCompositeTick = tick;
-        // A1: record that this composite was "complete" (all expected
-        // layers resolved) so the settle-window check above can use it as
-        // the hold frame for subsequent partial composites.  A composite
-        // is complete when layers.size() >= clipsAtTick — i.e. every clip
-        // present at this tick contributed a layer.
-        if (clipsAtTick > 0 && static_cast<int>(layers.size()) >= clipsAtTick) {
-            m_lastFullLayerCount = static_cast<int>(layers.size());
-            m_lastFullCompositeAt = std::chrono::steady_clock::now();
-        }
-    }
-    return result;
 }
 catch (const std::exception& ex)
 {

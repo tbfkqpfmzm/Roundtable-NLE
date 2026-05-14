@@ -74,10 +74,7 @@ TimelineWorkspace::~TimelineWorkspace()
         m_programMonitor->setCompositeCallback(nullptr);
     }
 
-    // Clear safe mode callback before destroying composite service
-    if (m_compositeService) {
-        m_compositeService->setSafeModeCallback(nullptr);
-    }
+    // Safe-mode callback cleanup removed in P2 of CLAUDE_IMPROVEMENT_PLAN.
 
     // Cancel any in-flight background audio decode before destroying
     if (m_audioPlayback) {

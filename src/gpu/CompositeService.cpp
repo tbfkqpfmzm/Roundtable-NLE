@@ -107,15 +107,11 @@ CompositeService::~CompositeService()
 void CompositeService::reset()
 {
     invalidateCacheDirect();
-    m_compositeBuffer.reset();
     m_openMediaHandles.clear();
     m_videoFallbackCache.clear();
     if (m_engine) {
         m_engine->clearLru();
-        m_engine->resetBackoff();
     }
-    m_safeMode.store(false, std::memory_order_release);
-    m_lastSafeModeComposite = {};
     m_lastActiveClipIds.clear();
     m_prewarmedClipIds.clear();
     m_lastLookaheadScan = {};

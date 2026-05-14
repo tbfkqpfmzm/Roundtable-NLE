@@ -31,6 +31,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace rt::render_graph {
@@ -129,9 +130,16 @@ public:
     /// Execute all passes in topological order into the given command buffer.
     /// Allocates transient resources and writes timestamp queries if enabled.
     /// Returns false if a fatal pass failed.
+    ///
+    /// Phase D (CLAUDE_IMPROVEMENT_PLAN): `disabledPassNames` is an
+    /// owner-managed set of pass names that should be skipped entirely.
+    /// When an optional pass fails, its name is added to this set so the
+    /// executor stops re-trying it on every subsequent frame.  Pass
+    /// nullptr to disable the safety net (testing / one-shot uses).
     [[nodiscard]] bool execute(VkCommandBuffer cmd,
                                uint64_t frameIndex,
-                               GpuRenderGraphFrameStats* outStats = nullptr);
+                               GpuRenderGraphFrameStats* outStats = nullptr,
+                               std::unordered_set<std::string>* disabledPassNames = nullptr);
 
     // ── Lifecycle ──────────────────────────────────────────────────
 
