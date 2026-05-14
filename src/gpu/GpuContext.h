@@ -21,6 +21,7 @@
 
 #pragma once
 
+#include "GpuScheduler.h"
 #include "ICompositor.h"
 #include "vulkan/Instance.h"
 #include "vulkan/Device.h"
@@ -44,6 +45,7 @@ class TransitionRenderer;
 
 class CudaVulkanInterop;
 class GpuResourceManager;
+// GpuScheduler is fully defined by the #include above; used by value.
 
 /// GPU device health state for device-lost recovery (Phase 2.B).
 enum class GpuState : uint8_t {
@@ -146,6 +148,18 @@ public:
 
     /// Get the mutex used to serialise submit calls on the graphics queue.
     [[nodiscard]] std::mutex& graphicsQueueMutex() const noexcept { return m_graphicsQueueMutex; }
+
+    /// Get the mutex used to serialise submit calls on the transfer queue.
+    /// Currently used only by GpuScheduler; will become widely used as
+    /// callers migrate one-shot uploads to the transfer queue.
+    [[nodiscard]] std::mutex& transferQueueMutex() const noexcept { return m_transferQueueMutex; }
+
+    /// Central GPU submission authority — see GpuScheduler.h.  P1 of
+    /// CLAUDE_IMPROVEMENT_PLAN: all vkQueueSubmit calls should route
+    /// through this scheduler.  Direct vkQueueSubmit + manual queue
+    /// mutex locking is the legacy path being migrated out.
+    [[nodiscard]] GpuScheduler& scheduler() noexcept { return m_scheduler; }
+    [[nodiscard]] const GpuScheduler& scheduler() const noexcept { return m_scheduler; }
 
     /// Graphics queue family index (for creating per-thread CommandPools).
     [[nodiscard]] uint32_t graphicsQueueFamilyIndex() const noexcept
@@ -262,7 +276,14 @@ private:
     std::atomic<bool>     m_fatalFailureFired{false};
     mutable std::mutex m_graphicsQueueMutex;  ///< Serialise graphics queue submits
     mutable std::mutex m_computeQueueMutex;   ///< Serialise compute queue submits
+    mutable std::mutex m_transferQueueMutex;  ///< Serialise transfer queue submits (P1)
     mutable std::mutex m_subsystemMutex;      ///< Serialise lazy subsystem creation
+
+    /// Central GPU submission authority — see GpuScheduler.h.
+    /// Default-constructed; init()/shutdown() are tied to GpuContext's
+    /// own init()/shutdown() so the scheduler matches the device's
+    /// lifetime exactly.
+    GpuScheduler m_scheduler;
 
     /// Shared binary-semaphore pool for inter-queue compositor→presenter sync.
     /// Acquired by CompositeEngine, released by VulkanViewport once the

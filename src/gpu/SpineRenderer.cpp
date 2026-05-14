@@ -5,6 +5,8 @@
 
 #include <volk.h>   // Must come before any vulkan.h include
 #include "SpineRenderer.h"
+#include "GpuContext.h"
+#include "GpuScheduler.h"
 
 #include <spdlog/spdlog.h>
 #include <glm/gtc/matrix_transform.hpp>
@@ -830,18 +832,16 @@ void SpineRenderer::endFrame()
 
     vkEndCommandBuffer(m_activeCmdBuffer);
 
-    // Submit (lock queue mutex if used from a background thread)
-    VkSubmitInfo submitInfo{};
-    submitInfo.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers    = &m_activeCmdBuffer;
-
-    if (m_queueMutex) {
-        std::lock_guard lock(*m_queueMutex);
-        vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, m_frameFence);
-    } else {
-        vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, m_frameFence);
-    }
+    // P1: route through GpuScheduler.  The scheduler holds the graphics
+    // queue + its mutex, so SpineRenderer no longer needs to know about
+    // either — the m_queueMutex / m_graphicsQueue members are now only
+    // consulted as a fallback for pre-scheduler boot paths.
+    GpuSubmission sub{};
+    sub.cmd             = m_activeCmdBuffer;
+    sub.queue           = GpuQueueKind::Graphics;
+    sub.completionFence = m_frameFence;
+    sub.tag             = "Spine::endFrame";
+    GpuContext::get().scheduler().submit(sub);
 
     // Advance frame index
     m_currentFrame = (m_currentFrame + 1) % m_config.framesInFlight;
@@ -997,12 +997,7 @@ std::shared_ptr<CachedFrame> SpineRenderer::readbackPixels()
 
     vkEndCommandBuffer(cmd);
 
-    // ── 6. Submit + wait ───────────────────────────────────────────
-    VkSubmitInfo submitInfo{};
-    submitInfo.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers    = &cmd;
-
+    // ── 6. Submit + wait (via GpuScheduler — P1 migration) ─────────
     VkFence fence = VK_NULL_HANDLE;
     VkFenceCreateInfo fenceInfo{};
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
@@ -1012,9 +1007,12 @@ std::shared_ptr<CachedFrame> SpineRenderer::readbackPixels()
         return nullptr;
     }
 
-    if (m_queueMutex) m_queueMutex->lock();
-    vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, fence);
-    if (m_queueMutex) m_queueMutex->unlock();
+    GpuSubmission sub{};
+    sub.cmd             = cmd;
+    sub.queue           = GpuQueueKind::Graphics;
+    sub.completionFence = fence;
+    sub.tag             = "Spine::readbackPixels";
+    GpuContext::get().scheduler().submit(sub);
 
     vkWaitForFences(m_vkDevice, 1, &fence, VK_TRUE, UINT64_MAX);
     vkDestroyFence(m_vkDevice, fence, nullptr);

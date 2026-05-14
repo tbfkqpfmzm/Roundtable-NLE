@@ -6,6 +6,7 @@
 #include "Compositor.h"
 #include "EffectProcessor.h"
 #include "GpuResourceManager.h"
+#include "GpuScheduler.h"
 #include "Nv12Converter.h"
 #include "SpineRenderer.h"
 #include "TransitionRenderer.h"
@@ -134,6 +135,24 @@ bool GpuContext::init(VkSurfaceKHR surface)
                      graphicsFamily);
     }
 
+    // 6) Initialize the central GPU submission scheduler.  After this,
+    //    new code should route every vkQueueSubmit through it.  Existing
+    //    direct callers are migrated incrementally in subsequent P1
+    //    commits per CLAUDE_IMPROVEMENT_PLAN.
+    if (!m_scheduler.init(m_device.handle(),
+                           m_device.graphicsQueue(), &m_graphicsQueueMutex,
+                           m_device.computeQueue(),  &m_computeQueueMutex,
+                           m_device.transferQueue(), &m_transferQueueMutex))
+    {
+        spdlog::error("GpuContext: Failed to init GpuScheduler");
+        m_graphicsCmdPool.destroy();
+        m_cmdPool.destroy();
+        m_allocator.destroy();
+        m_device.destroy();
+        m_instance.destroy();
+        return false;
+    }
+
     m_initialized = true;
     m_gpuState.store(GpuState::Healthy, std::memory_order_release);
     spdlog::info("GpuContext: Vulkan initialization complete");
@@ -182,6 +201,11 @@ void GpuContext::shutdown()
         }
         m_binarySemaphorePool.clear();
     }
+
+    // Tear down the scheduler.  Just drops queue/mutex pointers — the
+    // actual VkQueues live in Device and are destroyed below.  No GPU
+    // work is drained here because waitIdle above already did that.
+    m_scheduler.shutdown();
 
     // Destroy in reverse order.
     // m_resourceManager must be destroyed BEFORE the VMA allocator and

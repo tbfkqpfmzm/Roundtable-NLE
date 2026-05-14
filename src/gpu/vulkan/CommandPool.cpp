@@ -6,12 +6,35 @@
 #include <volk.h>
 #include "vulkan/CommandPool.h"
 #include "vulkan/Device.h"
+#include "GpuContext.h"
+#include "GpuScheduler.h"
 
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <utility>
 
 namespace rt {
+
+// ── kindForQueue ────────────────────────────────────────────────────────────
+//
+// Resolve a raw VkQueue handle back to the GpuQueueKind the scheduler
+// uses for routing.  CommandPool's submit-one-shot helpers take a raw
+// VkQueue from callers (legacy API); the scheduler wants a kind.  Look
+// up the handle in GpuContext to figure out which queue family it is.
+//
+// Falls back to Graphics if the queue isn't recognized (shouldn't
+// normally happen — every queue handle in this codebase comes from
+// Device, and Device exposes graphics/compute/transfer).
+static GpuQueueKind kindForQueue(VkQueue queue) noexcept
+{
+    if (queue == VK_NULL_HANDLE) return GpuQueueKind::Graphics;
+    auto& gpu = GpuContext::get();
+    if (!gpu.scheduler().isInitialized()) return GpuQueueKind::Graphics;
+    if (queue == gpu.computeQueue())              return GpuQueueKind::Compute;
+    if (queue == gpu.device().transferQueue())    return GpuQueueKind::Transfer;
+    // Graphics is the most common case + the safe fallback.
+    return GpuQueueKind::Graphics;
+}
 
 // ── Destructor ──────────────────────────────────────────────────────────────
 
@@ -158,24 +181,37 @@ VkCommandBuffer CommandPool::beginSingleTime()
 
 // ── Helper: submit, wait on fence, destroy fence, free buffer ────────────────
 
-/// Submit a command buffer with optional mutex guard, wait for completion,
+/// Submit a command buffer through GpuScheduler, wait for completion,
 /// then destroy the fence and free the buffer.  Replaces duplicated
 /// fence boilerplate in both endSingleTime / endSingleTimeWithWait.
+///
+/// P1 of CLAUDE_IMPROVEMENT_PLAN: this used to call vkQueueSubmit
+/// directly with an optional mutex guard.  Now it routes through
+/// GpuContext::scheduler().  The `mtx` parameter is preserved for
+/// backwards compatibility (callers may still pass it) but ignored:
+/// the scheduler owns queue mutex ordering globally.
 static void submitAndWait(VkDevice device, VkQueue queue,
                            VkCommandBuffer buffer, VkSubmitInfo& submitInfo,
-                           std::mutex* mtx)
+                           std::mutex* /*mtx*/)
 {
     VkFenceCreateInfo fenceInfo{};
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     VkFence fence = VK_NULL_HANDLE;
     vkCreateFence(device, &fenceInfo, nullptr, &fence);
 
-    if (mtx) {
-        std::lock_guard lock(*mtx);
-        vkQueueSubmit(queue, 1, &submitInfo, fence);
-    } else {
-        vkQueueSubmit(queue, 1, &submitInfo, fence);
-    }
+    GpuSubmission sub{};
+    sub.cmd                  = buffer;
+    sub.queue                = kindForQueue(queue);
+    sub.pNext                = submitInfo.pNext;
+    sub.waitSemaphores       = submitInfo.pWaitSemaphores;
+    sub.waitStages           = submitInfo.pWaitDstStageMask;
+    sub.waitSemaphoreCount   = submitInfo.waitSemaphoreCount;
+    sub.signalSemaphores     = submitInfo.pSignalSemaphores;
+    sub.signalSemaphoreCount = submitInfo.signalSemaphoreCount;
+    sub.completionFence      = fence;
+    sub.tag                  = "CommandPool::submitAndWait";
+
+    GpuContext::get().scheduler().submit(sub);
 
     vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
     vkDestroyFence(device, fence, nullptr);
