@@ -203,4 +203,55 @@ VkResult GpuScheduler::submit(const GpuSubmission& sub)
     return result;
 }
 
+void GpuScheduler::deviceWaitIdle()
+{
+    if (m_device == VK_NULL_HANDLE) return;
+
+    // Dedupe mutex pointers — when a queue family is missing the slot
+    // falls back to the graphics mutex (see init()), so the same mutex
+    // can appear in multiple slots.  std::scoped_lock's deadlock-avoid
+    // algorithm requires distinct mutexes.
+    std::mutex* a = m_graphics.mutex;
+    std::mutex* b = (m_compute.mutex  && m_compute.mutex  != a) ? m_compute.mutex  : nullptr;
+    std::mutex* c = (m_transfer.mutex && m_transfer.mutex != a
+                                     && m_transfer.mutex != b) ? m_transfer.mutex : nullptr;
+
+    if (a && b && c) {
+        std::scoped_lock lock(*a, *b, *c);
+        vkDeviceWaitIdle(m_device);
+    } else if (a && b) {
+        std::scoped_lock lock(*a, *b);
+        vkDeviceWaitIdle(m_device);
+    } else if (a) {
+        std::lock_guard lock(*a);
+        vkDeviceWaitIdle(m_device);
+    } else {
+        vkDeviceWaitIdle(m_device);
+    }
+}
+
+VkResult GpuScheduler::present(VkQueue queue, const VkPresentInfoKHR* info)
+{
+    if (queue == VK_NULL_HANDLE || info == nullptr) {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    // Resolve which queue mutex owns this handle.  Present queue is
+    // typically the graphics queue (Device.cpp falls back to it when
+    // no dedicated present family exists), so we'll usually lock
+    // m_graphics.mutex.  When the present family is genuinely separate,
+    // no other code submits to that queue and there's no race — fall
+    // through with no lock in that case.
+    std::mutex* mtx = nullptr;
+    if (queue == m_graphics.queue)      mtx = m_graphics.mutex;
+    else if (queue == m_compute.queue)  mtx = m_compute.mutex;
+    else if (queue == m_transfer.queue) mtx = m_transfer.mutex;
+
+    if (mtx) {
+        std::lock_guard lock(*mtx);
+        return vkQueuePresentKHR(queue, info);
+    }
+    return vkQueuePresentKHR(queue, info);
+}
+
 } // namespace rt

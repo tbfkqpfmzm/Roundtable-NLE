@@ -260,6 +260,14 @@ VkResult Swapchain::present(VkQueue presentQueue, uint32_t imageIndex,
 
     VkResult result = VK_SUCCESS;
 
+    // Route through GpuScheduler so vkQueuePresentKHR is serialized under
+    // the same per-queue mutex as vkQueueSubmit.  Without this lock the
+    // presenter races the producer thread's submits on the shared
+    // graphics+present queue and trips a Vulkan "queue simultaneously
+    // used in two threads" error — observed in May 2026 logs as the
+    // upstream cause of NVIDIA "subchannel mismatch" graphics-engine
+    // faults → VK_ERROR_DEVICE_LOST.
+
     // SEH guard: external hooks (e.g. OBS ow-graphics-hook64.dll) may crash
     // when intercepting vkQueuePresentKHR — typically a null-pointer deref
     // at offset 0x18 inside the hook DLL.  We catch the exception, log it,
@@ -267,7 +275,7 @@ VkResult Swapchain::present(VkQueue presentQueue, uint32_t imageIndex,
 #ifdef _WIN32
     __try
     {
-        result = vkQueuePresentKHR(presentQueue, &presentInfo);
+        result = GpuContext::get().scheduler().present(presentQueue, &presentInfo);
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
@@ -281,7 +289,7 @@ VkResult Swapchain::present(VkQueue presentQueue, uint32_t imageIndex,
         return VK_ERROR_OUT_OF_DATE_KHR;
     }
 #else
-    result = vkQueuePresentKHR(presentQueue, &presentInfo);
+    result = GpuContext::get().scheduler().present(presentQueue, &presentInfo);
 #endif
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)

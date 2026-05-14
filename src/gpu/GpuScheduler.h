@@ -126,6 +126,29 @@ public:
     /// themselves.
     VkResult submit(const GpuSubmission& sub);
 
+    /// THE ONLY supported way to call vkQueuePresentKHR.  Per Vulkan spec
+    /// vkQueuePresentKHR is "queue use" and requires the same external
+    /// synchronization on the VkQueue handle as vkQueueSubmit — without
+    /// this lock the presenter thread races the producer thread's submit
+    /// on the shared graphics+present queue, which on NVIDIA shows up as
+    /// "vkQueueSubmit(): THREADING ERROR" in validation and as a
+    /// hardware-level "subchannel mismatch" graphics-engine fault →
+    /// VK_ERROR_DEVICE_LOST in production.  Resolves which queue mutex
+    /// matches `queue` by handle and locks it for the duration of the
+    /// call.
+    VkResult present(VkQueue queue, const VkPresentInfoKHR* info);
+
+    /// THE ONLY supported way to call vkDeviceWaitIdle during operation.
+    /// Per Vulkan spec vkDeviceWaitIdle is "queue use" on EVERY queue
+    /// in the device — so calling it while another thread submits to any
+    /// queue is the same threading violation as the submit-vs-present
+    /// race that caused the May 2026 TDR.  This wrapper locks every
+    /// distinct queue mutex before the wait, dedup'd when queues share
+    /// a family.  Shutdown paths that have already drained all worker
+    /// threads can keep calling vkDeviceWaitIdle directly — but for any
+    /// resize/recreate or live wait, route through here.
+    void deviceWaitIdle();
+
     [[nodiscard]] uint64_t totalSubmissions() const noexcept {
         return m_totalSubmissions.load(std::memory_order_relaxed);
     }

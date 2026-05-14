@@ -52,12 +52,6 @@ ProgramMonitor::ProgramMonitor(QWidget* parent)
     : QWidget(parent)
 {
     setFocusPolicy(Qt::StrongFocus);
-    setAutoFillBackground(true);
-    {
-        QPalette p = palette();
-        p.setColor(QPalette::Window, Theme::colors().surface0);
-        setPalette(p);
-    }
     setupUI();
 
     m_pollTimer = new QTimer(this);
@@ -110,21 +104,17 @@ void ProgramMonitor::setupUI()
     mainLayout->setContentsMargins(0, 0, 0, 0);
     mainLayout->setSpacing(0);
 
-    // Use a native viewport container on all platforms so that the Vulkan
-    // child HWND (createWindowContainer) is properly clipped during live
-    // resize.  Without this, the native child window can appear at its old
-    // position while the widget is already at the new size, producing visible
-    // ghosting ("multiple versions repeating itself").
+#ifdef _WIN32
+    // Windows currently forces CPU viewport rendering in Program Monitor.
+    // Keep the viewport container as a regular QWidget (non-native) to avoid
+    // child-window z-order artifacts after dock/tab rearrangement.
+    const bool useNativeViewportContainer = false;
+#else
     const bool useNativeViewportContainer = true;
+#endif
 
     // ── Viewport (same pattern as SourceMonitor: QStackedLayout container) ──
     auto* viewContainer = new QWidget(this);
-    viewContainer->setAutoFillBackground(true);
-    {
-        QPalette vp = viewContainer->palette();
-        vp.setColor(QPalette::Window, Theme::colors().surface0);
-        viewContainer->setPalette(vp);
-    }
     if (useNativeViewportContainer) {
         viewContainer->setAttribute(Qt::WA_NativeWindow);
         viewContainer->winId(); // force native HWND so it clips Vulkan child
@@ -183,10 +173,13 @@ void ProgramMonitor::setupUI()
 
     mainLayout->addWidget(viewContainer, 1); // stretch=1
 
-    // Safe mode banner deleted in P2 of CLAUDE_IMPROVEMENT_PLAN.
     // Spacer between viewport and controls — prevents video spill
     auto* viewSpacer = new QWidget(this);
-    rt::UiScale::setScaledFixedHeight(viewSpacer, 4);
+    rt::UiScale::setScaledFixedHeight(viewSpacer, 8);
+    if (useNativeViewportContainer) {
+        viewSpacer->setAttribute(Qt::WA_NativeWindow);
+        viewSpacer->winId();
+    }
     viewSpacer->setStyleSheet(QStringLiteral(
         "QWidget { background: %1; }")
         .arg(Theme::hex(Theme::colors().surface0)));
@@ -454,8 +447,9 @@ void ProgramMonitor::setupUI()
     });
 
     mainLayout->addWidget(controlBar);
+    mainLayout->addSpacing(rt::UiScale::px(4));   // gap between control bar and mini-timeline
 
-    // ── Mini-timeline scrub bar ─────────────────────────────────────────
+    // Give the mini-timeline a distinct background so it's clearly visible
     m_miniTimeline->setMinimumHeight(rt::UiScale::px(56));
     mainLayout->addWidget(m_miniTimeline);
 
