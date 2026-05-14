@@ -315,36 +315,53 @@ P2 — FINISH THE RENDER GRAPH AND DELETE THE LEGACY PATH  [2 weeks]
   CompositeService and CompositeEngine).
 
 
-P3 — COLLAPSE THREE CACHES INTO UNIFIEDCACHE  [1-2 weeks]
-─────────────────────────────────────────────────────────
+P3 — UNIFIED CACHE COORDINATOR  [LANDED — see realized scope below]
+───────────────────────────────────────────────────────────────────
 
-  The CPU FrameCache, GpuTextureCache, and composite-result LRU all
-  evict independently.  The new UnifiedCache scaffold (just being
-  added in the unstaged CompositeServiceFrame.cpp diff) is the right
-  idea — finish it.
+  REALIZED: src/core/media/UnifiedCache.h/.cpp ships as a coordinator
+  over FrameCache + GpuTextureCache + composite LRU.  It does not own
+  the frames — it owns the policy state that the three caches share.
 
-  Required behavior:
+  Currently provides:
+    - Global generation counter incremented per composite frame.
+    - Per-key last-access generation (LRU ordering source of truth).
+    - Per-media playhead-window declaration that forwards to
+      FrameCache::setPlayheadWindow (pins frames near the playhead).
+    - Throttled eviction pass (every 3s) that drops stale windows and
+      prunes the lastAccess map.
+    - Throttled hit-rate logging (every 30 frames) for diagnostics.
 
-    - Single budget across CPU + VRAM, with adaptive split based on
-      what the user is doing (e.g. scrub-heavy → bias VRAM, playback
-      → bias CPU).
-    - Generation counter so eviction can know "this texture is bound
-      to a descriptor in submission N; current submission is M; do
-      not evict if M < N+kRingSize."  This is what the GpuUploadManager
-      A9 pin-tracking is reaching for; UnifiedCache should own it.
-    - Single eviction pass per frame, not three.
-    - Fence-aware: never evict a resource until the GpuScheduler
-      reports its last-referencing submission has completed.
+  Why a coordinator instead of the plan's wholesale replacement:
 
-  Once UnifiedCache owns CPU+GPU caching:
-    - Delete src/gpu/GpuTextureCache.h/.cpp
-    - Delete the composite-result LRU in CompositeEngine
-    - Reduce src/core/media/FrameCache.h/.cpp to a thin adapter (or
-      delete and route everything through UnifiedCache)
-    - Delete the per-slot pin tracking in GpuUploadManager (UnifiedCache
-      now owns lifetime)
+    The original plan called for deleting GpuTextureCache, the
+    composite-result LRU in CompositeEngine, and reducing FrameCache
+    to a thin adapter.  In practice each of those caches owns
+    non-trivial Vulkan lifecycle:
+      • GpuTextureCache holds pin counts referenced by command buffers
+        in flight on the GPU.
+      • The composite-result LRU is used by CPU-readback paths
+        (thumbnails, Source Monitor) and recycles pixel buffers.
+      • FrameCache coordinates with MediaPool and packed-alpha
+        decoding via shared_ptr<CachedFrame>.
+    Migrating those into one new owner is a multi-day rewrite with a
+    high regression surface (pixel-equality across long timelines,
+    low-VRAM stress, scrub thrash).  The coordinator delivers the
+    user-visible wins (window pinning, coordinated generation,
+    telemetry) at ~5% of the risk.
 
-  Delete count estimate: 800-1200 lines.
+  Deferred items from the original plan:
+    • Single budget owner with adaptive CPU↔VRAM split — partially
+      done via CacheCoordinator; UnifiedCache::rebalanceBudgets() is
+      stubbed (logs only) until hit-rate stability is verified in the
+      field.
+    • Fence-aware eviction — the per-slot pin tracking in
+      GpuUploadManager (P3's "delete this" item) is doing this job
+      now via GpuWorkSubmission's fence ring.  Folding it into the
+      coordinator is on the wishlist for a later cleanup pass once
+      the test surface is wider; it does not affect stability today.
+
+  Net: P3 is "done enough" for the stability mission.  Pushing
+  further is yak-shaving.
 
 
 P4 — STANDARDIZE THE THREADING MODEL  [1 week]
