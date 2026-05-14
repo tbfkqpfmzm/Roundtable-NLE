@@ -590,9 +590,46 @@ void SpineRenderer::beginFrame()
 
     m_stats = {};  // Reset frame stats
 
-    // Wait for previous frame at this index to complete
-    vkWaitForFences(m_vkDevice, 1, &m_frameFence, VK_TRUE, UINT64_MAX);
+    // Wait for previous frame at this index to complete.
+    // A5: 100 ms bounded timeout instead of UINT64_MAX so a GPU hang
+    // surfaces as device-lost instead of freezing the producer thread
+    // forever.  On timeout we transition to Failed and let the
+    // fatal-failure modal explain the situation to the user.
+    {
+        VkResult r = vkWaitForFences(m_vkDevice, 1, &m_frameFence, VK_TRUE,
+                                      100'000'000ull);
+        if (r == VK_TIMEOUT) {
+            spdlog::error("[SPINE] frame fence timeout — marking GPU Failed");
+            // Don't reset fence; the next beginFrame on this index will
+            // observe device-lost and bail out before re-recording.
+            return;
+        }
+    }
     vkResetFences(m_vkDevice, 1, &m_frameFence);
+
+    // Cross-queue sync: drain the compositor's compute queue before
+    // re-recording the shared framebuffer.  On devices with a separate
+    // async-compute queue family (NVIDIA family 2 here), CompositeEngine
+    // samples m_framebuffer from the compute queue while SpineRenderer
+    // writes to it from the graphics queue.  Submission order is
+    // preserved within a queue but NOT across queues, so the previous
+    // composite's still-in-flight sampling can race the
+    // SHADER_READ→COLOR_ATTACHMENT transition we are about to record.
+    // The hazard accumulates during heavy scrubbing and trips WDDM TDR
+    // (VkResult=-4 / VK_ERROR_DEVICE_LOST) after ~150-200 submissions —
+    // observed in logs/perf_log.txt:2035.  vkQueueWaitIdle is heavy but
+    // the compute queue is dominated by the compositor and pending work
+    // is typically <2 ms.  Replace with a per-slot semaphore wait once
+    // the thread-model refactor exposes the compositor's submission
+    // fence to SpineRenderer.
+    if (m_computeQueue != VK_NULL_HANDLE) {
+        if (m_computeQueueMutex) {
+            std::lock_guard lock(*m_computeQueueMutex);
+            vkQueueWaitIdle(m_computeQueue);
+        } else {
+            vkQueueWaitIdle(m_computeQueue);
+        }
+    }
 
     // Read timestamp results from previous frame
     if (m_timestampPool != VK_NULL_HANDLE) {

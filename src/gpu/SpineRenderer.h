@@ -150,6 +150,18 @@ public:
     /// shares the graphics queue with the main thread.
     void setQueueMutex(std::mutex* mtx) noexcept { m_queueMutex = mtx; }
 
+    /// Register the compositor's compute queue so beginFrame() can drain
+    /// any in-flight compute work that may still be sampling the shared
+    /// framebuffer.  Required when the device exposes a separate
+    /// async-compute queue family (e.g. NVIDIA family 2): the compositor
+    /// samples m_framebuffer from the compute queue while Spine writes to
+    /// it from the graphics queue, and the two are otherwise unordered.
+    /// Pass VK_NULL_HANDLE / nullptr to disable.
+    void setComputeQueue(VkQueue q, std::mutex* mtx) noexcept {
+        m_computeQueue = q;
+        m_computeQueueMutex = mtx;
+    }
+
     // ── Texture management ──────────────────────────────────────────────
 
     /// Upload an atlas PNG texture from CPU pixel data.
@@ -271,6 +283,12 @@ private:
     VmaAllocator  m_vmaAllocator{nullptr};
     CommandPool*  m_cmdPool{nullptr};
     std::mutex*   m_queueMutex{nullptr};  ///< Optional: lock around vkQueueSubmit
+
+    // Compositor's compute queue.  Used by beginFrame() to drain in-flight
+    // compute work before transitioning the shared framebuffer back to
+    // COLOR_ATTACHMENT — see setComputeQueue() doc.
+    VkQueue       m_computeQueue{VK_NULL_HANDLE};
+    std::mutex*   m_computeQueueMutex{nullptr};
 
     // Pipelines (one per blend mode)
     PipelineManager     m_pipelineMgr;
