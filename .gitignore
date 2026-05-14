@@ -63,6 +63,7 @@ assets/Converted/
 **/checkpoints/
 
 # Runtime logs and build output
+logs/
 launch_*.txt
 perf_log*.txt
 cut_over.txt
