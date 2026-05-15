@@ -13,10 +13,15 @@
  *   3. Log crash info to a file for later analysis
  *
  * Usage:
- *   CrashHandler::install("%LOCALAPPDATA%/ROUNDTABLE/logs/");
+ *   CrashHandler::install("<install_dir>/logs/");
  *   CrashHandler::setEmergencySaveCallback([&]{
  *       autoSave.saveNow();
  *   });
+ *
+ * Log location: alongside the executable in a "logs/" subfolder.
+ * The installer reserves that folder with user-modify ACLs so non-admin
+ * users on Program Files installs can still write crash dumps.  Never
+ * use %LOCALAPPDATA% — logs must be easy for users to find and share.
  *
  * The crash handler is a global singleton since OS exception handling
  * requires static function pointers.

@@ -81,6 +81,11 @@ public:
     explicit ExportPanel(QWidget* parent = nullptr);
     ~ExportPanel() override;
 
+    /// True while the render queue worker thread is processing a job.
+    /// Used by MainWindow::closeEvent to prompt before tearing down the
+    /// app and silently cancelling the user's export.
+    [[nodiscard]] bool isExporting() const noexcept;
+
     // ── Configuration ───────────────────────────────────────────────────
 
     /// Set the timeline and compositor used for rendering.

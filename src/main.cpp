@@ -110,7 +110,18 @@ int main(int argc, char* argv[])
             file_sink
                 ? spdlog::sinks_init_list{console_sink, file_sink}
                 : spdlog::sinks_init_list{console_sink});
-        logger->set_level(spdlog::level::info);
+
+        // Release builds default to `warn` so the 891+ spdlog::info calls
+        // on the happy path don't flood perf_log.txt / the console.
+        // Override with ROUNDTABLE_LOG_LEVEL=trace|debug|info|warn|err|off
+        // for support-channel bug reports.
+        auto logLevel = spdlog::level::warn;
+        if (const char* env = std::getenv("ROUNDTABLE_LOG_LEVEL")) {
+            auto parsed = spdlog::level::from_str(env);
+            if (parsed != spdlog::level::off || std::string(env) == "off")
+                logLevel = parsed;
+        }
+        logger->set_level(logLevel);
         logger->set_pattern("[%H:%M:%S.%e] [%^%l%$] %v");
         logger->flush_on(spdlog::level::warn);
         spdlog::set_default_logger(logger);

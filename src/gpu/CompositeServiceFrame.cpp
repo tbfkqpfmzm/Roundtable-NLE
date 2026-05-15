@@ -141,6 +141,10 @@ try
             std::lock_guard lg(m_lastCompositeMtx);
             m_lastGoodComposite.reset();
             m_lastGoodCompositeTick = -1;
+            // Match invalidateCacheDirect(): re-arm the A1 settle window
+            // so post-invalidation views get the same first-view grace.
+            m_lastFullCompositeAt = std::chrono::steady_clock::time_point{};
+            m_lastFullLayerCount  = 0;
         }
     }
 
@@ -334,10 +338,11 @@ try
     // ── A1: Settle-window fallback (Premiere-style hold) ─────────────────
     // If we resolved FEWER layers than the active clip count, the composite
     // would render with missing layers — the visible "layers build up over
-    // several frames" symptom.  Hold the prior complete composite for up to
-    // kSettleWindowMs ms instead.  After that timeout, accept the partial
-    // composite so we don't freeze indefinitely if a clip is permanently
-    // unresolvable (e.g. missing media file).
+    // several frames" symptom.  Hold the prior complete composite (or, on
+    // first view when there's no prior, return an empty sentinel so the
+    // viewport stays clear) for up to kSettleWindowMs ms.  After that
+    // timeout, accept the partial composite so we don't freeze indefinitely
+    // if a clip is permanently unresolvable (e.g. missing media file).
     //
     // Skip during scrub (the user wants immediate feedback on every drag
     // step, partial frames are fine) and during export (forceFullResolution,
@@ -349,25 +354,41 @@ try
         const auto now = steady_clock::now();
         std::shared_ptr<CachedFrame> hold;
         bool withinSettle = false;
+        bool firstView = false;
         {
             std::lock_guard lg(m_lastCompositeMtx);
-            if (m_lastGoodComposite && m_lastFullCompositeAt.time_since_epoch().count() != 0)
-            {
-                const auto elapsed = duration_cast<milliseconds>(
-                    now - m_lastFullCompositeAt).count();
-                if (elapsed < kSettleWindowMs) {
-                    hold = m_lastGoodComposite;
-                    withinSettle = true;
-                }
+            // First-view init: arm the settle clock on the first observation
+            // of an incomplete composite.  Without this, the very first
+            // composite at startup (or after cache invalidation) finds
+            // m_lastFullCompositeAt at its default (epoch 0), skips the
+            // settle entirely, and the user sees layers pop in one by one
+            // while the cold NVDEC decoders open.
+            if (m_lastFullCompositeAt.time_since_epoch().count() == 0) {
+                m_lastFullCompositeAt = now;
+                firstView = true;
+            }
+            const auto elapsed = duration_cast<milliseconds>(
+                now - m_lastFullCompositeAt).count();
+            if (elapsed < kSettleWindowMs) {
+                hold = m_lastGoodComposite;   // may be null on first view
+                withinSettle = true;
             }
         }
-        if (withinSettle && hold) {
+        if (withinSettle) {
             static int s_settleLog = 0;
-            if (++s_settleLog % 30 == 0) {
-                spdlog::info("[SETTLE] tick={} resolved={}/{} — holding prior composite",
-                             tick, layers.size(), clipsAtTick);
+            if (++s_settleLog % 30 == 0 || firstView) {
+                spdlog::info("[SETTLE] tick={} resolved={}/{} — {}",
+                             tick, layers.size(), clipsAtTick,
+                             hold ? "holding prior composite"
+                                  : "first-view, returning empty sentinel");
             }
-            return hold;
+            if (hold) return hold;
+            // No prior composite — return an empty sentinel.  The pipeline
+            // treats width==0 as "clear viewport" and the next tick will
+            // re-composite (poll timer / settle counter forces re-render).
+            // By kSettleWindowMs the prefetch workers should have decoded
+            // enough first frames that layers.size() == clipsAtTick.
+            return std::make_shared<CachedFrame>();
         }
     }
 
@@ -415,6 +436,11 @@ try
             std::lock_guard lg(m_lastCompositeMtx);
             m_lastGoodComposite.reset();
             m_lastGoodCompositeTick = -1;
+            // Re-arm the A1 settle window: the next composite at this
+            // tick (after prefetches land) gets the first-view grace
+            // instead of accepting another partial right away.
+            m_lastFullCompositeAt = std::chrono::steady_clock::time_point{};
+            m_lastFullLayerCount  = 0;
             return emptyFrame;
         }
     }
@@ -462,6 +488,24 @@ try
                                             effectLayerCount, effectPassCount,
                                             transitionCount);
         if (gpuResult) {
+            // Wire up the A1 settle-window bookkeeping declared in
+            // CompositeService.h.  Without this assignment the settle
+            // check above never had a prior composite to hold, so the
+            // user saw layers building one-by-one on every cold view.
+            // Only bump m_lastFullCompositeAt when the composite was
+            // COMPLETE (resolved layer count covers every active clip);
+            // partial composites still update m_lastGoodComposite so the
+            // pipeline has something to fall back on, but the settle
+            // window stays anchored to the last truly full frame.
+            std::lock_guard lg(m_lastCompositeMtx);
+            m_lastGoodComposite     = gpuResult;
+            m_lastGoodCompositeTick = tick;
+            if (clipsAtTick == 0 ||
+                static_cast<int>(layers.size()) >= clipsAtTick)
+            {
+                m_lastFullCompositeAt = std::chrono::steady_clock::now();
+                m_lastFullLayerCount  = static_cast<int>(layers.size());
+            }
             return gpuResult;
         }
     }

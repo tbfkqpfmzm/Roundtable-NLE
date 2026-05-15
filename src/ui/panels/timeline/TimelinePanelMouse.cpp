@@ -159,16 +159,31 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
             bool isShift = event->modifiers() & Qt::ShiftModifier;
 
             // If clicking on an already-selected clip WITHOUT shift,
-            // preserve the multi-selection (so we can drag all selected clips).
-            // Only re-select when clicking an unselected clip.
+            // defer the decision: if the user drags, move all selected clips;
+            // if the user releases without moving, select just this one clip
+            // (Premiere Pro behaviour).
             bool alreadySelected = m_selection.isSelected(*hitRef);
             if (isShift) {
                 m_selection.toggleClip(*hitRef);
-            } else if (!alreadySelected) {
-                m_selection.clear();
-                m_selection.selectClip(*hitRef, false);
+                emit selectionChanged();
+                // Shift-click only toggles selection - don't initiate drag/trim
+                m_dragMode = DragMode::None;
+                event->accept();
+                return;
             }
-            // else: already selected, no shift â†’ keep existing selection
+
+            if (alreadySelected) {
+                // Defer: keep multi-selection for potential drag,
+                // wait for release to decide click vs drag.
+                m_dragClipRef = *hitRef;
+                m_dragMode = DragMode::PendingClipClick;
+                event->accept();
+                return;
+            }
+
+            // Not already selected - immediately select just this clip
+            m_selection.clear();
+            m_selection.selectClip(*hitRef, false);
             emit selectionChanged();
 
             // Emit clipSelected so the Properties Panel updates
@@ -177,13 +192,6 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
                 size_t clipIdx = trk->findClipIndexById(hitRef->clipId);
                 if (clipIdx < trk->clipCount())
                     emit clipSelected(hitRef->trackIndex, clipIdx);
-            }
-
-            // Shift-click only toggles selection â€” don't initiate drag/trim
-            if (isShift) {
-                m_dragMode = DragMode::None;
-                event->accept();
-                return;
             }
 
             // Determine drag mode

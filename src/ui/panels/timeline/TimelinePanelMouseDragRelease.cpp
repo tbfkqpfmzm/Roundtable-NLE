@@ -26,9 +26,17 @@ void TimelinePanel::mouseReleaseEvent(QMouseEvent* event)
     if (m_dragMode == DragMode::ClipMove && m_timeline && !m_dragSelectedClips.empty()) {
         // ── Ghost track: create a new track if the user released in the ghost zone ──
         size_t newTrackIndex = SIZE_MAX;
+        float sourceTrackHeight = 80.0f;
         if (m_ghostTrackVisible) {
+            // Copy height from the source track of the primary dragged clip
+            {
+                size_t srcTrackIdx = m_dragOriginalTrack;
+                if (srcTrackIdx < m_timeline->trackCount())
+                    sourceTrackHeight = m_timeline->track(srcTrackIdx)->height();
+            }
             if (m_ghostTrackIsAbove) {
                 auto newTrack = std::make_unique<Track>(TrackType::Video, "");
+                newTrack->setHeight(sourceTrackHeight);
                 auto* ptr = newTrack.get();
                 (void)ptr;
                 m_timeline->insertTrack(0, std::move(newTrack));
@@ -40,6 +48,7 @@ void TimelinePanel::mouseReleaseEvent(QMouseEvent* event)
                 m_dragOriginalTrack += 1;
             } else {
                 Track* at = m_timeline->addAudioTrack("");
+                at->setHeight(sourceTrackHeight);
                 (void)at;
                 newTrackIndex = m_timeline->trackCount() - 1;
             }
@@ -253,7 +262,13 @@ void TimelinePanel::mouseReleaseEvent(QMouseEvent* event)
         if (m_ghostOverlay) m_ghostOverlay->hide();
 
         if (didMove) {
-            rebuildTracks();
+            if (newTrackIndex != SIZE_MAX) {
+                // Ghost track was inserted — add one widget incrementally
+                // instead of full rebuildTracks() to avoid the blank flash.
+                insertTrackWidgetIncremental(newTrackIndex);
+            } else {
+                rebuildTracks();
+            }
             emit selectionChanged();
         }
     }
@@ -295,6 +310,31 @@ void TimelinePanel::mouseReleaseEvent(QMouseEvent* event)
                 track, m_transTrimIndex, t);
             if (cmd) executeCommand(std::move(cmd));
         }
+    }
+
+    // ── PendingClipClick: user clicked an already-selected clip without dragging ──
+    if (m_dragMode == DragMode::PendingClipClick) {
+        // Select just the clicked clip (Premiere Pro behaviour)
+        m_selection.clear();
+        m_selection.selectClip(m_dragClipRef, false);
+        emit selectionChanged();
+        // Emit clipSelected so panels update
+        Track* trk = m_timeline ? m_timeline->track(m_dragClipRef.trackIndex) : nullptr;
+        if (trk) {
+            size_t clipIdx = trk->findClipIndexById(m_dragClipRef.clipId);
+            if (clipIdx < trk->clipCount())
+                emit clipSelected(m_dragClipRef.trackIndex, clipIdx);
+        }
+    }
+
+    // ── PendingMarquee without drag: clear selection on empty-space click ──
+    if (m_dragMode == DragMode::PendingMarquee) {
+        m_selection.clear();
+        m_selectedTransitionTrack = SIZE_MAX;
+        m_selectedTransitionIndex = SIZE_MAX;
+        for (size_t w = 0; w < m_trackWidgets.size(); ++w)
+            m_trackWidgets[w]->setSelectedTransition(SIZE_MAX);
+        emit selectionChanged();
     }
 
     // ── Reset all drag-related state ─────────────────────────────────────

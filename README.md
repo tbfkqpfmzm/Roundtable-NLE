@@ -1,4 +1,6 @@
-# ROUNDTABLE NLE v0.13
+# ROUNDTABLE NLE
+
+[![Latest Release](https://img.shields.io/github/v/release/ROUNDTABLE-TALK/roundtable?label=latest&color=blue)](https://github.com/ROUNDTABLE-TALK/roundtable/releases/latest)
 
 **GPU-accelerated non-linear video editor — built for Spine animation workflows.**
 

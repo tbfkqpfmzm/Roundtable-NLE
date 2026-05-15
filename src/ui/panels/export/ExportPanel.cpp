@@ -57,6 +57,11 @@ ExportPanel::ExportPanel(QWidget* parent)
     connect(m_pollTimer, &QTimer::timeout, this, &ExportPanel::onPollProgress);
 }
 
+bool ExportPanel::isExporting() const noexcept
+{
+    return m_renderQueue && m_renderQueue->isRunning();
+}
+
 ExportPanel::~ExportPanel()
 {
     m_destroying.store(true);

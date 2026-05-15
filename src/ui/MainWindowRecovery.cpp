@@ -63,7 +63,11 @@
 #include <QFileInfo>
 #include <QFrame>
 #include <QAbstractButton>
+#include <QClipboard>
 #include <QCoreApplication>
+#include <QDesktopServices>
+#include <QDialog>
+#include <QGuiApplication>
 #include <QKeyEvent>
 #include <QMenuBar>
 #include <QInputDialog>
@@ -72,10 +76,15 @@
 #include <QSettings>
 #include <QStackedWidget>
 #include <QStatusBar>
+#include <QUrl>
+#include <QUrlQuery>
 #include <QButtonGroup>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
+#include <QVBoxLayout>
+
+#include "../version.h"
 #include <QTabBar>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -263,27 +272,106 @@ void MainWindow::checkCrashRecovery()
 
     // ── Phase 7.A: Crash marker recovery ───────────────────────────────
     // Check if ROUNDTABLE crashed on the previous launch.  If so, show a
-    // dialog offering to reset dock layout and workspace to safe defaults.
+    // dialog offering to reset dock layout and workspace to safe defaults
+    // plus three help-the-user actions: copy error, open logs folder,
+    // and report on GitHub with a pre-filled issue.
     if (CrashHandler::hasCrashMarker()) {
         auto crashInfo = CrashHandler::readCrashMarker();
         spdlog::warn("Crash marker detected: {}", crashInfo.summary);
 
-        QString crashMsg =
+        const QString summary = QString::fromStdString(crashInfo.summary);
+        const QString stack   = QString::fromStdString(crashInfo.stackTrace);
+        const QString logDir  = QString::fromStdString(
+            CrashHandler::crashDirectory().string());
+
+        QDialog dlg(this);
+        dlg.setWindowTitle(QStringLiteral("Crash Recovery"));
+        auto* vbox = new QVBoxLayout(&dlg);
+
+        auto* msg = new QLabel(
             QStringLiteral("ROUNDTABLE crashed on the last launch.\n\n"
                            "Crash details: %1\n\n"
                            "Would you like to reset the dock layout and workspace "
                            "to safe defaults?\n\n"
                            "• Reset & Continue — clears GPU cache, resets layout,\n"
                            "  and starts with GPU acceleration disabled.\n"
-                           "• Continue — tries to restore your previous session.\n")
-                .arg(QString::fromStdString(crashInfo.summary));
+                           "• Continue — tries to restore your previous session.")
+                .arg(summary),
+            &dlg);
+        msg->setWordWrap(true);
+        vbox->addWidget(msg);
 
-        auto reply = QMessageBox::question(
-            this, QStringLiteral("Crash Recovery"),
-            crashMsg,
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+        auto* infoRow = new QHBoxLayout;
+        auto* copyBtn      = new QPushButton(QStringLiteral("Copy Error Message"), &dlg);
+        auto* openLogsBtn  = new QPushButton(QStringLiteral("Open Logs Folder"), &dlg);
+        auto* reportBtn    = new QPushButton(QStringLiteral("Report on GitHub"), &dlg);
+        infoRow->addWidget(copyBtn);
+        infoRow->addWidget(openLogsBtn);
+        infoRow->addWidget(reportBtn);
+        vbox->addLayout(infoRow);
 
-        if (reply == QMessageBox::Yes) {
+        auto* actionRow = new QHBoxLayout;
+        auto* resetBtn = new QPushButton(QStringLiteral("Reset && Continue"), &dlg);
+        auto* contBtn  = new QPushButton(QStringLiteral("Continue"), &dlg);
+        resetBtn->setDefault(true);
+        actionRow->addStretch();
+        actionRow->addWidget(resetBtn);
+        actionRow->addWidget(contBtn);
+        vbox->addLayout(actionRow);
+
+        // Format the error text once for both clipboard and report flows.
+        const QString errorText = QStringLiteral("Crash: %1\n\nStack trace:\n%2")
+                                      .arg(summary, stack);
+
+        QObject::connect(copyBtn, &QPushButton::clicked, [&, errorText]() {
+            QGuiApplication::clipboard()->setText(errorText);
+            copyBtn->setText(QStringLiteral("Copied!"));
+        });
+
+        QObject::connect(openLogsBtn, &QPushButton::clicked, [logDir]() {
+            QDesktopServices::openUrl(QUrl::fromLocalFile(logDir));
+        });
+
+        QObject::connect(reportBtn, &QPushButton::clicked, [&, errorText, summary, logDir]() {
+            const QString desc = QInputDialog::getMultiLineText(
+                &dlg, QStringLiteral("Report Crash on GitHub"),
+                QStringLiteral("What were you doing when ROUNDTABLE crashed?\n"
+                               "(Optional, but very helpful.)"),
+                QString());
+            if (desc.isNull()) return;  // user cancelled
+
+            // Copy the full crash log so the user can paste it into the issue.
+            QGuiApplication::clipboard()->setText(errorText);
+
+            QString title = QStringLiteral("Crash: %1").arg(summary);
+            if (title.length() > 80) title = title.left(77) + QStringLiteral("...");
+
+            const QString body = QStringLiteral(
+                "**What were you doing when it crashed?**\n%1\n\n"
+                "**Crash log (copied to your clipboard — press Ctrl+V below):**\n\n"
+                "<!-- Paste the full crash log here. -->\n\n"
+                "---\n"
+                "Roundtable %2\n"
+                "Logs folder: %3")
+                .arg(desc.isEmpty() ? QStringLiteral("(no description)") : desc,
+                     QString::fromLatin1(ROUNDTABLE_VERSION),
+                     logDir);
+
+            QUrl url(QStringLiteral("https://github.com/ROUNDTABLE-TALK/roundtable/issues/new"));
+            QUrlQuery q;
+            q.addQueryItem(QStringLiteral("title"),  title);
+            q.addQueryItem(QStringLiteral("body"),   body);
+            q.addQueryItem(QStringLiteral("labels"), QStringLiteral("crash"));
+            url.setQuery(q);
+            QDesktopServices::openUrl(url);
+        });
+
+        QObject::connect(resetBtn, &QPushButton::clicked, [&]() { dlg.done(QDialog::Accepted); });
+        QObject::connect(contBtn,  &QPushButton::clicked, [&]() { dlg.done(QDialog::Rejected); });
+
+        const bool resetChosen = (dlg.exec() == QDialog::Accepted);
+
+        if (resetChosen) {
             spdlog::info("Crash recovery: user chose to reset layout");
 
             // ── Reset dock layout to defaults ──────────────────────────

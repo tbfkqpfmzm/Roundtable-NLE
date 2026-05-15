@@ -147,6 +147,11 @@ public:
     /// Refresh all track widgets from the data model.
     void rebuildTracks();
 
+    /// Incremental track insertion — creates a header + widget for one new
+    /// track without destroying existing widgets.  Avoids the blank flash
+    /// that full rebuildTracks() causes.
+    void insertTrackWidgetIncremental(size_t trackIndex);
+
     /// Lightweight refresh — updates waveform/thumbnail caches and repaints
     /// track widgets WITHOUT destroying and recreating them.  Use this for
     /// edits that don't change the number or order of tracks (splits,
@@ -431,7 +436,8 @@ private:
     // Drag state
     enum class DragMode { None, ClipMove, ClipTrimHead, ClipTrimTail,
                           PendingMarquee, MarqueeSelect, RollingEdit,
-                          SlipTool, SlideTool, TransitionTrim };
+                          SlipTool, SlideTool, TransitionTrim,
+                          PendingClipClick };
     DragMode  m_dragMode{DragMode::None};
     QPointF   m_dragStart;
     QPointF   m_marqueeEnd;   // Current endpoint during marquee drag

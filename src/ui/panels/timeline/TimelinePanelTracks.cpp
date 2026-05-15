@@ -21,6 +21,7 @@
 #include <QScrollBar>
 #include <QTimer>
 #include <QPointer>
+#include <QBoxLayout>
 
 #include <spdlog/spdlog.h>
 
@@ -621,6 +622,224 @@ void TimelinePanel::rebuildTracks()
     setUpdatesEnabled(true);
     updateGeometry();
     repaint();
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  insertTrackWidgetIncremental
+// ═════════════════════════════════════════════════════════════════════════════
+
+void TimelinePanel::insertTrackWidgetIncremental(size_t trackIndex)
+{
+    if (!m_timeline || trackIndex >= m_timeline->trackCount()) return;
+
+    Track* track = m_timeline->track(trackIndex);
+    if (!track) return;
+
+    auto* headerLayout = m_trackHeaderArea->layout();
+    auto* trackLayout  = m_trackContentArea->layout();
+    if (!headerLayout || !trackLayout) return;
+
+    // Renumber all tracks so V/A numbering stays correct after insertion
+    {
+        std::vector<size_t> videoIndices, audioIndices;
+        for (size_t i = 0; i < m_timeline->trackCount(); ++i) {
+            Track* t = m_timeline->track(i);
+            if (t->isDivider()) continue;
+            if (t->type() == TrackType::Video) videoIndices.push_back(i);
+            else                                audioIndices.push_back(i);
+        }
+        for (size_t vi = 0; vi < videoIndices.size(); ++vi) {
+            Track* t = m_timeline->track(videoIndices[vi]);
+            t->setName("V" + std::to_string(videoIndices.size() - vi));
+        }
+        for (size_t ai = 0; ai < audioIndices.size(); ++ai) {
+            Track* t = m_timeline->track(audioIndices[ai]);
+            const std::string& cur = t->name();
+            bool isAutoName = cur.empty()
+                || (cur.size() >= 2 && cur[0] == 'A'
+                    && std::all_of(cur.begin() + 1, cur.end(), ::isdigit));
+            if (isAutoName) {
+                t->setName("A" + std::to_string(ai + 1));
+            }
+        }
+    }
+
+    // Refresh existing headers that were renamed
+    for (size_t i = 0; i < m_trackHeaders.size(); ++i) {
+        if (m_trackHeaders[i]) {
+            m_trackHeaders[i]->setTrack(m_timeline->track(i), i);
+            m_trackHeaders[i]->update();
+        }
+    }
+    // Refresh existing track widgets with updated track index
+    for (size_t i = 0; i < m_trackWidgets.size(); ++i) {
+        if (m_trackWidgets[i]) {
+            m_trackWidgets[i]->setTrack(m_timeline->track(i), i);
+            m_trackWidgets[i]->update();
+        }
+    }
+
+    float h = track->height();
+    if (h < 1.0f) h = 80.0f;
+
+    // Create new header
+    auto* header = new TrackHeader(m_trackHeaderArea);
+    header->setTrack(track, trackIndex);
+    header->setHeight(h);
+    header->setFixedWidth(m_headerScroll->width());
+    header->setMouseTracking(true);
+    // Insert into layout before the stretch (stretch is last item)
+    int layoutPos = qMin(static_cast<int>(trackIndex),
+                         headerLayout->count() - 1);
+    static_cast<QBoxLayout*>(headerLayout)->insertWidget(layoutPos, header);
+    m_trackHeaders.insert(m_trackHeaders.begin() + static_cast<ptrdiff_t>(trackIndex), header);
+
+    // Create new track widget
+    auto* tw = new TimelineTrackWidget(m_trackContentArea);
+    tw->setLayoutEngine(&m_layoutEngine);
+    tw->setTrack(track, trackIndex);
+    tw->setFixedHeight(static_cast<int>(h));
+    tw->setWaveformCache(&m_waveformPeaks);
+    tw->setThumbnailCache(&m_thumbnailCache);
+    tw->setAnimVideoCache(m_animVideoCache);
+    if (m_timeline) {
+        tw->setInOutPoints(m_timeline->inPoint(), m_timeline->outPoint());
+    }
+    layoutPos = qMin(static_cast<int>(trackIndex),
+                     trackLayout->count() - 1);
+    static_cast<QBoxLayout*>(trackLayout)->insertWidget(layoutPos, tw);
+    m_trackWidgets.insert(m_trackWidgets.begin() + static_cast<ptrdiff_t>(trackIndex), tw);
+
+    // Connect signals (same as rebuildTracks)
+    QObject::connect(header, &TrackHeader::heightChanged,
+        this, [this](size_t trackIdx, float newHeight) {
+        if (!m_timeline || trackIdx >= m_timeline->trackCount()) return;
+        Track* tk = m_timeline->track(trackIdx);
+        tk->setHeight(newHeight);
+        if (trackIdx < m_trackWidgets.size())
+            m_trackWidgets[trackIdx]->setFixedHeight(static_cast<int>(newHeight));
+        if (!tk->isDivider()) {
+            float dh = std::max(8.0f, newHeight * 0.25f);
+            for (size_t di = 0; di < m_timeline->trackCount(); ++di) {
+                Track* dt = m_timeline->track(di);
+                if (!dt || !dt->isDivider()) continue;
+                dt->setHeight(dh);
+                if (di < m_trackHeaders.size() && m_trackHeaders[di])
+                    m_trackHeaders[di]->setHeight(dh);
+                if (di < m_trackWidgets.size() && m_trackWidgets[di])
+                    m_trackWidgets[di]->setFixedHeight(static_cast<int>(dh));
+            }
+        }
+        updateMinHeaderWidth();
+    });
+
+    QObject::connect(header, &TrackHeader::targetToggled,
+        this, [this](size_t trackIdx, bool targeted) {
+        if (!m_timeline || trackIdx >= m_timeline->trackCount()) return;
+        m_timeline->track(trackIdx)->setTargeted(targeted);
+        if (trackIdx < m_trackHeaders.size())
+            m_trackHeaders[trackIdx]->update();
+    });
+
+    auto connectToggle = [&](auto signal, auto setter) {
+        QObject::connect(header, signal, this,
+            [this, setter](size_t trackIdx, bool val) {
+            if (!m_timeline || trackIdx >= m_timeline->trackCount()) return;
+            setter(m_timeline->track(trackIdx), val);
+            if (trackIdx < m_trackHeaders.size())
+                m_trackHeaders[trackIdx]->update();
+            if (trackIdx < m_trackWidgets.size())
+                m_trackWidgets[trackIdx]->update();
+            emit contentChanged();
+        });
+    };
+
+    connectToggle(&TrackHeader::lockToggled, [](Track* t, bool v) { t->setLocked(v); });
+    connectToggle(&TrackHeader::muteToggled, [](Track* t, bool v) { t->setMuted(v); });
+    connectToggle(&TrackHeader::soloToggled, [](Track* t, bool v) { t->setSoloed(v); });
+    connectToggle(&TrackHeader::syncLockToggled, [](Track* t, bool v) { t->setSyncLocked(v); });
+
+    QObject::connect(header, &TrackHeader::collapseToggled,
+        this, [this](size_t trackIdx, bool collapsed) {
+        if (!m_timeline || trackIdx >= m_timeline->trackCount()) return;
+        static constexpr float kCollapsedHeight = 20.0f;
+        Track* t = m_timeline->track(trackIdx);
+        t->setCollapsed(collapsed);
+        float newH = collapsed ? kCollapsedHeight : 60.0f;
+        t->setHeight(newH);
+        if (trackIdx < m_trackHeaders.size())
+            m_trackHeaders[trackIdx]->setHeight(newH);
+        if (trackIdx < m_trackWidgets.size())
+            m_trackWidgets[trackIdx]->setFixedHeight(static_cast<int>(newH));
+        updateMinHeaderWidth();
+    });
+
+    QObject::connect(header, &TrackHeader::addTrackRequested,
+        this, [this](bool video, bool above, size_t nearIndex) {
+        if (above) emit addTrackAbove(nearIndex, video);
+        else       emit addTrackBelow(nearIndex, video);
+    });
+
+    QObject::connect(header, &TrackHeader::deleteTrackRequested,
+        this, [this](size_t trackIdx) {
+        QPointer<TimelinePanel> safeThis(this);
+        QTimer::singleShot(0, this, [safeThis, trackIdx]() {
+            if (!safeThis) return;
+            emit safeThis->deleteTrack(trackIdx);
+        });
+    });
+
+    QObject::connect(header, &TrackHeader::addDividerRequested,
+        this, [this](bool above, size_t nearIdx) {
+        if (!m_timeline) return;
+        size_t insertAt = above ? nearIdx : nearIdx + 1;
+        if (insertAt > m_timeline->trackCount())
+            insertAt = m_timeline->trackCount();
+        QPointer<TimelinePanel> safeThis(this);
+        QTimer::singleShot(0, this, [safeThis, insertAt]() {
+            if (!safeThis || !safeThis->m_timeline) return;
+            safeThis->m_timeline->addDividerTrack(insertAt);
+            safeThis->rebuildTracks();
+        });
+    });
+
+    QObject::connect(header, &TrackHeader::reorderDragStarted,
+        this, [this](size_t srcIdx) {
+        m_reorderSrcIndex = srcIdx;
+        if (m_ghostOverlay) {
+            m_ghostOverlay->reorderMode = true;
+            m_ghostOverlay->raise();
+            m_ghostOverlay->show();
+        }
+    });
+
+    QObject::connect(header, &TrackHeader::reorderDragMoved,
+        this, [this](size_t, const QPoint& gp) {
+        if (m_ghostOverlay && m_ghostOverlay->isVisible())
+            updateReorderOverlay(gp);
+    });
+
+    QObject::connect(header, &TrackHeader::reorderDragFinished,
+        this, [this](size_t srcIdx, const QPoint& gp) {
+        m_reorderSrcIndex = SIZE_MAX;
+        if (m_ghostOverlay) { m_ghostOverlay->reorderMode = false; m_ghostOverlay->hide(); }
+        size_t dst = computeReorderInsertionIndex(gp);
+        if (dst != srcIdx && dst != SIZE_MAX) {
+            if (m_timeline) {
+                auto track = m_timeline->takeTrack(srcIdx);
+                if (track) {
+                    size_t insertAt = dst;
+                    if (dst > srcIdx) --insertAt;
+                    m_timeline->insertTrack(insertAt, std::move(track));
+                    rebuildTracks();
+                }
+            }
+        }
+    });
+
+    emit selectionChanged();
+    updateMinHeaderWidth();
+    updateGeometry();
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

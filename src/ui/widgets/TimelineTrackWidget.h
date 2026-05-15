@@ -75,6 +75,9 @@ public:
     /// Set pointer to animation video cache (for cached-clip color override).
     void setAnimVideoCache(const AnimationVideoCache* cache);
 
+    /// When true, dragged clips are hidden entirely (shown in ghost overlay instead).
+    void setGhostDragActive(bool active) { m_ghostDragActive = active; update(); }
+
     /// Set / clear the effect-drop highlight.  When non-zero, the clip with
     /// this ID gets a darkened overlay + border to indicate an effect is about
     /// to be applied on drop.
@@ -136,6 +139,8 @@ private:
     int64_t                     m_dragPreviewTick{-1};
     int64_t                     m_dragPreviewDuration{0};
     bool                        m_dragPreviewIsAudio{false};
+
+    bool                        m_ghostDragActive{false};
 
     void paintClip(class QPainter& painter, size_t clipIndex);
 };

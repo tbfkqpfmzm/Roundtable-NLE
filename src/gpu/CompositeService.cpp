@@ -211,6 +211,12 @@ void CompositeService::invalidateCacheDirect()
     {
         std::lock_guard lg(m_lastCompositeMtx);
         m_lastGoodComposite.reset();
+        m_lastGoodCompositeTick = -1;
+        // Re-arm the A1 settle window so a project switch / cache flush
+        // gets the same first-view grace as cold startup, instead of
+        // inheriting the previous project's timestamp.
+        m_lastFullCompositeAt = std::chrono::steady_clock::time_point{};
+        m_lastFullLayerCount  = 0;
     }
     m_cacheInvalidateRequested.store(false, std::memory_order_release);
 }
@@ -238,6 +244,12 @@ void CompositeService::requestCacheInvalidationRange(int64_t fromTick, int64_t t
         {
             m_lastGoodComposite.reset();
             m_lastGoodCompositeTick = -1;
+            // The held composite covered the invalidated range, so
+            // re-arm the A1 settle clock too — otherwise the next
+            // partial composite would inherit the stale timestamp
+            // and skip the first-view hold.
+            m_lastFullCompositeAt = std::chrono::steady_clock::time_point{};
+            m_lastFullLayerCount  = 0;
         }
     }
 }

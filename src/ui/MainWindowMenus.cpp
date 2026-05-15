@@ -24,7 +24,9 @@
 
 #include <QApplication>
 #include <QDesktopServices>
+#include <QDir>
 #include <QDockWidget>
+#include <QFileInfo>
 #include <QInputDialog>
 #include <QMenuBar>
 #include <QMessageBox>
@@ -32,6 +34,7 @@
 #include <QSettings>
 #include <QStatusBar>
 #include <QTimer>
+#include <QUrl>
 
 #include <iterator>
 
@@ -566,7 +569,44 @@ void MainWindow::buildHelpMenu(QMenuBar* menuBar)
     auto* menu = menuBar->addMenu("&Help");
     menu->addAction("&Check for Updates...", this, &MainWindow::onCheckForUpdates);
     menu->addSeparator();
+    menu->addAction("Third-Party &Licenses...", this, &MainWindow::onShowThirdPartyLicenses);
     menu->addAction("&About ROUNDTABLE", this, &MainWindow::onAbout);
+}
+
+void MainWindow::onShowThirdPartyLicenses()
+{
+    // Find the licenses doc: prefer the installed copy next to the
+    // executable; fall back to walking up from the exe to find the
+    // dev-tree copy at docs/THIRD_PARTY_LICENSES.md.
+    const QString exeDir = QCoreApplication::applicationDirPath();
+    QString docPath;
+    {
+        const QString installed = exeDir + QStringLiteral("/docs/THIRD_PARTY_LICENSES.md");
+        if (QFileInfo::exists(installed)) {
+            docPath = installed;
+        } else {
+            QDir d(exeDir);
+            for (int i = 0; i < 5 && docPath.isEmpty(); ++i) {
+                const QString candidate = d.absoluteFilePath(
+                    QStringLiteral("docs/THIRD_PARTY_LICENSES.md"));
+                if (QFileInfo::exists(candidate)) {
+                    docPath = candidate;
+                    break;
+                }
+                if (!d.cdUp()) break;
+            }
+        }
+    }
+
+    if (docPath.isEmpty()) {
+        QMessageBox::warning(this, tr("Third-Party Licenses"),
+            tr("Could not find THIRD_PARTY_LICENSES.md.\n\n"
+               "It should be installed alongside roundtable.exe in the "
+               "docs/ subfolder."));
+        return;
+    }
+
+    QDesktopServices::openUrl(QUrl::fromLocalFile(docPath));
 }
 
 void MainWindow::onCheckForUpdates()

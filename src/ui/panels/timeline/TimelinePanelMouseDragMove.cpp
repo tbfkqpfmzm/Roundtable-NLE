@@ -306,6 +306,31 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
         }
         onScrollChanged();
 
+        // Update ghost overlay clip previews when ghost track is visible
+        if (m_ghostTrackVisible && m_ghostOverlay) {
+            std::vector<GhostTrackOverlay::GhostClipPreview> previews;
+            for (const auto& dcs : m_dragSelectedClips) {
+                Track* trk = m_timeline->track(dcs.ref.trackIndex);
+                if (!trk) continue;
+                size_t idx = trk->findClipIndexById(dcs.ref.clipId);
+                if (idx >= trk->clipCount()) continue;
+                const Clip* clip = trk->clip(idx);
+                double px = m_layoutEngine.timeToPixelX(clip->timelineIn());
+                double pw = m_layoutEngine.timeToPixelX(clip->timelineIn() + clip->duration()) - px;
+                if (pw <= 0) continue;
+
+                GhostTrackOverlay::GhostClipPreview gp;
+                gp.x = static_cast<int>(px);
+                gp.width = static_cast<int>(pw);
+                gp.color = dcs.ref.trackIndex < 2 ? 0x4A90D9FF : 0x3CA05AFF;
+                gp.label = QString::fromStdString(clip->label());
+                previews.push_back(gp);
+            }
+            m_ghostOverlay->setClipPreviews(previews);
+        } else if (m_ghostOverlay) {
+            m_ghostOverlay->setClipPreviews({});
+        }
+
         // Sync selection + drag state
         {
             std::vector<std::vector<size_t>> perTrack(m_trackWidgets.size());
@@ -323,6 +348,7 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
             for (size_t ti = 0; ti < m_trackWidgets.size(); ++ti) {
                 m_trackWidgets[ti]->setSelectedClips(perTrack[ti]);
                 m_trackWidgets[ti]->setDraggedClips(perTrack[ti]);
+                m_trackWidgets[ti]->setGhostDragActive(m_ghostTrackVisible && !perTrack[ti].empty());
             }
         }
         break;
@@ -453,6 +479,56 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
         onScrollChanged();
         break;
     }
+    case DragMode::PendingClipClick:
+    {
+        QPointF delta = pos - m_dragStart;
+        if (delta.manhattanLength() < 5.0)
+            break;
+
+        // User started dragging — transition to ClipMove using the
+        // existing multi-selection (which we kept in PendingClipClick).
+        // Build drag state from the clicked clip.
+        {
+            Track* track = m_timeline->track(m_dragClipRef.trackIndex);
+            size_t idx = track->findClipIndexById(m_dragClipRef.clipId);
+            if (idx < track->clipCount()) {
+                const Clip* clip = track->clip(idx);
+                m_dragOriginalIn = clip->timelineIn();
+                m_dragOriginalSourceIn = clip->sourceIn();
+                m_dragOriginalDuration = clip->duration();
+                m_dragOriginalTrack = m_dragClipRef.trackIndex;
+                m_dragMode = DragMode::ClipMove;
+                m_lastClickedEdge.valid = false;
+
+                // Record original positions of ALL selected clips
+                m_dragSelectedClips.clear();
+                m_dragTargetTrack = m_dragClipRef.trackIndex;
+                for (const auto& sel : m_selection.clips()) {
+                    Track* selTrack = m_timeline->track(sel.trackIndex);
+                    if (!selTrack) continue;
+                    size_t si = selTrack->findClipIndexById(sel.clipId);
+                    if (si < selTrack->clipCount()) {
+                        DragClipState dcs;
+                        dcs.ref = sel;
+                        dcs.originalIn = selTrack->clip(si)->timelineIn();
+                        dcs.originalTrack = sel.trackIndex;
+                        m_dragSelectedClips.push_back(dcs);
+                    }
+                }
+
+                // Initialize snap engine
+                m_snapEngine.setPixelsPerSecond(m_layoutEngine.pixelsPerSecond());
+                {
+                    std::vector<uint64_t> excludeIds;
+                    for (const auto& sel : m_selection.clips())
+                        excludeIds.push_back(sel.clipId);
+                    m_snapEngine.buildTargets(*m_timeline, m_playheadTick, 0.0, excludeIds);
+                }
+            }
+        }
+        break;
+    }
+
     case DragMode::PendingMarquee:
     {
         QPointF delta = pos - m_dragStart;

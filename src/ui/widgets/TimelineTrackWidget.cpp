@@ -304,7 +304,8 @@ void TimelineTrackWidget::paintEvent(QPaintEvent* event)
 
         // Second pass: dragged clips on top so the move preview is
         // visible above the clip(s) it would overwrite.
-        if (!m_draggedSet.empty()) {
+        // When ghost-dragging, hide them entirely (ghost overlay shows them).
+        if (!m_draggedSet.empty() && !m_ghostDragActive) {
             for (size_t i = lo; i < clipCount; ++i) {
                 if (m_draggedSet.count(i) == 0) continue;
                 const auto* clip = m_track->clip(i);

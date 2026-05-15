@@ -143,6 +143,11 @@ public:
             std::lock_guard lg(m_lastCompositeMtx);
             m_lastGoodComposite.reset();
             m_lastGoodCompositeTick = -1;
+            // Re-arm the settle clock so the next partial composite
+            // after invalidation triggers the first-view hold instead
+            // of inheriting a stale timestamp from before the reset.
+            m_lastFullCompositeAt = {};
+            m_lastFullLayerCount  = 0;
         }
     }
 
@@ -397,7 +402,13 @@ private:
     // frames.  Reset when a fully-resolved composite is produced.
     int  m_lastFullLayerCount{0};
     std::chrono::steady_clock::time_point m_lastFullCompositeAt{};
-    static constexpr int kSettleWindowMs = 200;
+    // 250ms gives one cold NVDEC decoder open (~150–200ms per the
+    // prewarmUpcomingShots header comment) + headroom for a couple of
+    // peers to decode in parallel under the P5 NVDEC-concurrency cap.
+    // Past this we stop holding and accept the partial composite so a
+    // permanently-unresolvable clip (missing file, codec mismatch)
+    // can't freeze playback indefinitely.
+    static constexpr int kSettleWindowMs = 250;
 
     // Phase B: UnifiedCache coordinator (non-owning pointer).  Wired by
     // App::createMainWindow after CompositeService is constructed.  May

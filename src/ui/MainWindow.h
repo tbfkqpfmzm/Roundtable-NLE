@@ -239,6 +239,7 @@ private slots:
     void onRedo();
     void onToggleFullScreen();
     void onAbout();
+    void onShowThirdPartyLicenses();
 
 public:
     // ── Auto-update (called from main.cpp via QTimer) ──────────────────

@@ -49,6 +49,10 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 Name: "{app}\assets"; Permissions: users-modify
 Name: "{app}\assets\presets\shots"; Permissions: users-modify
 Name: "{app}\projects"; Permissions: users-modify
+; Crash logs land in {app}\logs at runtime — must be user-writable so
+; non-admin users can create dumps when the app is installed under
+; Program Files.  See main.cpp:71 (NEVER use %LOCALAPPDATA%).
+Name: "{app}\logs"; Permissions: users-modify
 
 [Files]
 ; Main executable
@@ -82,6 +86,9 @@ Source: "icon.png"; DestDir: "{app}"; Flags: ignoreversion
 ; Launcher
 Source: "launch.vbs"; DestDir: "{app}"; Flags: ignoreversion
 
+; Third-party attribution (opened by Help -> Third-Party Licenses)
+Source: "docs\THIRD_PARTY_LICENSES.md"; DestDir: "{app}\docs"; Flags: ignoreversion
+
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
@@ -114,13 +121,45 @@ begin
   Result := Installed;
 end;
 
+{ Pre-install gate: warn user about missing VC++ redist while they can
+  still abort, instead of after install when the app won't launch. }
+function InitializeSetup(): Boolean;
+var
+  Choice: Integer;
+begin
+  Result := True;
+  if not IsVCRedistInstalled then
+  begin
+    Choice := MsgBox(
+      'Microsoft Visual C++ 2015-2022 Redistributable (x64) is not installed.' #13#13
+      'ROUNDTABLE will not launch without it.' #13#13
+      'Click YES to open the download page in your browser, then install the '
+      'redistributable before re-running this installer.' #13
+      'Click NO to continue anyway (only if you plan to install the '
+      'redistributable yourself).' #13
+      'Click CANCEL to abort installation.',
+      mbConfirmation, MB_YESNOCANCEL);
+    if Choice = IDYES then
+    begin
+      ShellExec('open', 'https://aka.ms/vs/17/release/vc_redist.x64.exe',
+               '', '', SW_SHOW, ewNoWait, Choice);
+      Result := False;  { abort install — user is going to download first }
+    end
+    else if Choice = IDCANCEL then
+      Result := False;
+    { IDNO falls through and continues the install }
+  end;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
+  { Post-install confirmation that the redist is now present.  Belt and
+    braces in case the user chose "continue anyway" in InitializeSetup. }
   if CurStep = ssDone then
   begin
     if not IsVCRedistInstalled then
-      MsgBox('Microsoft Visual C++ Redistributable not found.' #13#13
-             'You may need to install it manually from:' #13
+      MsgBox('Microsoft Visual C++ Redistributable still not detected.' #13#13
+             'ROUNDTABLE will not launch until you install it from:' #13
              'https://aka.ms/vs/17/release/vc_redist.x64.exe',
              mbInformation, MB_OK);
   end;

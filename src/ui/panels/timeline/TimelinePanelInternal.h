@@ -33,6 +33,19 @@ public:
     bool isAbove = true;
     bool reorderMode = false;  // when true, paint as thin insertion bar
 
+    struct GhostClipPreview {
+        int x{0};          // left edge in overlay-local coords
+        int width{0};      // width in pixels
+        uint32_t color{0}; // RGBA fill color
+        QString label;     // clip label text
+    };
+
+    void setClipPreviews(const std::vector<GhostClipPreview>& clips)
+    {
+        m_clipPreviews = clips;
+        update();
+    }
+
     explicit GhostTrackOverlay(QWidget* parent)
         : QWidget(parent)
     {
@@ -70,15 +83,53 @@ protected:
         p.setPen(pen);
         p.drawRect(rect().adjusted(1, 1, -1, -1));
 
-        p.setPen(QColor(200, 200, 200, 180));
-        QFont f = p.font();
-        f.setPixelSize(12);
-        p.setFont(f);
-        QString label = isAbove
-            ? QStringLiteral("+ New Video Track")
-            : QStringLiteral("+ New Audio Track");
-        p.drawText(rect(), Qt::AlignCenter, label);
+        // Draw clip previews within the ghost track
+        const int h = rect().height();
+        constexpr float kPad = 2.0f;
+        for (const auto& cp : m_clipPreviews) {
+            QRectF clipRect(cp.x, kPad, cp.width, h - 2.0f * kPad);
+
+            // Fill with semi-transparent clip color
+            QColor fill((cp.color >> 24) & 0xFF,
+                        (cp.color >> 16) & 0xFF,
+                        (cp.color >> 8) & 0xFF,
+                        160);
+            QColor border((cp.color >> 24) & 0xFF,
+                          (cp.color >> 16) & 0xFF,
+                          (cp.color >> 8) & 0xFF,
+                          220);
+
+            p.fillRect(clipRect, fill);
+            p.setPen(QPen(border, 1));
+            p.drawRect(clipRect);
+
+            // Clip label
+            if (!cp.label.isEmpty() && cp.width > 20) {
+                p.setPen(QColor(255, 255, 255, 200));
+                QFont f = p.font();
+                f.setPixelSize(10);
+                p.setFont(f);
+                p.drawText(clipRect.adjusted(4, 0, -4, 0),
+                           Qt::AlignVCenter | Qt::AlignLeft,
+                           p.fontMetrics().elidedText(cp.label, Qt::ElideRight, cp.width - 8));
+            }
+        }
+
+        // Draw the "+ New Track" label if no clips are showing
+        if (m_clipPreviews.empty()) {
+            p.setPen(QColor(200, 200, 200, 180));
+            QFont f = p.font();
+            f.setPixelSize(12);
+            p.setFont(f);
+            QString label = isAbove
+                ? QStringLiteral("+ New Video Track")
+                : QStringLiteral("+ New Audio Track");
+            p.drawText(rect(), Qt::AlignCenter, label);
+        }
     }
+
+private:
+    std::vector<GhostClipPreview> m_clipPreviews;
 };
 
 // ═════════════════════════════════════════════════════════════════════════════

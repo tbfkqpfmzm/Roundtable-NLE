@@ -192,7 +192,11 @@ void MainWindow::onAbout()
         "<p>GPU-accelerated Non-Linear Video Editor for Spine Animation</p>"
         "<p>Created by <a href='http://youtube.com/@ExportErrorMusic/'>Export/Error Music</a></p>"
         "<p>GitHub: <a href='https://github.com/exporterrormusic/Roundtable-NLE'>https://github.com/exporterrormusic/Roundtable-NLE</a></p>"
-        "<p>Support with donations via <a href='https://streamelements.com/exporterrormusic/tip'>StreamElements</a></p>");
+        "<p>Support with donations via <a href='https://streamelements.com/exporterrormusic/tip'>StreamElements</a></p>"
+        "<p style='margin-top:12px;font-size:smaller;color:gray'>"
+        "Licensed under AGPL-3.0. Bundles FFmpeg (LGPL), Qt 6 (LGPL), "
+        "spine-cpp (Spine Runtimes License), and other components. "
+        "See <i>Help &rarr; Third-Party Licenses</i> for full attribution.</p>");
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -201,6 +205,24 @@ void MainWindow::onAbout()
 
 void MainWindow::closeEvent(QCloseEvent* event)
 {
+    // Guard active export — the render queue is cancelled cleanly in
+    // ExportPanel::~ExportPanel, but the user gets no warning that their
+    // partially-written output is about to be abandoned.
+    if (m_exportPanel && m_exportPanel->isExporting()) {
+        auto reply = QMessageBox::question(
+            this, QStringLiteral("Export in Progress"),
+            QStringLiteral("An export is still running.\n\n"
+                           "If you close ROUNDTABLE now, the export will be "
+                           "cancelled and the partial output file will be "
+                           "incomplete.\n\n"
+                           "Cancel the export and close anyway?"),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (reply != QMessageBox::Yes) {
+            event->ignore();
+            return;
+        }
+    }
+
     // Guard unsaved changes
     if (!checkUnsavedChanges()) {
         event->ignore();
