@@ -264,6 +264,26 @@ void TimelinePanel::wireShortcuts()
             emit contentChanged();
         }
     });
+
+    // ── Tool shortcuts (A/B/R/N/S/U) ─────────────────────────────────
+    m_shortcuts->setActionCallback(ShortcutManager::kToolSelection, [this]() {
+        setActiveTool(EditTool::Selection);
+    });
+    m_shortcuts->setActionCallback(ShortcutManager::kToolRazor, [this]() {
+        setActiveTool(EditTool::Razor);
+    });
+    m_shortcuts->setActionCallback(ShortcutManager::kToolRolling, [this]() {
+        setActiveTool(EditTool::Rolling);
+    });
+    m_shortcuts->setActionCallback(ShortcutManager::kToolRipple, [this]() {
+        setActiveTool(EditTool::Ripple);
+    });
+    m_shortcuts->setActionCallback(ShortcutManager::kToolSlip, [this]() {
+        setActiveTool(EditTool::Slip);
+    });
+    m_shortcuts->setActionCallback(ShortcutManager::kToolSlide, [this]() {
+        setActiveTool(EditTool::Slide);
+    });
 }
 
 } // namespace rt

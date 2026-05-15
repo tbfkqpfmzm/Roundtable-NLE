@@ -169,14 +169,23 @@ void VulkanViewport::handleResize()
     createFramebuffers();
     m_swapchainDirty = false;
 
-    // Invalidate the source image so stale composite texture views aren't
-    // sampled at the new swapchain size.  The next displayGpuImage() call
-    // will set m_imageDirty and update the descriptor set.
-    m_sourceView    = VK_NULL_HANDLE;
-    m_sourceSampler = VK_NULL_HANDLE;
-    m_imageDirty    = true;
-    m_sourceTextureOwner.reset();
-    m_pendingTextureOwner.reset();
+    // Preserve the source image across the swapchain rebuild.  The
+    // composite texture lives independently of the swapchain framebuffers
+    // — sampling a texture inside the shader doesn't care about the
+    // framebuffer extent — and m_sourceTextureOwner (shared_ptr) keeps
+    // the VkImage alive until at least the next compositor::resize().
+    //
+    // Wiping the view here used to be the source of the paused-resize
+    // echo: each WM_SIZE that triggered a recreate left presentFrame
+    // with no source to display, so the swapchain held its last image
+    // and DWM stretched it into the growing HWND.  Keeping the view
+    // lets the inline refresh() in resizeEvent re-present that same
+    // texture into the NEW-size framebuffer every drag tick, so the
+    // image stays sharp and centered as the window grows.
+    //
+    // m_imageDirty=true forces the descriptor set to be rewritten on
+    // the next present in case anything underneath got reshuffled.
+    m_imageDirty = true;
 }
 
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -314,16 +323,19 @@ void VulkanViewport::presentFrame(VkSemaphore waitSemaphore)
     // with compositor thread — nvoglv64.dll NULL-deref bug).
     recycleSemaphores();
 
-    // Handle resize
+    // Handle resize inline.  handleResize() preserves the source view
+    // (m_sourceTextureOwner keeps the composite texture alive across
+    // the swapchain rebuild), so subsequent presents in this same call
+    // sample the existing frame into the NEW-size framebuffer.  This is
+    // what lets the inline refresh() in resizeEvent re-present cleanly
+    // at every WM_SIZE during a drag, instead of holding the old-size
+    // swapchain and letting DWM stretch (which produced visible echoes).
     if (m_swapchainDirty || m_swapchain->needsRecreation()) {
         handleResize();
         if (!m_swapchain || m_swapchain->needsRecreation()) {
             m_pendingValid = false;
             return;
         }
-        // handleResize() sets m_sourceView = VK_NULL_HANDLE to invalidate
-        // stale composite textures.  The pending apply below will set it
-        // to the current compositor output if a new frame has arrived.
     }
 
     // Apply pending source image — SAFE because:
@@ -964,6 +976,29 @@ void VulkanViewport::resizeEvent(QResizeEvent* event)
         m_resizeDebounceTimer->start();
     }
     emit resized();
+
+    // Same rationale as moveEvent: on Windows the modal WM_SIZE loop runs
+    // its own pump that doesn't drain Qt's posted-event queue, so the
+    // debounce timer above won't fire until the user RELEASES the drag.
+    // Without an inline re-present, the swapchain shows its last-presented
+    // frame frozen in place for the entire duration of the drag — visible
+    // as an "echo" of stale UI in the area that the HWND has grown into.
+    // ProgramMonitor suffers from this because its updateDisplay() routes
+    // through the async pipeline (FrameProducer → FramePresenter via
+    // queued connection), so the fresh composite never reaches the UI
+    // thread during the modal loop.  SourceMonitor uses the CPU Viewport
+    // (no Vulkan swapchain) and so doesn't exhibit the issue.
+    //
+    // The inline refresh() will see m_swapchainDirty / needsRecreation
+    // (set by acquireNextImage detecting the extent mismatch), call
+    // handleResize() to rebuild the swapchain at the new size, then
+    // re-present the existing m_sourceView.  handleResize() now
+    // preserves the source view across rebuild, so the composite stays
+    // visible throughout the drag instead of getting stretched by DWM.
+    if (m_gpuActive && m_sourceView != VK_NULL_HANDLE) {
+        m_swapchainDirty = true;
+        refresh();
+    }
 
     s_inResize = false;
 }

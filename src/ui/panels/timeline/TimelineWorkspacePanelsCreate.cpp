@@ -498,24 +498,24 @@ void TimelineWorkspace::createPanelWidgets()
 
     auto* btnSelection = new ToolButton(ToolButton::Selection);
     btnSelection->setFixedSize(40, 34);
-    btnSelection->setToolTip(QStringLiteral("Selection Tool (V)"));
+    btnSelection->setToolTip(QStringLiteral("Selection Tool (A)"));
     btnSelection->setChecked(true);
 
     auto* btnRazor = new ToolButton(ToolButton::Razor);
     btnRazor->setFixedSize(40, 34);
-    btnRazor->setToolTip(QStringLiteral("Razor Tool (C)"));
+    btnRazor->setToolTip(QStringLiteral("Razor Tool (B)"));
 
     auto* btnRipple = new ToolButton(ToolButton::Ripple);
     btnRipple->setFixedSize(40, 34);
-    btnRipple->setToolTip(QStringLiteral("Ripple Edit Tool (B)"));
+    btnRipple->setToolTip(QStringLiteral("Ripple Edit Tool (N)"));
 
     auto* btnRolling = new ToolButton(ToolButton::Rolling);
     btnRolling->setFixedSize(40, 34);
-    btnRolling->setToolTip(QStringLiteral("Rolling Edit Tool (N)"));
+    btnRolling->setToolTip(QStringLiteral("Rolling Edit Tool (R)"));
 
     auto* btnSlip = new ToolButton(ToolButton::Slip);
     btnSlip->setFixedSize(40, 34);
-    btnSlip->setToolTip(QStringLiteral("Slip Tool (Y)"));
+    btnSlip->setToolTip(QStringLiteral("Slip Tool (S)"));
 
     auto* btnSlide = new ToolButton(ToolButton::Slide);
     btnSlide->setFixedSize(40, 34);

@@ -283,8 +283,9 @@ private:
     // which thrashes the NVIDIA driver and caused VK_ERROR_DEVICE_LOST during
     // playback.  Now we cache the latest dimensions and start a 100ms
     // single-shot timer; the swapchain is rebuilt once, after the user stops
-    // resizing.  The old swapchain keeps presenting (stretched) in the
-    // meantime — exactly how Premiere/Resolve handle resize during drag.
+    // resizing.  resizeEvent also drives an inline rebuild on every WM_SIZE
+    // during the drag (the modal pump doesn't drain Qt's queued events),
+    // so this timer is primarily a safety net for the post-drag settle.
     QTimer* m_resizeDebounceTimer{nullptr};
     static constexpr int kResizeDebounceMs = 100;
 
