@@ -131,12 +131,10 @@ begin
   if not IsVCRedistInstalled then
   begin
     Choice := MsgBox(
-      'Microsoft Visual C++ 2015-2022 Redistributable (x64) is not installed.' #13#13
-      'ROUNDTABLE will not launch without it.' #13#13
-      'Click YES to open the download page in your browser, then install the '
-      'redistributable before re-running this installer.' #13
-      'Click NO to continue anyway (only if you plan to install the '
-      'redistributable yourself).' #13
+      'Microsoft Visual C++ 2015-2022 Redistributable (x64) is not installed.' #13#13 +
+      'ROUNDTABLE will not launch without it.' #13#13 +
+      'Click YES to open the download page in your browser, then install the redistributable before re-running this installer.' #13 +
+      'Click NO to continue anyway (only if you plan to install the redistributable yourself).' #13 +
       'Click CANCEL to abort installation.',
       mbConfirmation, MB_YESNOCANCEL);
     if Choice = IDYES then

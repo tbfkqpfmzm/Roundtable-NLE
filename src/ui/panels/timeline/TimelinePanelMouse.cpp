@@ -31,6 +31,26 @@
 namespace rt {
 void TimelinePanel::mousePressEvent(QMouseEvent* event)
 {
+    // Reset any stale drag mode from a previous incomplete interaction
+    // (e.g., lost mouse capture, interrupted drag). This prevents being
+    // stuck in a mode that ignores subsequent input.  Also clean up any
+    // visible artifacts left behind by an interrupted drag.
+    if (m_dragMode != DragMode::None) {
+        m_dragMode = DragMode::None;
+        m_dragClipRef = {};
+        m_dragSelectedClips.clear();
+        m_dragTargetTrack = SIZE_MAX;
+        m_ghostTrackVisible = false;
+        if (m_ghostOverlay) m_ghostOverlay->hide();
+        if (m_marqueeScrollTimer) m_marqueeScrollTimer->stop();
+        m_marqueeLastMovePos = QPointF();
+        if (m_rubberBand) m_rubberBand->hide();
+        setCursor(Qt::ArrowCursor);
+        for (auto tw : m_trackWidgets)
+            tw->setHoverEdgeTick(-1);
+    }
+    m_dragMode = DragMode::None;
+
     if (!m_timeline || event->button() != Qt::LeftButton)
     {
         QWidget::mousePressEvent(event);
@@ -315,6 +335,8 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
                     for (size_t w = 0; w < m_trackWidgets.size(); ++w)
                         m_trackWidgets[w]->setSelectedTransition(SIZE_MAX);
                 }
+                // Clear stale edge-hover state so it doesn't interfere
+                m_lastClickedEdge.valid = false;
                 for (size_t w = 0; w < m_trackWidgets.size(); ++w)
                     m_trackWidgets[w]->setGapHighlight(-1, -1);
                 if (m_gapSelection.trackIndex < m_trackWidgets.size())

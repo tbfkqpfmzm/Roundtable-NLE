@@ -378,10 +378,48 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
             if (newHead >= origTail) newHead = origTail - 1;
         }
 
-        auto cmd = EditOperations::trimClip(*m_timeline, m_dragClipRef.trackIndex,
-                                            m_dragClipRef.clipId,
-                                            ClipEdge::Head, newHead);
-        executeCommand(std::move(cmd));
+        int64_t headDelta = newHead - m_dragOriginalIn;
+
+        // Trim primary clip
+        {
+            auto cmd = EditOperations::trimClip(*m_timeline, m_dragClipRef.trackIndex,
+                                                m_dragClipRef.clipId,
+                                                ClipEdge::Head, newHead);
+            executeCommand(std::move(cmd));
+        }
+
+        // Trim other selected clips on the same track by the same delta.
+        // This matches Premiere Pro: when multiple clips are selected and
+        // you grab the head of one, all selected clips on that track trim
+        // their heads by the same amount.
+        for (const auto& dcs : m_dragSelectedClips) {
+            if (dcs.ref.clipId == m_dragClipRef.clipId) continue;
+            if (dcs.ref.trackIndex != m_dragClipRef.trackIndex) continue;
+            Track* selTr = m_timeline->track(dcs.ref.trackIndex);
+            if (!selTr) continue;
+            size_t si = selTr->findClipIndexById(dcs.ref.clipId);
+            if (si >= selTr->clipCount()) continue;
+            const Clip* selClip = selTr->clip(si);
+            int64_t selNewHead = dcs.originalIn + headDelta;
+            int64_t selOrigTail = dcs.originalIn + selClip->duration();
+            if (selNewHead < 0) selNewHead = 0;
+            if (selNewHead >= selOrigTail) selNewHead = selOrigTail - 1;
+            // also keep away from adjacent clip to the left
+            int64_t selLeftLimit = std::numeric_limits<int64_t>::min();
+            for (size_t ci = 0; ci < selTr->clipCount(); ++ci) {
+                const Clip* other = selTr->clip(ci);
+                if (!other || other->id() == dcs.ref.clipId) continue;
+                if (other->timelineOut() <= dcs.originalIn &&
+                    other->timelineOut() > selLeftLimit)
+                    selLeftLimit = other->timelineOut();
+            }
+            if (selNewHead < selLeftLimit) selNewHead = selLeftLimit;
+            auto selCmd = EditOperations::trimClip(*m_timeline, dcs.ref.trackIndex,
+                                                    dcs.ref.clipId,
+                                                    ClipEdge::Head, selNewHead);
+            executeCommand(std::move(selCmd));
+        }
+
         for (auto tw : m_trackWidgets)
             tw->setHoverEdgeTick(tw->trackIndex() == m_dragClipRef.trackIndex ? newHead : -1);
         onScrollChanged();
@@ -412,10 +450,44 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
             if (newTail <= m_dragOriginalIn) newTail = m_dragOriginalIn + 1;
         }
 
-        auto cmd = EditOperations::trimClip(*m_timeline, m_dragClipRef.trackIndex,
-                                            m_dragClipRef.clipId,
-                                            ClipEdge::Tail, newTail);
-        executeCommand(std::move(cmd));
+        int64_t tailDelta = newTail - (m_dragOriginalIn + m_dragOriginalDuration);
+
+        // Trim primary clip
+        {
+            auto cmd = EditOperations::trimClip(*m_timeline, m_dragClipRef.trackIndex,
+                                                m_dragClipRef.clipId,
+                                                ClipEdge::Tail, newTail);
+            executeCommand(std::move(cmd));
+        }
+
+        // Trim other selected clips on the same track by the same delta.
+        for (const auto& dcs : m_dragSelectedClips) {
+            if (dcs.ref.clipId == m_dragClipRef.clipId) continue;
+            if (dcs.ref.trackIndex != m_dragClipRef.trackIndex) continue;
+            Track* selTr = m_timeline->track(dcs.ref.trackIndex);
+            if (!selTr) continue;
+            size_t si = selTr->findClipIndexById(dcs.ref.clipId);
+            if (si >= selTr->clipCount()) continue;
+            const Clip* selClip = selTr->clip(si);
+            int64_t selOrigTail = dcs.originalIn + selClip->duration();
+            int64_t selNewTail = selOrigTail + tailDelta;
+            // keep away from adjacent clip to the right
+            int64_t selRightLimit = std::numeric_limits<int64_t>::max();
+            for (size_t ci = 0; ci < selTr->clipCount(); ++ci) {
+                const Clip* other = selTr->clip(ci);
+                if (!other || other->id() == dcs.ref.clipId) continue;
+                if (other->timelineIn() >= selOrigTail &&
+                    other->timelineIn() < selRightLimit)
+                    selRightLimit = other->timelineIn();
+            }
+            if (selNewTail > selRightLimit) selNewTail = selRightLimit;
+            if (selNewTail <= dcs.originalIn) selNewTail = dcs.originalIn + 1;
+            auto selCmd = EditOperations::trimClip(*m_timeline, dcs.ref.trackIndex,
+                                                    dcs.ref.clipId,
+                                                    ClipEdge::Tail, selNewTail);
+            executeCommand(std::move(selCmd));
+        }
+
         for (auto tw : m_trackWidgets)
             tw->setHoverEdgeTick(tw->trackIndex() == m_dragClipRef.trackIndex ? newTail : -1);
         onScrollChanged();
@@ -453,19 +525,11 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
             size_t li = rollTrack->findClipIndexById(m_rollLeftClipId);
             size_t ri = rollTrack->findClipIndexById(m_rollRightClipId);
             if (li < rollTrack->clipCount() && ri < rollTrack->clipCount()) {
-                constexpr int64_t kMinDur = 2000;
-                int64_t leftNewDur = newEditPoint - m_rollLeftOrigIn;
-                if (leftNewDur < kMinDur) {
-                    newEditPoint = m_rollLeftOrigIn + kMinDur;
-                    leftNewDur = kMinDur;
-                }
                 int64_t rightEnd = m_rollRightOrigIn + m_rollRightOrigDur;
+                // Allow rolling all the way to boundaries (no min-duration clamp)
+                newEditPoint = std::clamp(newEditPoint, m_rollLeftOrigIn, rightEnd);
+                int64_t leftNewDur = newEditPoint - m_rollLeftOrigIn;
                 int64_t rightNewDur = rightEnd - newEditPoint;
-                if (rightNewDur < kMinDur) {
-                    newEditPoint = rightEnd - kMinDur;
-                    leftNewDur = newEditPoint - m_rollLeftOrigIn;
-                    rightNewDur = kMinDur;
-                }
                 int64_t rightSrcDelta = newEditPoint - m_rollRightOrigIn;
 
                 Clip* lc = rollTrack->clip(li);
@@ -485,45 +549,59 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
         if (delta.manhattanLength() < 5.0)
             break;
 
-        // User started dragging — transition to ClipMove using the
-        // existing multi-selection (which we kept in PendingClipClick).
-        // Build drag state from the clicked clip.
-        {
-            Track* track = m_timeline->track(m_dragClipRef.trackIndex);
-            size_t idx = track->findClipIndexById(m_dragClipRef.clipId);
-            if (idx < track->clipCount()) {
-                const Clip* clip = track->clip(idx);
-                m_dragOriginalIn = clip->timelineIn();
-                m_dragOriginalSourceIn = clip->sourceIn();
-                m_dragOriginalDuration = clip->duration();
-                m_dragOriginalTrack = m_dragClipRef.trackIndex;
+        // User started dragging — determine mode based on where the
+        // original click landed relative to clip edges.
+        Track* track = m_timeline->track(m_dragClipRef.trackIndex);
+        size_t idx = track->findClipIndexById(m_dragClipRef.clipId);
+        if (idx < track->clipCount()) {
+            const Clip* clip = track->clip(idx);
+            m_dragOriginalIn = clip->timelineIn();
+            m_dragOriginalSourceIn = clip->sourceIn();
+            m_dragOriginalDuration = clip->duration();
+            m_dragOriginalTrack = m_dragClipRef.trackIndex;
+
+            // Use the drag-start position (where user first clicked) to
+            // determine edge proximity — not the current mouse position.
+            double clickPx = m_dragStart.x() - headerWidth();
+            double clipLeft  = m_layoutEngine.timeToPixelX(clip->timelineIn());
+            double clipRight = m_layoutEngine.timeToPixelX(clip->timelineOut());
+
+            constexpr double kEdgeThreshold = 6.0;
+            if (std::abs(clickPx - clipLeft) < kEdgeThreshold) {
+                m_dragMode = DragMode::ClipTrimHead;
+                m_lastClickedEdge = { m_dragClipRef, ClipEdge::Head, true };
+            } else if (std::abs(clickPx - clipRight) < kEdgeThreshold) {
+                m_dragMode = DragMode::ClipTrimTail;
+                m_lastClickedEdge = { m_dragClipRef, ClipEdge::Tail, true };
+            } else {
                 m_dragMode = DragMode::ClipMove;
                 m_lastClickedEdge.valid = false;
+            }
 
-                // Record original positions of ALL selected clips
-                m_dragSelectedClips.clear();
-                m_dragTargetTrack = m_dragClipRef.trackIndex;
-                for (const auto& sel : m_selection.clips()) {
-                    Track* selTrack = m_timeline->track(sel.trackIndex);
-                    if (!selTrack) continue;
-                    size_t si = selTrack->findClipIndexById(sel.clipId);
-                    if (si < selTrack->clipCount()) {
-                        DragClipState dcs;
-                        dcs.ref = sel;
-                        dcs.originalIn = selTrack->clip(si)->timelineIn();
-                        dcs.originalTrack = sel.trackIndex;
-                        m_dragSelectedClips.push_back(dcs);
-                    }
+            // Record original positions of ALL selected clips
+            // (used by both ClipMove and multi-clip trim).
+            m_dragSelectedClips.clear();
+            m_dragTargetTrack = m_dragClipRef.trackIndex;
+            for (const auto& sel : m_selection.clips()) {
+                Track* selTrack = m_timeline->track(sel.trackIndex);
+                if (!selTrack) continue;
+                size_t si = selTrack->findClipIndexById(sel.clipId);
+                if (si < selTrack->clipCount()) {
+                    DragClipState dcs;
+                    dcs.ref = sel;
+                    dcs.originalIn = selTrack->clip(si)->timelineIn();
+                    dcs.originalTrack = sel.trackIndex;
+                    m_dragSelectedClips.push_back(dcs);
                 }
+            }
 
-                // Initialize snap engine
-                m_snapEngine.setPixelsPerSecond(m_layoutEngine.pixelsPerSecond());
-                {
-                    std::vector<uint64_t> excludeIds;
-                    for (const auto& sel : m_selection.clips())
-                        excludeIds.push_back(sel.clipId);
-                    m_snapEngine.buildTargets(*m_timeline, m_playheadTick, 0.0, excludeIds);
-                }
+            // Initialize snap engine
+            m_snapEngine.setPixelsPerSecond(m_layoutEngine.pixelsPerSecond());
+            {
+                std::vector<uint64_t> excludeIds;
+                for (const auto& sel : m_selection.clips())
+                    excludeIds.push_back(sel.clipId);
+                m_snapEngine.buildTargets(*m_timeline, m_playheadTick, 0.0, excludeIds);
             }
         }
         break;

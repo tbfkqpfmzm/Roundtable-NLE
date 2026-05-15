@@ -275,15 +275,11 @@ std::unique_ptr<Command> EditOperations::rollingEdit(
     const Clip* leftClip  = track->clip(li);
     const Clip* rightClip = track->clip(ri);
 
-    // Clamp: left clip can't be shorter than minimum
     int64_t leftNewDuration = newEditPoint - leftClip->timelineIn();
-    if (leftNewDuration < kMinClipDuration)
-    {
-        newEditPoint = leftClip->timelineIn() + kMinClipDuration;
-        leftNewDuration = kMinClipDuration;
-    }
+    int64_t rightEnd = rightClip->timelineOut();
 
     // Clamp left clip tail to source media extent (non-looping clips)
+    int64_t leftMaxDur = INT64_MAX;
     {
         int64_t srcDur = 0;
         if (auto* vc = dynamic_cast<const VideoClip*>(leftClip)) {
@@ -293,20 +289,101 @@ std::unique_ptr<Command> EditOperations::rollingEdit(
             srcDur = ac->sourceDuration();
         }
         if (srcDur > 0) {
-            int64_t maxDur = srcDur - leftClip->sourceIn();
-            if (maxDur < kMinClipDuration) maxDur = kMinClipDuration;
-            if (leftNewDuration > maxDur) {
-                leftNewDuration = maxDur;
-                newEditPoint = leftClip->timelineIn() + leftNewDuration;
-            }
+            leftMaxDur = srcDur - leftClip->sourceIn();
+            if (leftMaxDur < kMinClipDuration) leftMaxDur = kMinClipDuration;
         }
     }
 
-    // Right clip can't be shorter than minimum
-    int64_t rightNewDuration = rightClip->timelineOut() - newEditPoint;
+    // Clamp source limit for right clip (non-looping)
+    int64_t rightMaxDur = INT64_MAX;
+    {
+        int64_t srcDur = 0;
+        if (auto* vc = dynamic_cast<const VideoClip*>(rightClip)) {
+            if (!vc->isVideoCharacter())
+                srcDur = vc->sourceDuration();
+        } else if (auto* ac = dynamic_cast<const AudioClip*>(rightClip)) {
+            srcDur = ac->sourceDuration();
+        }
+        if (srcDur > 0) {
+            // Right clip's source remaining from original sourceIn
+            rightMaxDur = srcDur - rightClip->sourceIn();
+            if (rightMaxDur < kMinClipDuration) rightMaxDur = kMinClipDuration;
+        }
+    }
+
+    int64_t rightNewDuration = rightEnd - newEditPoint;
+
+    // ── Check if right clip is fully consumed ───────────────────────────
+    if (rightNewDuration < kMinClipDuration && leftNewDuration <= rightEnd - leftClip->timelineIn())
+    {
+        // Clamp left extension to source limit
+        int64_t leftExtendDur = rightEnd - leftClip->timelineIn();
+        if (leftExtendDur > leftMaxDur)
+            leftExtendDur = leftMaxDur;
+        if (leftExtendDur < kMinClipDuration)
+            leftExtendDur = kMinClipDuration;
+
+        auto compound = std::make_unique<CompoundCommand>("Rolling edit");
+        compound->addCommand(std::make_unique<TrimClipCommand>(
+            track, leftClipId,
+            leftClip->timelineIn(), leftExtendDur, leftClip->sourceIn()));
+        compound->addCommand(std::make_unique<RemoveClipCommand>(track, rightClipId));
+        return compound;
+    }
+
+    // ── Check if left clip is fully consumed ────────────────────────────
+    if (leftNewDuration < kMinClipDuration)
+    {
+        // Right clip extends backwards: new timelineIn = leftClip->timelineIn()
+        int64_t rightExtendDur = rightEnd - leftClip->timelineIn();
+        int64_t rightSrcDelta = leftClip->timelineIn() - rightClip->timelineIn(); // negative
+        int64_t rightNewSourceIn = rightClip->sourceIn() + rightSrcDelta;
+
+        // Clamp right source to source limit
+        if (rightMaxDur < INT64_MAX) {
+            // The right clip's source can't go negative
+            int64_t maxBackShift = rightClip->sourceIn();
+            if (rightSrcDelta < -maxBackShift) {
+                // Can't shift source that far back; clamp
+                rightNewSourceIn = 0;
+                int64_t actualBackShift = -rightClip->sourceIn();
+                int64_t actualLeftIn = rightClip->timelineIn() + actualBackShift;
+                rightExtendDur = rightEnd - actualLeftIn;
+            }
+        }
+        if (rightExtendDur < kMinClipDuration)
+            rightExtendDur = kMinClipDuration;
+
+        auto compound = std::make_unique<CompoundCommand>("Rolling edit");
+        compound->addCommand(std::make_unique<RemoveClipCommand>(track, leftClipId));
+        compound->addCommand(std::make_unique<TrimClipCommand>(
+            track, rightClipId,
+            leftClip->timelineIn(), rightExtendDur, rightNewSourceIn));
+        return compound;
+    }
+
+    // ── Clamp to minimum durations ──────────────────────────────────────
+    if (leftNewDuration < kMinClipDuration)
+    {
+        newEditPoint = leftClip->timelineIn() + kMinClipDuration;
+        leftNewDuration = kMinClipDuration;
+        rightNewDuration = rightEnd - newEditPoint;
+    }
+    if (leftNewDuration > leftMaxDur)
+    {
+        leftNewDuration = leftMaxDur;
+        newEditPoint = leftClip->timelineIn() + leftNewDuration;
+        rightNewDuration = rightEnd - newEditPoint;
+    }
+    if (rightNewDuration > rightMaxDur)
+    {
+        rightNewDuration = rightMaxDur;
+        newEditPoint = rightEnd - rightNewDuration;
+        leftNewDuration = newEditPoint - leftClip->timelineIn();
+    }
     if (rightNewDuration < kMinClipDuration)
     {
-        newEditPoint = rightClip->timelineOut() - kMinClipDuration;
+        newEditPoint = rightEnd - kMinClipDuration;
         leftNewDuration = newEditPoint - leftClip->timelineIn();
         rightNewDuration = kMinClipDuration;
     }

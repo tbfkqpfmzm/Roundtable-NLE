@@ -629,7 +629,7 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
                             // full resolution, even when paused. This avoids
                             // massive initial-render decode (7 chars Ãƒâ€” Full res).
                             frame = resolveMediaFrame(animHandle, animFrame,
-                                                    ResolutionTier::Half, scrubMode);
+                                                    m_forceFullResolution.load() ? ResolutionTier::Full : ResolutionTier::Half, scrubMode);
                             if (frame) {
                                 // Packed-alpha unpack is now handled by:
                                 //   - GPU path: compositor shader isPacked UV split

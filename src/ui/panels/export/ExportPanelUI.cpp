@@ -16,12 +16,15 @@
 #include "project/Settings.h"
 #include "timeline/Timeline.h"
 
+#include <QDir>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QMenu>
 #include <QMessageBox>
+#include <QProcess>
 #include <QSplitter>
 
 #include <cmath>
@@ -419,7 +422,7 @@ void ExportPanel::setupUI()
 
     // â”€â”€ Job Queue â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     m_jobList = new QListWidget(this);
-    m_jobList->setToolTip(tr("Export job queue (right-click to remove jobs)"));
+    m_jobList->setToolTip(tr("Export job queue (right-click for options)"));
     m_jobList->setObjectName(QStringLiteral("JobList"));
     m_jobList->setMaximumHeight(120);
     m_jobList->setVisible(false); // Show when jobs are added
@@ -428,13 +431,35 @@ void ExportPanel::setupUI()
         auto* item = m_jobList->itemAt(pos);
         if (!item) return;
         QMenu menu(this);
-        auto* removeAction = menu.addAction("Remove from Queue");
+        auto* removeAction = menu.addAction(tr("Remove from Queue"));
+
+        // Reveal in Explorer — only shown if the job has a valid output path
+        QAction* revealAction = nullptr;
+        bool ok = false;
+        uint32_t jobId = static_cast<uint32_t>(item->data(Qt::UserRole).toULongLong(&ok));
+        if (ok && m_renderQueue) {
+            const auto* job = m_renderQueue->job(jobId);
+            if (job && QFileInfo(QString::fromStdString(job->config.outputPath.string())).exists()) {
+                revealAction = menu.addAction(tr("Reveal in Explorer"));
+            }
+        }
+
         auto* chosen = menu.exec(m_jobList->mapToGlobal(pos));
         if (chosen == removeAction) {
             int row = m_jobList->row(item);
             delete m_jobList->takeItem(row);
             if (m_jobList->count() == 0)
                 m_jobList->setVisible(false);
+        } else if (revealAction && chosen == revealAction) {
+            const auto* job = m_renderQueue->job(jobId);
+            if (job) {
+                QString path = QString::fromStdString(job->config.outputPath.string());
+                QFileInfo fi(path);
+                if (fi.exists()) {
+                    QProcess::startDetached("explorer.exe",
+                        {"/select,", QDir::toNativeSeparators(fi.absoluteFilePath())});
+                }
+            }
         }
     });
     mainLayout->addWidget(m_jobList);

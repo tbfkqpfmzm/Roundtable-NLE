@@ -932,10 +932,12 @@ void ExportPanel::onStartExport()
     m_activeJobId = jobId;
 
     // Update job list
-    m_jobList->addItem(
+    auto* item = new QListWidgetItem(
         QStringLiteral("\u25CB Job %1 \u2014 %2 \u2014 Queued")
             .arg(jobId)
             .arg(m_outputPath->text()));
+    item->setData(Qt::UserRole, static_cast<qulonglong>(jobId));
+    m_jobList->addItem(item);
 
     // Set up callbacks
     m_renderQueue->setProgressCallback(
@@ -1115,16 +1117,14 @@ static void renderPreviewFrame(ExportPanel* /*self*/,
                                QLabel* label,
                                const ExportPanel::PreviewCallback& cb,
                                QSpinBox* wSpin, QSpinBox* hSpin,
-                               int64_t tick, bool halfRes)
+                               int64_t tick)
 {
     if (!cb || !label) return;
 
     uint32_t fullW = wSpin  ? static_cast<uint32_t>(wSpin->value())  : 1920;
     uint32_t fullH = hSpin ? static_cast<uint32_t>(hSpin->value()) : 1080;
-    uint32_t renderW = halfRes ? std::max(fullW / 2, 640u) : fullW;
-    uint32_t renderH = halfRes ? std::max(fullH / 2, 360u) : fullH;
 
-    auto frame = cb(tick, renderW, renderH, true);
+    auto frame = cb(tick, fullW, fullH, true);
     if (frame && frame->ensurePixels() && frame->width > 0 && frame->height > 0) {
         uint32_t stride = frame->stride > 0 ? frame->stride : frame->width * 4;
         QImage img(frame->pixels.data(), static_cast<int>(frame->width),
@@ -1152,7 +1152,7 @@ void ExportPanel::onPlayPause()
         // Render one high-quality frame at current position
         renderPreviewFrame(this, m_previewImageLabel, m_previewCallback,
                            m_widthSpin, m_heightSpin,
-                           m_miniTimeline->playhead(), /*lowRes=*/false);
+                           m_miniTimeline->playhead());
     } else {
         // -- Play ---------------------------------------------------------
         m_playing = true;
@@ -1165,7 +1165,7 @@ void ExportPanel::onPlayPause()
         // without waiting for the timer to fire (~33ms delay).
         renderPreviewFrame(this, m_previewImageLabel, m_previewCallback,
                            m_widthSpin, m_heightSpin,
-                           m_miniTimeline->playhead(), /*lowRes=*/true);
+                           m_miniTimeline->playhead());
 
         // Seek PlaybackController to mini-timeline position and play (audio)
         if (m_playbackController) {
@@ -1212,16 +1212,16 @@ void ExportPanel::onPlaybackTick()
         // Reached the end â€” stop playback
         m_miniTimeline->setPlayhead(endTick);
         renderPreviewFrame(this, m_previewImageLabel, m_previewCallback,
-                           m_widthSpin, m_heightSpin, endTick, /*lowRes=*/false);
+                           m_widthSpin, m_heightSpin, endTick);
         onPlayPause();
         return;
     }
 
     m_miniTimeline->setPlayhead(tick);
 
-    // Render a low-resolution preview for smooth playback
+    // Render the preview at full output resolution
     renderPreviewFrame(this, m_previewImageLabel, m_previewCallback,
-                       m_widthSpin, m_heightSpin, tick, /*lowRes=*/true);
+                       m_widthSpin, m_heightSpin, tick);
 }
 
 void ExportPanel::onStepForward()
@@ -1244,7 +1244,7 @@ void ExportPanel::onStepForward()
 
     m_miniTimeline->setPlayhead(next);
     renderPreviewFrame(this, m_previewImageLabel, m_previewCallback,
-                       m_widthSpin, m_heightSpin, next, /*lowRes=*/false);
+                       m_widthSpin, m_heightSpin, next);
 }
 
 void ExportPanel::onStepBack()
@@ -1265,7 +1265,7 @@ void ExportPanel::onStepBack()
 
     m_miniTimeline->setPlayhead(prev);
     renderPreviewFrame(this, m_previewImageLabel, m_previewCallback,
-                       m_widthSpin, m_heightSpin, prev, /*lowRes=*/false);
+                       m_widthSpin, m_heightSpin, prev);
 }
 
 void ExportPanel::onSkipToStart()
@@ -1285,7 +1285,7 @@ void ExportPanel::onSkipToStart()
 
     m_miniTimeline->setPlayhead(startTick);
     renderPreviewFrame(this, m_previewImageLabel, m_previewCallback,
-                       m_widthSpin, m_heightSpin, startTick, /*lowRes=*/false);
+                       m_widthSpin, m_heightSpin, startTick);
 }
 
 void ExportPanel::onSkipToEnd()
@@ -1305,7 +1305,7 @@ void ExportPanel::onSkipToEnd()
 
     m_miniTimeline->setPlayhead(endTick);
     renderPreviewFrame(this, m_previewImageLabel, m_previewCallback,
-                       m_widthSpin, m_heightSpin, endTick, /*lowRes=*/false);
+                       m_widthSpin, m_heightSpin, endTick);
 }
 
 // â”€â”€ File size estimation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1440,10 +1440,12 @@ void ExportPanel::onAddToQueue()
 
     // Show job in list
     m_jobList->setVisible(true);
-    m_jobList->addItem(
+    auto* item = new QListWidgetItem(
         QStringLiteral("\u25CB Job %1 \u2014 %2 \u2014 Queued")
             .arg(jobId)
             .arg(QString::fromStdString(config.outputPath.string())));
+    item->setData(Qt::UserRole, static_cast<qulonglong>(jobId));
+    m_jobList->addItem(item);
 
     m_statusLabel->setText(tr("Job %1 added to queue").arg(jobId));
     spdlog::info("ExportPanel: added job {} to queue: {}", jobId, config.outputPath.string());

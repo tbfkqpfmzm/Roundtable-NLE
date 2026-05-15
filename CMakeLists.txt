@@ -192,6 +192,11 @@ if(SPINE_CPP_FOUND)
     add_executable(query_spine_bounds tools/query_spine_bounds.cpp)
     target_link_libraries(query_spine_bounds PRIVATE roundtable_core)
     target_include_directories(query_spine_bounds PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+    # Phase 1 audit tool — directly uses spine-cpp for feature cataloging
+    add_executable(spine_feature_audit tools/spine_feature_audit.cpp)
+    target_link_libraries(spine_feature_audit PRIVATE roundtable_core)
+    target_include_directories(spine_feature_audit PRIVATE ${CMAKE_SOURCE_DIR}/src)
 endif()
 install(DIRECTORY ${SPIRV_OUTPUT_DIR}/ DESTINATION shaders)
 

@@ -354,12 +354,9 @@ void TimelinePanel::mouseReleaseEvent(QMouseEvent* event)
         for (auto tw : m_trackWidgets)
             tw->setHoverEdgeTick(-1);
 
-        // Clear gap selection on release
-        if (m_gapSelection.active) {
-            m_gapSelection.active = false;
-            for (auto tw : m_trackWidgets)
-                tw->setGapHighlight(-1, -1);
-        }
+        // Gap selection is preserved on release so it remains visible.
+        // It will be cleared on the next mouse press (when clicking on a
+        // clip or non-gap empty space), matching Premiere Pro behavior.
     }
 
     QWidget::mouseReleaseEvent(event);
