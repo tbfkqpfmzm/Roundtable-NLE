@@ -7,6 +7,8 @@
 
 #ifdef ROUNDTABLE_HAS_SPINE
 #include "spine/ModelManager.h"
+
+
 #endif
 
 #include <QDir>
@@ -422,7 +424,7 @@ void CharacterBrowser::downloadCharacterModel(const QString& repoPath,
         state->subdirListingsPending = static_cast<int>(subDirs.size());
 
         // Helper lambda to check if everything is done
-        auto checkComplete = [this, displayName, state, onOutfitComplete]() {
+        auto checkComplete = [this, displayName, targetDir, state, onOutfitComplete]() {
             if (state->completionFired) return;
             if (state->downloaded < state->totalFiles) return;
             if (state->subdirListingsPending > 0) return; // still waiting for subdir listings

@@ -370,6 +370,7 @@ void ProjectBin::setupUI()
                     if (!m_project) return;
                     SequenceDialog dlg(this);
                     dlg.setWindowTitle(tr("Sequence Settings"));
+                    dlg.setAcceptButtonText(tr("Save Settings"));
                     dlg.setMediaProperties(
                         m_project->settings().resolution().width,
                         m_project->settings().resolution().height,
@@ -390,27 +391,42 @@ void ProjectBin::setupUI()
                     if (m_commandStack) {
                         m_commandStack->execute(std::make_unique<LambdaCommand>(
                             "Sequence Settings",
-                            [this, newRes, newFps, newName, seqIdx]() {
+                            [this, newRes, newFps, newName, seqIdx, oldRes]() {
+                                if (oldRes != newRes && oldRes.width > 0 && oldRes.height > 0) {
+                                    if (auto* seq = m_project->sequence(seqIdx))
+                                        scaleClipsToResolution(seq, oldRes, newRes);
+                                }
                                 m_project->settings().setResolution(newRes);
                                 m_project->settings().setFrameRate(newFps);
                                 if (auto* seq = m_project->sequence(seqIdx))
                                     seq->setName(newName.toStdString());
+                                m_project->setModified(true);
                                 syncListView();
                                 emit sequenceSettingsChanged();
                             },
-                            [this, oldRes, oldFps, oldName, seqIdx]() {
+                            [this, oldRes, oldFps, oldName, seqIdx, newRes]() {
+                                if (oldRes != newRes && newRes.width > 0 && newRes.height > 0) {
+                                    if (auto* seq = m_project->sequence(seqIdx))
+                                        scaleClipsToResolution(seq, newRes, oldRes);
+                                }
                                 m_project->settings().setResolution(oldRes);
                                 m_project->settings().setFrameRate(oldFps);
                                 if (auto* seq = m_project->sequence(seqIdx))
                                     seq->setName(oldName.toStdString());
+                                m_project->setModified(true);
                                 syncListView();
                                 emit sequenceSettingsChanged();
                             }));
                     } else {
+                        if (oldRes != newRes && oldRes.width > 0 && oldRes.height > 0) {
+                            if (auto* seq = m_project->sequence(seqIdx))
+                                scaleClipsToResolution(seq, oldRes, newRes);
+                        }
                         m_project->settings().setResolution(newRes);
                         m_project->settings().setFrameRate(newFps);
                         if (auto* seq = m_project->sequence(seqIdx))
                             seq->setName(newName.toStdString());
+                        m_project->setModified(true);
                         syncListView();
                         emit sequenceSettingsChanged();
                     }
@@ -693,6 +709,7 @@ void ProjectBin::setupUI()
                 if (!m_project) return;
                 SequenceDialog dlg(this);
                 dlg.setWindowTitle(tr("Sequence Settings"));
+                dlg.setAcceptButtonText(tr("Save Settings"));
                 dlg.setMediaProperties(
                     m_project->settings().resolution().width,
                     m_project->settings().resolution().height,
@@ -713,27 +730,42 @@ void ProjectBin::setupUI()
                 if (m_commandStack) {
                     m_commandStack->execute(std::make_unique<LambdaCommand>(
                         "Sequence Settings",
-                        [this, newRes, newFps, newName, seqIdx]() {
+                        [this, newRes, newFps, newName, seqIdx, oldRes]() {
+                            if (oldRes != newRes && oldRes.width > 0 && oldRes.height > 0) {
+                                if (auto* seq = m_project->sequence(seqIdx))
+                                    scaleClipsToResolution(seq, oldRes, newRes);
+                            }
                             m_project->settings().setResolution(newRes);
                             m_project->settings().setFrameRate(newFps);
                             if (auto* seq = m_project->sequence(seqIdx))
                                 seq->setName(newName.toStdString());
+                            m_project->setModified(true);
                             syncListView();
                             emit sequenceSettingsChanged();
                         },
-                        [this, oldRes, oldFps, oldName, seqIdx]() {
+                        [this, oldRes, oldFps, oldName, seqIdx, newRes]() {
+                            if (oldRes != newRes && newRes.width > 0 && newRes.height > 0) {
+                                if (auto* seq = m_project->sequence(seqIdx))
+                                    scaleClipsToResolution(seq, newRes, oldRes);
+                            }
                             m_project->settings().setResolution(oldRes);
                             m_project->settings().setFrameRate(oldFps);
                             if (auto* seq = m_project->sequence(seqIdx))
                                 seq->setName(oldName.toStdString());
+                            m_project->setModified(true);
                             syncListView();
                             emit sequenceSettingsChanged();
                         }));
                 } else {
+                    if (oldRes != newRes && oldRes.width > 0 && oldRes.height > 0) {
+                        if (auto* seq = m_project->sequence(seqIdx))
+                            scaleClipsToResolution(seq, oldRes, newRes);
+                    }
                     m_project->settings().setResolution(newRes);
                     m_project->settings().setFrameRate(newFps);
                     if (auto* seq = m_project->sequence(seqIdx))
                         seq->setName(newName.toStdString());
+                    m_project->setModified(true);
                     syncListView();
                     emit sequenceSettingsChanged();
                 }

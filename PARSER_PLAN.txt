@@ -1,16 +1,87 @@
 ================================================================================
-PARSER_PLAN v2 — .shotanim Native Runtime (leveraging SpineSkeletonDataConverter)
+PARSER_PLAN v3 — .shotanim Native Runtime (Seamless In-App Conversion)
 ================================================================================
+
+*** STATUS: DEFERRED (2026-05-15) ***
+
+This effort is on hold. The original motivation was to avoid shipping
+spine-cpp. That motivation no longer holds: the project owner has a Spine
+Editor license, and Section 2 of the Spine Editor License Agreement
+permits shipping the Spine Runtimes inside ROUNDTABLE (a video NLE that
+adds significant primary functionality on top of the runtimes). spine-cpp
+is therefore the production renderer and ROUNDTABLE can ship today.
+
+The native-runtime work (writer + reader + evaluator + parity/migrate
+tools) has been moved out of the build to:
+
+    tools/native_engine/
+
+See tools/native_engine/README.md for the current state, the remaining
+blocker (path constraints are entirely unimplemented — every Nikke rig
+uses them), and step-by-step instructions to re-enable and resume.
+
+License notice: docs/THIRD_PARTY_LICENSES.md and the repo-root NOTICES.md
+now reproduce the Spine Runtimes License Agreement verbatim, satisfying
+Section 2.2(a) of the Spine Editor License Agreement.
+
+The remainder of this document is the original plan, preserved for
+historical context and for whoever resumes the work.
+
+--------------------------------------------------------------------------------
 
 Last updated: 2026-05-15
 
 Goal
 ----
-Eliminate all Esoteric Software code from the distributed editor binary.
-Replace spine-cpp with a native .shotanim runtime that plays back our own
-animation format. The .skel → .shotanim conversion is handled by the
-open-source project `wang606/SpineSkeletonDataConverter` as a developer-
-side tool that never ships to end users.
+Replace spine-cpp's RUNTIME role with a native .shotanim runtime that plays
+back our own animation format. Spine-cpp remains in the editor strictly as
+a one-shot IMPORT library — invoked the instant a character is downloaded
+from Nikke-db, then never touched again for that character.
+
+User experience (the critical UX promise)
+-----------------------------------------
+End users never see "Spine" or ".skel" anywhere. They open the Character
+Browser, click Download, and get a playable character. Internally:
+
+    Download .skel + .atlas + .png from Nikke-db
+        ↓
+    Convert .skel → .shotanim using spine-cpp (one shot, invisible)
+        ↓
+    Delete the original .skel
+        ↓
+    Persist character.shotanim + skeleton.png on disk
+        ↓
+    All future loads: .shotanim → NativeSpineEngine → render
+    (spine-cpp never invoked again for that character)
+
+This means:
+  - The editor binary keeps shipping spine-cpp during the transition.
+  - End users do nothing different from today.
+  - The runtime hot path is 100% our code (NativeSpineEngine reads .shotanim).
+  - Eventually, we can replace spine-cpp's import role with our own .skel
+    parser or with SpineSkeletonDataConverter — that decision can wait
+    until the runtime is proven at parity.
+
+Dual-path during validation
+---------------------------
+Two CMake gates run side-by-side:
+
+    ROUNDTABLE_HAS_SPINE              (always ON during transition)
+        Compiles spine-cpp; used for both runtime (legacy) and the
+        download-time conversion step.
+
+    ROUNDTABLE_HAS_NATIVE_SHOTANIM    (OFF by default; ON once parity verified)
+        Compiles ShotAnimReader + NativeSpineEngine.
+        When ON, the editor PREFERS .shotanim if present, else falls
+        back to the spine-cpp runtime path.
+
+Migration arc:
+  Today:   spine-cpp runtime, no .shotanim, no native engine
+  Phase A: Add writer + reader + native engine, gated OFF, validate parity
+  Phase B: Wire auto-conversion into download flow, flip flag ON
+  Phase C: Spine-cpp keeps shipping but only used at download time
+  Phase D (future): Replace import-time spine-cpp with our own .skel parser
+                    or SpineSkeletonDataConverter — only when convenient
 
 
 ================================================================================

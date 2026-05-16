@@ -394,6 +394,7 @@ SequenceDialog::SequenceDialog(QWidget* parent)
             .arg(Theme::rgb(c.textBright));
 
         auto* okBtn = new QPushButton(tr("Create Sequence"));
+        m_okBtn = okBtn;
         okBtn->setCursor(Qt::PointingHandCursor);
         okBtn->setStyleSheet(actionBtnStyle);
         connect(okBtn, &QPushButton::clicked, this, &QDialog::accept);
@@ -437,12 +438,16 @@ double SequenceDialog::frameRate() const
 void SequenceDialog::setMediaProperties(uint32_t mediaWidth, uint32_t mediaHeight, double mediaFps)
 {
     if (mediaWidth > 0 && mediaHeight > 0) {
-        m_widthSpin->setValue(static_cast<int>(mediaWidth));
-        m_heightSpin->setValue(static_cast<int>(mediaHeight));
-        // Try to determine aspect ratio from dimensions
-        int g = std::gcd(static_cast<int>(mediaWidth), static_cast<int>(mediaHeight));
-        int arW = static_cast<int>(mediaWidth) / g;
-        int arH = static_cast<int>(mediaHeight) / g;
+        const int mw = static_cast<int>(mediaWidth);
+        const int mh = static_cast<int>(mediaHeight);
+
+        // Determine aspect ratio from dimensions and select the matching
+        // AR button (or Custom, revealing the custom AR row).
+        int g = std::gcd(mw, mh);
+        if (g <= 0) g = 1;
+        int arW = mw / g;
+        int arH = mh / g;
+        bool customAr = false;
         if (arW == 16 && arH == 9) {
             if (auto* btn = m_arGroup->button(0)) btn->setChecked(true);
         } else if (arW == 9 && arH == 16) {
@@ -450,11 +455,38 @@ void SequenceDialog::setMediaProperties(uint32_t mediaWidth, uint32_t mediaHeigh
         } else if (arW == 21 && arH == 9) {
             if (auto* btn = m_arGroup->button(2)) btn->setChecked(true);
         } else {
+            customAr = true;
             if (auto* btn = m_arGroup->button(3)) btn->setChecked(true);
             m_customArW->setValue(arW);
             m_customArH->setValue(arH);
         }
+        m_customArRow->setVisible(customAr);
+
+        // Rebuild the resolution grid for the detected aspect ratio, then
+        // select the preset matching the actual sequence resolution — or
+        // fall back to Custom, revealing the row with the exact dimensions.
         rebuildResGrid();
+
+        int presetIdx = -1;
+        for (size_t i = 0; i < m_resPresets.size(); ++i) {
+            if (m_resPresets[i].first == mw && m_resPresets[i].second == mh) {
+                presetIdx = static_cast<int>(i);
+                break;
+            }
+        }
+        if (presetIdx >= 0) {
+            if (auto* btn = m_resGroup->button(presetIdx)) btn->setChecked(true);
+            m_customResRow->setVisible(false);
+        } else {
+            const int customId = static_cast<int>(m_resPresets.size());
+            if (auto* btn = m_resGroup->button(customId)) btn->setChecked(true);
+            m_customResRow->setVisible(true);
+        }
+
+        // rebuildResGrid() reset the spinboxes to its first preset — apply
+        // the actual sequence dimensions last so width()/height() are correct.
+        m_widthSpin->setValue(mw);
+        m_heightSpin->setValue(mh);
     }
     if (mediaFps > 0.0)
         m_fpsSpin->setValue(mediaFps);
@@ -484,6 +516,11 @@ void SequenceDialog::setSequenceName(const QString& name)
     m_nameEdit->setText(name);
 }
 
+void SequenceDialog::setAcceptButtonText(const QString& text)
+{
+    if (m_okBtn) m_okBtn->setText(text);
+}
+
 void SequenceDialog::onArClicked(int id)
 {
     m_customArRow->setVisible(id == 3);
@@ -493,7 +530,12 @@ void SequenceDialog::onArClicked(int id)
 
 void SequenceDialog::onResClicked(int id)
 {
-    m_customResRow->setVisible(id == 3); // id 3 = Custom
+    // Apply the preset values to the spinboxes when a non-Custom button is clicked
+    if (id >= 0 && static_cast<size_t>(id) < m_resPresets.size()) {
+        m_widthSpin->setValue(m_resPresets[static_cast<size_t>(id)].first);
+        m_heightSpin->setValue(m_resPresets[static_cast<size_t>(id)].second);
+    }
+    m_customResRow->setVisible(id == static_cast<int>(m_resPresets.size())); // Custom = last
     updatePreview();
 }
 
@@ -614,6 +656,11 @@ void SequenceDialog::rebuildResGrid()
 
     connect(m_resGroup, &QButtonGroup::idClicked,
             this, &SequenceDialog::onResClicked);
+
+    // Store presets for onResClicked to apply on selection
+    m_resPresets.clear();
+    for (const auto& p : presets)
+        m_resPresets.push_back({p.w, p.h});
 
     // Apply the first preset's values
     if (!presets.isEmpty()) {

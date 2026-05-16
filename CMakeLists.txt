@@ -97,6 +97,13 @@ add_subdirectory(third_party)
 # contaminate the installed version's settings (RecentFiles, workspaces, etc.).
 option(ROUNDTABLE_DEV_BUILD "Isolate dev build settings from installed version" OFF)
 
+# Native .shotanim runtime — work-in-progress, deferred. Source moved to
+# tools/native_engine/ pending Phase 2 completion (path-constraint support,
+# residual TC bone-position bug). See tools/native_engine/README.md for
+# what's left. spine-cpp remains the production renderer; the user holds
+# a Spine Editor license so distribution is covered by Section 2 of the
+# Spine Editor License Agreement (see docs/THIRD_PARTY_LICENSES.md).
+
 # ─── Global definitions ─────────────────────────────────────────────────────
 add_compile_definitions(
     ROUNDTABLE_VERSION="${PROJECT_VERSION}"
@@ -197,6 +204,10 @@ if(SPINE_CPP_FOUND)
     add_executable(spine_feature_audit tools/spine_feature_audit.cpp)
     target_link_libraries(spine_feature_audit PRIVATE roundtable_core)
     target_include_directories(spine_feature_audit PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+    # Native .shotanim runtime tools (shotanim_parity, migrate_shotanim)
+    # are deferred — sources live under tools/native_engine/ and are not
+    # built. See tools/native_engine/README.md before re-enabling.
 endif()
 install(DIRECTORY ${SPIRV_OUTPUT_DIR}/ DESTINATION shaders)
 

@@ -191,6 +191,7 @@ bool SpineEngine::loadSkeleton(const std::string& skelPath,
 
     m_loadedSkelPath = skelPath;
     m_loadedAtlasPath = atlasPath;
+
     return true;
 }
 
@@ -258,6 +259,7 @@ bool SpineEngine::loadSkeletonFromBuffers(const std::vector<uint8_t>& skelBytes,
 
     m_loadedSkelPath = skelPath;
     m_loadedAtlasPath = atlasPath;
+
     return true;
 }
 
@@ -269,7 +271,6 @@ bool SpineEngine::loadFromClip(const SpineClip& clip, const std::string& assetsD
 
     if (!loadSkeleton(paths.skelPath, paths.atlasPath)) return false;
 
-    // Apply clip settings
     if (!clip.animationName().empty()) {
         m_animation.setBodyAnimation(clip.animationName(), clip.isLooping());
     }
@@ -610,8 +611,11 @@ SpineRenderData SpineEngine::extractMeshes()
 
     m_clipper->clipEnd();
 
-    // Compute bounds
-    getBounds(result.boundsX, result.boundsY, result.boundsW, result.boundsH);
+    if (m_skeleton) {
+        spine::Vector<float> vertBuf;
+        m_skeleton->getBounds(result.boundsX, result.boundsY,
+                              result.boundsW, result.boundsH, vertBuf);
+    }
 
     } catch (const std::exception& e) {
         spdlog::error("SpineEngine::extractMeshes exception: {}", e.what());

@@ -327,4 +327,25 @@ void ProjectBin::createColorMatte()
                  name.toStdString(), mattePath.string());
 }
 
+void ProjectBin::scaleClipsToResolution(Timeline* seq,
+                                        const Resolution& from,
+                                        const Resolution& to)
+{
+    // Intentionally a no-op.
+    //
+    // Clip positions are stored as pixel offsets from a fixed 1920×1080
+    // reference and scaled to the output resolution at composite time
+    // (CompositeServiceLayerBuild.cpp / OverlayMath.cpp), and clip scale
+    // is applied on top of a resolution-independent cover/contain fit
+    // (Compositor::buildViewportTransform).  Both are therefore already
+    // resolution-independent: changing the sequence resolution preserves
+    // the exact visual layout WITHOUT modifying any position/scale value.
+    //
+    // Rescaling them by the resolution ratio (as this previously did)
+    // double-applies the scaling — zooming in when going up in resolution
+    // and out when going down.  Leaving the values untouched is what keeps
+    // every clip at the same on-screen position and size.
+    (void)seq; (void)from; (void)to;
+}
+
 } // namespace rt

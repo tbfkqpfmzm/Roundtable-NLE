@@ -809,13 +809,17 @@ void ProgramMonitor::updateDisplay()
     }
 
     // Post-edit settle: same re-render forcing but at FULL resolution.
-    // Edit settle doesn't set m_isScrubbing, so the normal (non-halved)
-    // resolution divisor is used and compositeFrame gets scrubMode=true
-    // to bypass the LRU cache.
+    // Explicitly set m_isScrubbing=false so the viewport uses full
+    // resolution (non-halved).  The scrub settle block above may have
+    // left m_isScrubbing=true on the cycle where it expired (the same
+    // cycle edit settle starts).  Without this reset, the first edit
+    // settle cycle still gets a halved viewport and useScrub=true,
+    // causing blurry output.
     bool editSettleActive = false;
     if (m_editSettleCounter > 0) {
         --m_editSettleCounter;
         m_lastRenderedTick = -1; // force re-render every cycle during settle
+        m_isScrubbing = false;
         editSettleActive = true;
     }
 

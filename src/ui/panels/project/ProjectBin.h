@@ -61,6 +61,8 @@ class MediaPool;
 class MediaSourceService;
 class Project;
 class CommandStack;
+class Timeline;
+struct Resolution;
 
 /// Bin folder info for serialization.
 struct BinFolderState {
@@ -187,6 +189,11 @@ public:
     /// Create a solid-color matte image (like Premiere Pro's Color Matte).
     /// Prompts for color and name, generates a PNG, and imports it.
     void createColorMatte();
+
+    /// Scale all clips in a sequence proportionally when resolution changes.
+    static void scaleClipsToResolution(class Timeline* seq,
+                                       const Resolution& from,
+                                       const Resolution& to);
 
     // ── Size hints ──────────────────────────────────────────────────────
 

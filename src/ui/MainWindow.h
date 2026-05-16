@@ -28,6 +28,10 @@
 
 #include <QMainWindow>
 #include <QMap>
+
+#include "project/Settings.h"  // for Resolution
+
+#include "project/Settings.h"
 #include <QString>
 
 #include <atomic>
@@ -229,6 +233,14 @@ private slots:
     void onDuplicateProjectFromPanel(const QString& name);
     void onRevealProjectInExplorer(const QString& name);
     void onNewProjectForMedia(const QString& filePath, int64_t atTick, size_t trackIndex);
+    void onSequenceSettingsRequested(size_t seqIdx);
+
+    void scaleClipsInSequence(class Timeline* seq,
+                              const Resolution& from,
+                              const Resolution& to);
+
+    /// Refresh the UI after sequence settings change.
+    void applySequenceSettingsRefresh(uint32_t resW, uint32_t resH, double fps);
     void onOpenRecentProjectFromPanel(const QString& filePath);
     void onImportProject(const QString& srcPath);
     void onExportProject(const QString& name, const QString& dstPath);

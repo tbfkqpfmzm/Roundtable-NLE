@@ -64,16 +64,36 @@ std::shared_ptr<CachedFrame> CompositeService::resolveMediaFrame(
     // via the scrub decoder (the !scrubMode path only returns stale
     // frames without decoding — useless for export).  The playhead is
     // already set by tryGetFrame, so the cache won't thrash-evict.
+    // Also reject alternate-tier fallback frames (e.g. Half when Full
+    // was requested) — export always wants the full-quality frame.
     if (m_forceFullResolution.load()) {
         auto frame = m_mediaPool->tryGetFrame(handle, frameNumber, tier);
-        if (frame && frame->frameNumber == frameNumber)
+        if (frame && frame->frameNumber == frameNumber && frame->tier == tier)
             return frame;
         return m_mediaPool->getFrame(handle, frameNumber, tier, true);
     }
     // Try non-blocking first (fast path for cached frames during playback).
     auto frame = m_mediaPool->tryGetFrame(handle, frameNumber, tier);
-    if (frame)
+    if (frame) {
+        // During non-scrub (edit settle, paused frame), reject frames from
+        // tryGetFrame's alternate-tier fallback (e.g. ResolutionTier::Half
+        // when ResolutionTier::Full was requested).  The compositor renders
+        // at full viewport size in these modes, so a lower-tier frame gets
+        // stretched across the full monitor — producing a blurry display.
+        //
+        // We CANNOT call getFrame() here as a fallback — it also has an
+        // alternate-tier fallback that returns the wrong tier before reaching
+        // the inline decode path (MediaPoolFrame.cpp ~line 207).  Instead,
+        // schedule an URGENT prefetch at the correct tier and return nullptr.
+        // The settle retry loop will pick up the correct-tier frame on the
+        // next poll cycle, while the composite settle window holds the
+        // previous full-resolution frame on screen.
+        if (!scrubMode && frame->tier != tier) {
+            m_mediaPool->schedulePrefetch(handle, frameNumber, 1, /*urgent=*/true, tier);
+            return nullptr;
+        }
         return frame;
+    }
     // During timeline scrub, avoid blocking decode (would hold the
     // compositor mutex for 50-500ms, causing the program monitor to
     // freeze on a stale m_lastGoodComposite).  The scrub settle loop

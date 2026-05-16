@@ -617,6 +617,7 @@ void TimelineWorkspace::createPanelWidgets()
 
         QMenu menu(m_sequenceTabBar);
         QAction* renameAction = menu.addAction("Rename Sequence...");
+        QAction* settingsAction = menu.addAction("Sequence Settings...");
         QAction* dupAction    = menu.addAction("Duplicate Sequence");
         menu.addSeparator();
         QAction* closeAction  = menu.addAction("Close");
@@ -625,6 +626,8 @@ void TimelineWorkspace::createPanelWidgets()
         QAction* chosen = menu.exec(m_sequenceTabBar->mapToGlobal(pos));
         if (chosen == renameAction) {
             emit sequenceTabRenameRequested(static_cast<size_t>(tabIdx));
+        } else if (chosen == settingsAction) {
+            emit sequenceTabSettingsRequested(static_cast<size_t>(tabIdx));
         } else if (chosen == dupAction) {
             emit sequenceTabDuplicateRequested(static_cast<size_t>(tabIdx));
         } else if (chosen == closeAction) {

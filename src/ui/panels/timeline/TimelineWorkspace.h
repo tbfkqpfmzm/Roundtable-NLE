@@ -194,6 +194,9 @@ signals:
     /// Emitted when the user requests duplicating a sequence.
     void sequenceTabDuplicateRequested(size_t index);
 
+    /// Emitted when the user requests sequence settings (resolution, fps, name).
+    void sequenceTabSettingsRequested(size_t index);
+
     /// Emitted when the user drags media onto the timeline but no project
     /// or sequence exists yet.  The receiver should create a project with
     /// a sequence matching the file's properties, then the drop can be retried.

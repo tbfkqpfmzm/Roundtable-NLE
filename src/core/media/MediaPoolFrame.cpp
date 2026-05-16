@@ -200,6 +200,11 @@ std::shared_ptr<CachedFrame> MediaPool::getFrame(
         cached = m_cache->getNoPromote(handle, frameNumber, altTier);
         if (cached) {
             m_perf.nearbyHits.fetch_add(1, std::memory_order_relaxed);
+            // Schedule prefetch for the REQUESTED tier so the next settle
+            // cycle gets the correct resolution instead of the fallback.
+            // Without this, the caller (resolveMediaFrame) may accept the
+            // wrong-tier frame and composite it at full viewport → blurry.
+            schedulePrefetch(handle, frameNumber, 1, /*urgent=*/true, tier);
             if (!scrubMode) {
                 std::lock_guard lg(m_lastGoodMtx);
                 m_lastGoodFrame[handle] = cached;

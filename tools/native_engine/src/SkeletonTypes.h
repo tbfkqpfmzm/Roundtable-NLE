@@ -97,8 +97,20 @@ enum class AttachKind : uint8_t {
 /// Mesh attachments reference pool arrays in the parent RtSkelPkg.
 struct AttachmentData {
     AttachKind kind = AttachKind::Region;
-    int32_t    regionIdx = -1;       ///< index into AtlasRegion array
+    int32_t    regionIdx = -1;       ///< Direct atlas PAGE index for this
+                                     ///  attachment (since v4). UVs in
+                                     ///  localUVs / meshUvOffset are already
+                                     ///  in this page's normalized 0..1 space.
+                                     ///  -1 = no texture (color-only render).
+                                     ///  (Pre-v4 this was an index into an
+                                     ///  AtlasRegion array that was never
+                                     ///  serialized — bug fixed by storing
+                                     ///  the resolved page index directly.)
     int32_t    parentMeshIdx = -1;   ///< for LinkedMesh
+    int32_t    attachNameIdx = -1;   ///< index into SkeletonPkg::strings; -1 = none.
+                                     ///  Used to resolve AttachmentTimeline values
+                                     ///  (timeline stores string index; runtime looks
+                                     ///  up the current skin's pool entry by name).
 
     // Region attachments: 4 corners of the quad (8 floats: x0,y0,x1,y1,x2,y2,x3,y3)
     float      localVerts[8] = {};
@@ -106,13 +118,32 @@ struct AttachmentData {
     // UVs for the 4 corners (matching vertex order)
     float      localUVs[8] = {};
 
-    // Mesh attachments: ranges into RtSkelPkg pool arrays
+    // Mesh attachments: ranges into RtSkelPkg pool arrays.
+    //
+    // Layout convention (matches spine binary format):
+    //   Rigid (non-skinned) mesh:
+    //     meshBoneCount   == 0
+    //     meshWeightCount == 0
+    //     meshVertCount   == V (vertex count)
+    //     meshVertices    = [x0, y0, x1, y1, ..., xV-1, yV-1]
+    //
+    //   Skinned mesh (N influences per vertex, variable):
+    //     meshBoneCount   = sum over vertices of (1 + influencesForVertex)
+    //     meshBones pool  = [N_v0, b_v0_0, b_v0_1, ..., N_v1, b_v1_0, ...]
+    //     meshWeightCount = sum over vertices of (3 * influencesForVertex)
+    //     meshWeights pool= [x, y, weight, x, y, weight, ...] (bone-local
+    //                        bind-pose position per influence)
+    //     meshVertices    = unused / zeros (positions computed at runtime
+    //                        from world transform of influencing bones)
     uint32_t   meshVertOffset  = 0;
     uint32_t   meshVertCount   = 0;
+    uint32_t   meshUvOffset    = 0;   ///< into meshVertices[] (UVs share the pool)
     uint32_t   meshTriOffset   = 0;
     uint32_t   meshTriCount    = 0;
     uint32_t   meshBoneOffset  = 0;   ///< into meshBones[]
+    uint32_t   meshBoneCount   = 0;   ///< entries owned in meshBones[]
     uint32_t   meshWeightOffset = 0;  ///< into meshWeights[]
+    uint32_t   meshWeightCount  = 0;  ///< entries owned in meshWeights[]
 
     // Mesh hull / edges (for FFD / deform)
     uint32_t   meshEdgeCount   = 0;
@@ -238,7 +269,10 @@ struct AnimClip {
     // Transform constraint animation (if any)
     struct TransformKey {
         float time = 0;
-        float mixRotate=0, mixTranslate=0, mixScale=0, mixShear=0;
+        float mixRotate = 0;
+        float mixX = 0, mixY = 0;
+        float mixScaleX = 0, mixScaleY = 0;
+        float mixShearY = 0;
     };
     struct TransformTrack {
         std::vector<TransformKey> keys;
@@ -249,16 +283,31 @@ struct AnimClip {
 // ─── Constraints (setup pose data) ──────────────────────────────────────────
 
 struct IkConstraintData {
-    int32_t  targetBoneIdx = -1;
-    int32_t  bendBoneIdx   = -1;
-    uint8_t  bendDirection = 1;    ///< 1 or -1
-    float    mix = 1;
-    std::vector<int32_t> constrainedBones;  ///< bone indices affected by this IK
+    int32_t  targetBoneIdx = -1;   ///< Bone whose world position the chain reaches for.
+    int32_t  bendBoneIdx   = -1;   ///< For 2-bone IK: constrainedBones[1] (the knee/elbow joint).
+                                   ///  For 1-bone IK: -1. Redundant with constrainedBones but
+                                   ///  preserved in the on-disk format for clarity / future use.
+    uint8_t  bendDirection = 1;    ///< +1 = bend one way, -1 = the other (which way the elbow folds).
+    float    mix = 1;              ///< Blend factor in [0,1] applied to the solved rotation.
+    std::vector<int32_t> constrainedBones;  ///< Bone indices in chain order (root → ... → end).
+                                            ///  Size is 1 for 1-bone IK, 2 for 2-bone IK.
 };
 
 struct TransformConstraintData {
     int32_t  targetBoneIdx = -1;
-    float    mixRotate = 0, mixTranslate = 0, mixScale = 0, mixShear = 0;
+    // Per-component mix factors (spine 4.2 model: X/Y split).
+    float    mixRotate = 0;
+    float    mixX = 0, mixY = 0;
+    float    mixScaleX = 0, mixScaleY = 0;
+    float    mixShearY = 0;
+    // Constant offsets applied in the target bone's space before mixing.
+    float    offsetRotation = 0;
+    float    offsetX = 0, offsetY = 0;
+    float    offsetScaleX = 0, offsetScaleY = 0;
+    float    offsetShearY = 0;
+    // Apply-mode flags (select among the 4 spine apply paths).
+    uint8_t  local = 0;      ///< 1 = operate in the bone's local space
+    uint8_t  relative = 0;   ///< 1 = add target pose instead of replacing
     std::vector<int32_t> constrainedBones;
 };
 

@@ -10,6 +10,7 @@
 #include "dialogs/ProjectSettingsDialog.h"
 #include "dialogs/KeyboardShortcutsDialog.h"
 #include "dialogs/AppPreferencesDialog.h"
+#include "dialogs/SequenceDialog.h"
 
 // Pages / panels
 #include "panels/audio/AudioSync.h"
@@ -35,6 +36,7 @@
 
 // Core
 #include "command/CommandStack.h"
+#include "command/LambdaCommand.h"
 #include "media/AudioEngine.h"
 #include "media/FrameCache.h"
 #include "media/PlaybackController.h"
@@ -431,6 +433,113 @@ void MainWindow::switchSequence(size_t index)
 
     spdlog::info("MainWindow: switched to sequence {} '{}'",
                  index, newTimeline->name());
+}
+
+void MainWindow::onSequenceSettingsRequested(size_t seqIdx)
+{
+    if (m_destroying.load(std::memory_order_acquire)) return;
+    if (!m_currentProject) return;
+
+    auto* seq = m_currentProject->sequence(seqIdx);
+    if (!seq) return;
+
+    SequenceDialog dlg(this);
+    dlg.setWindowTitle(tr("Sequence Settings"));
+    dlg.setAcceptButtonText(tr("Save Settings"));
+
+    const auto& settings = m_currentProject->settings();
+    dlg.setMediaProperties(settings.resolution().width,
+                           settings.resolution().height,
+                           settings.frameRate());
+    dlg.setSequenceName(QString::fromStdString(seq->name()));
+
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+
+    auto oldRes = settings.resolution();
+    double oldFps = settings.frameRate();
+    auto newRes = Resolution{dlg.width(), dlg.height()};
+    double newFps = dlg.frameRate();
+    QString newName = dlg.sequenceName();
+    QString oldName = QString::fromStdString(seq->name());
+
+    if (newRes == oldRes && newFps == oldFps && newName == oldName)
+        return; // nothing changed
+
+    if (m_commandStack) {
+        m_commandStack->execute(std::make_unique<LambdaCommand>(
+            "Sequence Settings",
+            [this, newRes, newFps, newName, seqIdx, oldRes]() {
+                if (oldRes != newRes && oldRes.width > 0 && oldRes.height > 0) {
+                    if (auto* seq = m_currentProject->sequence(seqIdx))
+                        scaleClipsInSequence(seq, oldRes, newRes);
+                }
+                m_currentProject->settings().setResolution(newRes);
+                m_currentProject->settings().setFrameRate(newFps);
+                if (auto* seq = m_currentProject->sequence(seqIdx))
+                    seq->setName(newName.toStdString());
+                m_currentProject->setModified(true);
+                applySequenceSettingsRefresh(newRes.width, newRes.height, newFps);
+            },
+            [this, oldRes, oldFps, oldName, seqIdx, newRes]() {
+                if (oldRes != newRes && newRes.width > 0 && newRes.height > 0) {
+                    if (auto* seq = m_currentProject->sequence(seqIdx))
+                        scaleClipsInSequence(seq, newRes, oldRes);
+                }
+                m_currentProject->settings().setResolution(oldRes);
+                m_currentProject->settings().setFrameRate(oldFps);
+                if (auto* seq = m_currentProject->sequence(seqIdx))
+                    seq->setName(oldName.toStdString());
+                m_currentProject->setModified(true);
+                applySequenceSettingsRefresh(oldRes.width, oldRes.height, oldFps);
+            }));
+    } else {
+        if (oldRes != newRes && oldRes.width > 0 && oldRes.height > 0)
+            scaleClipsInSequence(seq, oldRes, newRes);
+        m_currentProject->settings().setResolution(newRes);
+        m_currentProject->settings().setFrameRate(newFps);
+        seq->setName(newName.toStdString());
+        m_currentProject->setModified(true);
+        applySequenceSettingsRefresh(newRes.width, newRes.height, newFps);
+    }
+}
+
+void MainWindow::scaleClipsInSequence(Timeline* seq,
+                                      const Resolution& from,
+                                      const Resolution& to)
+{
+    // Intentionally a no-op.
+    //
+    // Clip positions are stored as pixel offsets from a fixed 1920×1080
+    // reference and scaled to the output resolution at composite time
+    // (CompositeServiceLayerBuild.cpp / OverlayMath.cpp), and clip scale
+    // is applied on top of a resolution-independent cover/contain fit
+    // (Compositor::buildViewportTransform).  Both are therefore already
+    // resolution-independent: changing the sequence resolution preserves
+    // the exact visual layout WITHOUT modifying any position/scale value.
+    //
+    // Rescaling them by the resolution ratio (as this previously did)
+    // double-applies the scaling — zooming in when going up in resolution
+    // and out when going down.  Leaving the values untouched is what keeps
+    // every clip at the same on-screen position and size.
+    (void)seq; (void)from; (void)to;
+}
+
+void MainWindow::applySequenceSettingsRefresh(uint32_t resW, uint32_t resH, double fps)
+{
+    if (auto* pm = programMonitor()) {
+        pm->setOutputResolution(resW, resH);
+        pm->requestRefresh();
+    }
+    if (m_playbackController)
+        m_playbackController->setFrameRate(fps);
+    if (m_timelineWorkspace && m_timelineWorkspace->timelinePanel())
+        m_timelineWorkspace->timelinePanel()->setFrameRate(fps);
+    if (auto* b = projectBin()) b->refreshSequences();
+    if (m_timelineWorkspace)
+        m_timelineWorkspace->refreshSequenceTabs();
+    if (m_timelineWorkspace && m_timelineWorkspace->timelinePanel())
+        m_timelineWorkspace->timelinePanel()->rebuildTracks();
 }
 
 } // namespace rt

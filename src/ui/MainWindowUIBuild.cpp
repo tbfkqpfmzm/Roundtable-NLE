@@ -449,6 +449,10 @@ void MainWindow::buildPanels()
     connect(m_timelineWorkspace, &TimelineWorkspace::sequenceTabChanged,
             this, &MainWindow::switchSequence);
 
+    // ── Wire sequence tab settings request ──────────────────────────────
+    connect(m_timelineWorkspace, &TimelineWorkspace::sequenceTabSettingsRequested,
+            this, &MainWindow::onSequenceSettingsRequested);
+
     // ── Wire auto-create project on media drop ──────────────────────────
     connect(m_timelineWorkspace, &TimelineWorkspace::requestNewProjectForMedia,
             this, &MainWindow::onNewProjectForMedia);

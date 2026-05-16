@@ -204,6 +204,7 @@ void SpineAnimation::startTalking()
     }
 
     m_talking = true;
+
     spdlog::debug("SpineAnimation: talk → '{}'", talkAnim);
 }
 
@@ -217,6 +218,7 @@ void SpineAnimation::stopTalking()
     );
 
     m_talking = false;
+
     spdlog::debug("SpineAnimation: talk stopped");
 }
 
