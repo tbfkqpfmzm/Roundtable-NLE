@@ -1,6 +1,6 @@
 # ROUNDTABLE NLE
 
-[![Latest Release](https://img.shields.io/github/v/release/ROUNDTABLE-TALK/roundtable?label=latest&color=blue)](https://github.com/ROUNDTABLE-TALK/roundtable/releases/latest)
+[![Latest Release](https://img.shields.io/github/v/release/exporterrormusic/Roundtable-NLE?label=latest&color=blue)](https://github.com/exporterrormusic/Roundtable-NLE/releases/latest)
 
 **GPU-accelerated non-linear video editor — built for Spine animation workflows.**
 
@@ -19,7 +19,7 @@ All contributions are greatly appreciated!
 
 ## Download
 
-The easiest way to get ROUNDTABLE is to download a pre-built installer from the [Releases page](https://github.com/ROUNDTABLE-TALK/roundtable/releases). The installer is a portable Windows build — no dependencies, no package managers, no build steps. Just run the installer and launch.
+The easiest way to get ROUNDTABLE is to download a pre-built installer from the [Releases page](https://github.com/exporterrormusic/Roundtable-NLE/releases). The installer is a portable Windows build — no dependencies, no package managers, no build steps. Just run the installer and launch.
 
 ```powershell
 # After installation, launch from the Start Menu or desktop shortcut
