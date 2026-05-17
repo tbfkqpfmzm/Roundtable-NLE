@@ -17,6 +17,7 @@
 #include "media/MediaPool.h"
 #include "media/AudioFile.h"
 #include "media/AudioEngine.h"
+#include "media/AudioPlaybackService.h"
 #include "media/AVSyncClock.h"
 
 #include <QHBoxLayout>
@@ -48,6 +49,7 @@ namespace rt {
 SourceMonitor::SourceMonitor(QWidget* parent)
     : QWidget(parent)
     , m_controller(std::make_unique<PlaybackController>())
+    , m_seqAudioPlayback(std::make_unique<AudioPlaybackService>())
 {
     setAutoFillBackground(true);
     {
@@ -122,6 +124,21 @@ void SourceMonitor::setAudioEngine(AudioEngine* engine)
     // If the controller calls audioEngine->play()/stop(), it would
     // start/reset the timeline's sync clock, corrupting timeline state.
     // Audio is managed directly by startSourceAudio()/stopSourceAudio().
+
+    // Wire the sequence-preview audio service so it can push track sources
+    // for the inner sequence when the user previews one in this monitor.
+    if (m_seqAudioPlayback) {
+        m_seqAudioPlayback->setAudioEngine(engine);
+        m_seqAudioPlayback->setPlaybackController(m_controller.get());
+    }
+}
+
+void SourceMonitor::setSequenceProject(Project* project)
+{
+    // Lets a previewed sequence that itself contains nested SequenceClips
+    // on audio tracks expand them for playback.
+    if (m_seqAudioPlayback)
+        m_seqAudioPlayback->setProject(project);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -265,7 +282,78 @@ void SourceMonitor::setupUI()
     controlLayout->addWidget(m_timecodeEdit, 0, Qt::AlignVCenter);
     controlLayout->addSpacing(rt::UiScale::px(12));
 
-    // Fit mode / zoom presets combo box
+    // ── Premiere-style "drag video only" / "drag audio only" buttons ────
+    // Sit just left of the zoom combo. Click-drag one to drop only that
+    // stream of the loaded clip/sequence into the timeline (respecting the
+    // source in/out points).
+    auto dragBtnStyle = rt::UiScale::scaleStyleSheet(QStringLiteral(
+        "QPushButton { background: transparent; border: 1px solid %1; "
+        "border-radius: 3px; padding: 2px; } "
+        "QPushButton:hover:enabled { background: %2; } "
+        "QPushButton:disabled { border-color: %3; }")
+        .arg(Theme::hex(Theme::colors().controlBorder))
+        .arg(Theme::hex(Theme::colors().controlBgHover))
+        .arg(Theme::hex(Theme::colors().surface1)));
+
+    auto makeFilmstripIcon = [](QColor fg) -> QIcon {
+        QPixmap px(20, 20);
+        px.fill(Qt::transparent);
+        QPainter ip(&px);
+        ip.setRenderHint(QPainter::Antialiasing, false);
+        ip.setPen(QPen(fg, 1.2));
+        ip.setBrush(Qt::NoBrush);
+        ip.drawRect(QRectF(3.5, 4.5, 13, 11));     // film body
+        for (int i = 0; i < 4; ++i) {              // sprocket holes
+            ip.fillRect(QRectF(4.5 + i * 3.0, 5.5, 1.4, 1.4), fg);
+            ip.fillRect(QRectF(4.5 + i * 3.0, 12.5, 1.4, 1.4), fg);
+        }
+        ip.end();
+        return QIcon(px);
+    };
+    auto makeWaveformIcon = [](QColor fg) -> QIcon {
+        QPixmap px(20, 20);
+        px.fill(Qt::transparent);
+        QPainter ip(&px);
+        ip.setRenderHint(QPainter::Antialiasing, false);
+        ip.setPen(QPen(fg, 1.4));
+        const float h[7] = { 3, 7, 11, 14, 9, 5, 2 };
+        for (int i = 0; i < 7; ++i) {
+            float x = 3.0f + i * 2.4f;
+            ip.drawLine(QPointF(x, 10 - h[i] / 2.0f),
+                        QPointF(x, 10 + h[i] / 2.0f));
+        }
+        ip.end();
+        return QIcon(px);
+    };
+
+    m_btnDragVideo = new QPushButton(this);
+    m_btnDragVideo->setIcon(makeFilmstripIcon(Theme::colors().textSecondary));
+    m_btnDragVideo->setIconSize(QSize(rt::UiScale::px(16), rt::UiScale::px(16)));
+    rt::UiScale::setScaledFixedSize(m_btnDragVideo, 26, 22);
+    m_btnDragVideo->setFocusPolicy(Qt::NoFocus);
+    m_btnDragVideo->setCursor(Qt::OpenHandCursor);
+    m_btnDragVideo->setToolTip(tr("Drag Video Only — drag to timeline"));
+    m_btnDragVideo->setStyleSheet(dragBtnStyle);
+    m_btnDragVideo->setEnabled(false);  // nothing loaded yet
+    m_btnDragVideo->installEventFilter(this);
+    controlLayout->addWidget(m_btnDragVideo, 0, Qt::AlignVCenter);
+
+    m_btnDragAudio = new QPushButton(this);
+    m_btnDragAudio->setIcon(makeWaveformIcon(Theme::colors().textSecondary));
+    m_btnDragAudio->setIconSize(QSize(rt::UiScale::px(16), rt::UiScale::px(16)));
+    rt::UiScale::setScaledFixedSize(m_btnDragAudio, 26, 22);
+    m_btnDragAudio->setFocusPolicy(Qt::NoFocus);
+    m_btnDragAudio->setCursor(Qt::OpenHandCursor);
+    m_btnDragAudio->setToolTip(tr("Drag Audio Only — drag to timeline"));
+    m_btnDragAudio->setStyleSheet(dragBtnStyle);
+    m_btnDragAudio->setEnabled(false);  // nothing loaded yet
+    m_btnDragAudio->installEventFilter(this);
+    controlLayout->addWidget(m_btnDragAudio, 0, Qt::AlignVCenter);
+
+    controlLayout->addStretch();
+
+    // Fit mode / zoom presets combo box. Added to the layout later, next
+    // to the playback-resolution combo on the right side of the bar.
     m_fitModeCombo = new QComboBox(this);
     m_fitModeCombo->addItem(tr("Fit"));     // 0
     m_fitModeCombo->addItem(tr("Fill"));    // 1
@@ -280,9 +368,6 @@ void SourceMonitor::setupUI()
     m_fitModeCombo->setStyleSheet(comboStyle);
     rt::UiScale::setScaledMinimumWidth(m_fitModeCombo, 80);
     rt::UiScale::setScaledFixedHeight(m_fitModeCombo, 24);
-    controlLayout->addWidget(m_fitModeCombo, 0, Qt::AlignVCenter);
-
-    controlLayout->addStretch();
 
     connect(m_fitModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int index) {
@@ -316,6 +401,8 @@ void SourceMonitor::setupUI()
     rt::UiScale::setScaledMinimumWidth(m_playbackResCombo, 70);
     rt::UiScale::setScaledFixedHeight(m_playbackResCombo, 24);
     m_playbackResCombo->setCurrentIndex(1); // default 1/2
+    // Zoom level sits directly next to the playback-resolution combo.
+    controlLayout->addWidget(m_fitModeCombo, 0, Qt::AlignVCenter);
     controlLayout->addWidget(m_playbackResCombo, 0, Qt::AlignVCenter);
 
     // Safe Area toggle button (Premiere Pro style icon)

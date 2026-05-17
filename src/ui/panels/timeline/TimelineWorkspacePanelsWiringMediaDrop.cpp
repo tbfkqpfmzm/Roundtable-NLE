@@ -98,9 +98,12 @@ void TimelineWorkspace::wireMediaDropSignals()
     if (m_timelinePanel && m_timeline) {
         connect(m_timelinePanel, &TimelinePanel::mediaDropped,
                 this, [this](const QString& filePath, uint64_t /*mediaHandle*/,
-                             int64_t atTick, size_t trackIndex) {
+                             int64_t atTick, size_t trackIndex,
+                             int dragMode) {
             if (m_destroying.load(std::memory_order_acquire)) return;
             if (!m_timeline) return;
+            const bool forceAudioOnly = (dragMode == TimelinePanel::DragAudioOnly);
+            const bool forceVideoOnly = (dragMode == TimelinePanel::DragVideoOnly);
 
             // If no project or no sequences exist, prompt to create one
             if (!m_project || m_project->sequenceCount() == 0) {
@@ -166,6 +169,10 @@ void TimelineWorkspace::wireMediaDropSignals()
                 "wav", "mp3", "ogg", "flac", "aac", "m4a", "wma", "aiff", "opus"
             };
             bool isAudio = audioExts.contains(ext);
+            // Source-monitor "drag audio only": treat (possibly video) media
+            // as audio → a single AudioClip, no video, no companion
+            // (mediaHasAudio stays false because !isAudio is false below).
+            if (forceAudioOnly) isAudio = true;
 
             // Pre-compute clip properties before the lambda captures
             std::string label = isSpineAnimDrop
@@ -302,6 +309,9 @@ void TimelineWorkspace::wireMediaDropSignals()
                         mediaHasAudio = true;
                 }
             }
+            // Source-monitor "drag video only": never spawn the companion
+            // audio clip even though the media has an audio stream.
+            if (forceVideoOnly) mediaHasAudio = false;
             spdlog::info("DIAG-DROP mediaDropped '{}': dur={} ticks ({:.3f}s), mediaHasAudio={}",
                          path, dur, ticksToSeconds(dur), mediaHasAudio);
 
@@ -691,15 +701,19 @@ void TimelineWorkspace::wireMediaDropSignals()
         connect(m_timelinePanel, &TimelinePanel::mediaDroppedWithRegion,
                 this, [this](const QString& filePath, uint64_t /*mediaHandle*/,
                              int64_t atTick, size_t trackIndex,
-                             int64_t sourceIn, int64_t sourceOut) {
+                             int64_t sourceIn, int64_t sourceOut,
+                             int dragMode) {
             if (m_destroying.load(std::memory_order_acquire)) return;
             if (!m_timeline) return;
+            const bool forceAudioOnly = (dragMode == TimelinePanel::DragAudioOnly);
+            const bool forceVideoOnly = (dragMode == TimelinePanel::DragVideoOnly);
 
             QString ext = QFileInfo(filePath).suffix().toLower();
             static const QStringList audioExts = {
                 "wav", "mp3", "ogg", "flac", "aac", "m4a", "wma", "aiff", "opus"
             };
             bool isAudio = audioExts.contains(ext);
+            if (forceAudioOnly) isAudio = true;
 
             std::string label = QFileInfo(filePath).baseName().toStdString();
             std::string path  = filePath.toStdString();
@@ -731,6 +745,8 @@ void TimelineWorkspace::wireMediaDropSignals()
                         mediaHasAudio = true;
                 }
             }
+            // Source-monitor "drag video only": suppress the companion audio.
+            if (forceVideoOnly) mediaHasAudio = false;
             spdlog::info("DIAG-DROP mediaDroppedWithRegion '{}': final dur={} ({:.3f}s) "
                          "sourceDur={} ({:.3f}s) mediaHasAudio={}",
                          path, dur, dur/48000.0, sourceDur, sourceDur/48000.0, mediaHasAudio);

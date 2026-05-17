@@ -11,6 +11,8 @@
 
 #include "panels/timeline/TimelineWorkspace.h"
 
+#include <QMetaObject>
+
 #include "CompositeService.h"
 #include "spine/AnimationVideoCache.h"
 
@@ -74,6 +76,28 @@ void TimelineWorkspace::setMediaPool(MediaPool* pool) {
     if (pool && m_compositeService)
         m_compositeService->initAnimVideoCache(pool);
 #endif
+
+    // Drive the live file-swap watcher from MediaPool itself: whenever the
+    // pool opens ANY file (timeline clip of any subtype, bin/source preview,
+    // prewarm/lookahead open) we re-arm the watcher.  This replaces the
+    // brittle clip-type enumeration that missed STUCK.png (opened by the
+    // shot-boundary prewarm, never via a timeline-edit hook).  The callback
+    // fires on arbitrary threads, so coalesce and marshal to the GUI thread.
+    if (pool) {
+        pool->setOnMediaOpened([this](std::filesystem::path) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
+            bool expected = false;
+            if (!m_mediaWatchRescanQueued.compare_exchange_strong(
+                    expected, true))
+                return;  // a rescan is already queued — coalesce
+            QMetaObject::invokeMethod(this, [this]() {
+                m_mediaWatchRescanQueued.store(false,
+                                               std::memory_order_release);
+                if (m_destroying.load(std::memory_order_acquire)) return;
+                rescanMediaWatch();
+            }, Qt::QueuedConnection);
+        });
+    }
 }
 
 void TimelineWorkspace::setMediaSourceService(MediaSourceService* service) {
@@ -105,6 +129,8 @@ void TimelineWorkspace::setProject(Project* project)
 {
     m_project = project;
     if (m_compositeService) m_compositeService->setProject(project);
+    if (m_audioPlayback) m_audioPlayback->setProject(project);
+    if (m_sourceMonitor) m_sourceMonitor->setSequenceProject(project);
     refreshSequenceTabs();
 }
 

@@ -534,6 +534,25 @@ nv12_done:  // GPU NV12 fast-path jumps here after successful conversion
         }
     }
 
+    // ── Premiere-style live file replacement for still images ───────────
+    // A still (PNG/JPG single frame) is decoded exactly once: its pixels are
+    // now copied into `cached`, inserted into the LRU as `pinned` (line ~266)
+    // and into the disk cache, so the decoder is never consulted again for
+    // this media.  Keeping entry.decoder open would hold an OS file HANDLE on
+    // the image for the whole session — even though it carries
+    // FILE_SHARE_DELETE|WRITE, an external image editor's "Save" opens the
+    // file *exclusively* and is refused, and a delete-pending file cannot be
+    // recreated until we close.  Releasing the handle here lets the user
+    // overwrite/replace the image live in Explorer (the next decode, if the
+    // pinned cache is ever evicted, simply reopens via the isStillImage
+    // close()+open() branch above).
+    if (isStillImage) {
+        decoder.close();
+        spdlog::warn("MediaPool: released file handle for still image '{}' "
+                     "(handle={}) — live replace enabled",
+                     entry.path.filename().string(), entry.handle);
+    }
+
     return cached;
 }
 

@@ -221,6 +221,29 @@ void CompositeService::invalidateCacheDirect()
     m_cacheInvalidateRequested.store(false, std::memory_order_release);
 }
 
+void CompositeService::invalidateMediaTextures(uint64_t mediaId)
+{
+    if (mediaId == 0) return;
+    if (m_engine) {
+        if (auto* texCache = m_engine->textureCache()) {
+            texCache->evictMedia(mediaId);
+            spdlog::warn("[LIVE-RELOAD] CompositeService: evicted GPU "
+                         "textures for mediaId={} (force re-upload)", mediaId);
+        }
+        // Also reset GpuUploadManager's per-layer-slot dirty-tracking keys.
+        // For non-cacheable layers (stills outside loop/scrub), the upload
+        // path keys by (mediaId, frameNumber) per pool slot; if those match
+        // the request it SKIPS the CPU→GPU upload entirely.  After live
+        // replacement the (mediaId, frame) tuple is unchanged but pixels
+        // differ — without this reset the pool slot keeps drawing the OLD
+        // uploaded texture (the exact "needs scrub" symptom).
+        m_engine->invalidateMediaPoolSlots(mediaId);
+    }
+    // Also drop the cached composite output so the next frame rebuilds the
+    // layer with the freshly-uploaded texture instead of a cached blend.
+    requestCacheInvalidation();
+}
+
 void CompositeService::requestCacheInvalidationRange(int64_t fromTick, int64_t toTick)
 {
     // Try to acquire m_compositeMutex non-blockingly.  If the composite

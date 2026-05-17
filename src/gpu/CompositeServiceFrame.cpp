@@ -134,7 +134,11 @@ try
 
     // Check deferred cache invalidation request (set by requestCacheInvalidation
     // from the UI thread via atomic flag, avoiding deadlock).
+    bool postInvalidate = false;
     if (m_cacheInvalidateRequested.exchange(false, std::memory_order_acquire)) {
+        postInvalidate = true;
+        spdlog::warn("[LIVE-RELOAD] compositeFrame tick={}: invalidate flag "
+                     "consumed — clearLru + reset lastGoodComposite", tick);
         if (m_engine)
             m_engine->clearLru();
         {
@@ -411,8 +415,16 @@ try
                 // at 60fps — brief enough to avoid visible freeze.
                 constexpr int64_t kMaxStaleTicks = 48000 / 24;
                 int64_t tickDelta = std::abs(tick - m_lastGoodCompositeTick);
-                if (tickDelta <= kMaxStaleTicks)
+                if (tickDelta <= kMaxStaleTicks) {
+                    if (postInvalidate) {
+                        spdlog::warn("[LIVE-RELOAD] compositeFrame tick={}: "
+                                     "returning STALE m_lastGoodComposite "
+                                     "(lastTick={}, clipsAtTick={}, delta={})",
+                                     tick, m_lastGoodCompositeTick,
+                                     clipsAtTick, tickDelta);
+                    }
                     return m_lastGoodComposite;
+                }
                 spdlog::info("[COMPOSITE] Suppressing stale lastGoodComposite "
                              "(tick={} vs last={}, delta={})",
                              tick, m_lastGoodCompositeTick, tickDelta);
@@ -431,6 +443,12 @@ try
         spdlog::info("[COMPOSITE] Shot boundary tick={}: returning empty sentinel "
                      "({} clips present, no decoded frames available)",
                      tick, clipsAtTick);
+        if (postInvalidate) {
+            spdlog::warn("[LIVE-RELOAD] compositeFrame tick={}: returning "
+                         "EMPTY SENTINEL after invalidate (clipsAtTick={}, "
+                         "no decoded frames available — decode in flight)",
+                         tick, clipsAtTick);
+        }
         {
             auto emptyFrame = std::make_shared<CachedFrame>();
             std::lock_guard lg(m_lastCompositeMtx);
@@ -498,8 +516,17 @@ try
             // pipeline has something to fall back on, but the settle
             // window stays anchored to the last truly full frame.
             std::lock_guard lg(m_lastCompositeMtx);
+            const bool wasStale = (m_lastGoodComposite == gpuResult);
             m_lastGoodComposite     = gpuResult;
             m_lastGoodCompositeTick = tick;
+            if (postInvalidate) {
+                spdlog::warn("[LIVE-RELOAD] compositeFrame tick={}: stored "
+                             "FRESH composite (gpuView=0x{:X}, {}x{}, "
+                             "sameAsPrev={})",
+                             tick, gpuResult ? gpuResult->gpuImageView : 0,
+                             gpuResult ? gpuResult->width : 0,
+                             gpuResult ? gpuResult->height : 0, wasStale);
+            }
             if (clipsAtTick == 0 ||
                 static_cast<int>(layers.size()) >= clipsAtTick)
             {

@@ -76,6 +76,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
+#include <QEvent>
 #include <QTabBar>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -278,6 +279,27 @@ void MainWindow::closeEvent(QCloseEvent* event)
     // event finishes processing cleanly before the event loop exits.
     QMetaObject::invokeMethod(QApplication::instance(), "quit",
                               Qt::QueuedConnection);
+}
+
+void MainWindow::changeEvent(QEvent* event)
+{
+    QMainWindow::changeEvent(event);
+    if (event->type() != QEvent::WindowStateChange) return;
+
+    // Window just transitioned out of minimized.  Minimizing destroys the
+    // Vulkan swapchain — the last presented frame is gone — and while the
+    // playhead is paused nothing else recomposites, so the Program Monitor
+    // stays blank until the user scrubs or plays.  Kick a refresh once the
+    // event loop has applied the new geometry, then a second time after
+    // the swapchain has had time to recreate, so a real frame is presented.
+    if (!isMinimized()) {
+        QTimer::singleShot(0, this, [this]() {
+            if (auto* pm = programMonitor()) pm->requestRefresh();
+        });
+        QTimer::singleShot(120, this, [this]() {
+            if (auto* pm = programMonitor()) pm->requestRefresh();
+        });
+    }
 }
 
 void MainWindow::keyPressEvent(QKeyEvent* event)

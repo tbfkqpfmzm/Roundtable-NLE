@@ -75,22 +75,22 @@ std::shared_ptr<CachedFrame> CompositeService::resolveMediaFrame(
     // Try non-blocking first (fast path for cached frames during playback).
     auto frame = m_mediaPool->tryGetFrame(handle, frameNumber, tier);
     if (frame) {
-        // During non-scrub (edit settle, paused frame), reject frames from
-        // tryGetFrame's alternate-tier fallback (e.g. ResolutionTier::Half
-        // when ResolutionTier::Full was requested).  The compositor renders
-        // at full viewport size in these modes, so a lower-tier frame gets
-        // stretched across the full monitor — producing a blurry display.
-        //
-        // We CANNOT call getFrame() here as a fallback — it also has an
-        // alternate-tier fallback that returns the wrong tier before reaching
-        // the inline decode path (MediaPoolFrame.cpp ~line 207).  Instead,
-        // schedule an URGENT prefetch at the correct tier and return nullptr.
-        // The settle retry loop will pick up the correct-tier frame on the
-        // next poll cycle, while the composite settle window holds the
-        // previous full-resolution frame on screen.
+        // Tier mismatch (e.g. ResolutionTier::Half cached, Full requested).
+        // The previous behavior was to REJECT the wrong-tier frame in
+        // non-scrub mode (to avoid a briefly-blurry display) and return
+        // nullptr, leaving the layer unrendered.  That had a fatal failure
+        // mode during live file replacement: after invalidate, only a
+        // single tier ends up in the cache before the paused composite
+        // runs; if it's not Full, the layer is skipped, the output VkImage
+        // retains the previous composite's pixels, and the user sees the
+        // OLD media until they scrub (scrub mode bypassed this check).
+        // Accept any-tier hit instead, and still schedule the correct-tier
+        // prefetch so the next composite gets the sharper frame.  The
+        // brief intermediate-tier moment is invisible for stills and
+        // strictly better than displaying stale media.
         if (!scrubMode && frame->tier != tier) {
             m_mediaPool->schedulePrefetch(handle, frameNumber, 1, /*urgent=*/true, tier);
-            return nullptr;
+            // fall through and return the wrong-tier frame instead of nullptr
         }
         return frame;
     }

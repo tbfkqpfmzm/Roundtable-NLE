@@ -71,6 +71,7 @@ GpuUploadResult GpuUploadManager::uploadLayer(
     Texture& poolTex,
     uint64_t& poolMediaId,
     int64_t& poolFrameNo,
+    const void*& poolFramePtr,
     bool scrubMode)
 {
     GpuUploadResult result;
@@ -205,8 +206,16 @@ GpuUploadResult GpuUploadManager::uploadLayer(
 
     // Dirty tracking: if the exact same frame is already in this pool slot,
     // skip the CPU→GPU upload entirely.
+    //
+    // Identity check includes the CachedFrame pointer: live file replacement
+    // produces a NEW CachedFrame under the SAME (mediaId, frameNumber) but
+    // with different pixels.  Comparing (mediaId, frameNumber) alone caused
+    // the skip to fire incorrectly, leaving the OLD pool texture in place
+    // after an overwrite (the "needs scrub" symptom).
+    const void* curFramePtr = static_cast<const void*>(layer.frame.get());
     if (poolMediaId == fMediaId &&
         poolFrameNo == fFrameNo &&
+        poolFramePtr == curFramePtr &&
         fMediaId != 0 &&
         poolTex.image() != VK_NULL_HANDLE &&
         poolTex.width() == layer.frame->width &&
@@ -259,9 +268,11 @@ GpuUploadResult GpuUploadManager::uploadLayer(
         usedRing = true;
     }
 
-    // Update dirty-tracking key.
-    poolMediaId = fMediaId;
-    poolFrameNo = fFrameNo;
+    // Update dirty-tracking key (including frame pointer for re-decode
+    // detection — same (mediaId, frame) but new CachedFrame means new pixels).
+    poolMediaId  = fMediaId;
+    poolFrameNo  = fFrameNo;
+    poolFramePtr = curFramePtr;
 
     result.descriptor = poolTex.descriptorInfo();
     result.success    = true;

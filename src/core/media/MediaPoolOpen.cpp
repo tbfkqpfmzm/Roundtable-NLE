@@ -173,7 +173,7 @@ MediaHandle MediaPool::open(const std::filesystem::path& filePath)
     // Re-acquire lock to store the new entry.
     // Double-check dedup: another thread may have opened the same file
     // while we were probing without the lock.
-    std::lock_guard lock(m_mutex);
+    std::unique_lock<std::mutex> lock(m_mutex);
 
     {
         auto pathIt2 = m_pathToHandle.find(key);
@@ -215,6 +215,22 @@ MediaHandle MediaPool::open(const std::filesystem::path& filePath)
         m_pathToHandle[origKey] = handle;
     }
 
+    // ── Premiere-style live replacement: don't hold a handle on stills ──
+    // A still image is decoded exactly once and pinned in the cache, so the
+    // probe decoder opened above is never consulted again.  Releasing its
+    // OS file HANDLE here means a still added to the project (bin/timeline)
+    // never locks the file in Explorer.  If the pinned cache entry is ever
+    // evicted, decodeFrame()'s isStillImage branch transparently reopens
+    // via close()+open(), decodes, then releases the handle again.
+    const bool entryIsStill =
+        (entry.info.duration <= 0.0 || entry.info.frameCount <= 1);
+    if (entryIsStill && entry.decoder) {
+        entry.decoder->close();
+        spdlog::warn("MediaPool: released probe handle for still image '{}' "
+                     "(handle={}) — live replace enabled",
+                     entry.path.filename().string(), handle);
+    }
+
     m_entries.emplace(handle, std::move(entry));
 
     // Register with disk cache for persistent cross-session caching
@@ -228,6 +244,14 @@ MediaHandle MediaPool::open(const std::filesystem::path& filePath)
             spdlog::info("[PERF] MediaPool::open '{}': {:.0f}ms",
                          filePath.filename().string(), openMs);
     }
+
+    // Notify the live file-swap watcher about the just-opened file, OUTSIDE
+    // m_mutex (the handler marshals to the GUI thread to arm a watch). This
+    // covers every open path — timeline clips of any subtype, bin/source
+    // previews, prewarm/lookahead opens — not just enumerable clip types.
+    auto notify = m_onMediaOpened;
+    lock.unlock();
+    if (notify) notify(actualPath);
 
     return handle;
 }
@@ -317,7 +341,7 @@ void MediaPool::closeAll()
     m_scrubDecoders.clear();
 }
 
-void MediaPool::invalidatePath(const std::filesystem::path& filePath)
+MediaHandle MediaPool::invalidatePath(const std::filesystem::path& filePath)
 {
     // Canonicalize identically to open() so we hit the same map key.
     std::error_code ec;
@@ -330,8 +354,13 @@ void MediaPool::invalidatePath(const std::filesystem::path& filePath)
         std::lock_guard lock(m_mutex);
         m_failedPaths.erase(key);  // allow a fresh open attempt
         auto pathIt = m_pathToHandle.find(key);
-        if (pathIt == m_pathToHandle.end())
-            return;                 // not open — next open() reads fresh
+        if (pathIt == m_pathToHandle.end()) {
+            spdlog::warn("MediaPool::invalidatePath: '{}' (key '{}') NOT in "
+                         "open-handle map — nothing to invalidate (path-key "
+                         "mismatch or not yet opened)",
+                         filePath.string(), key);
+            return InvalidMedia;    // not open — next open() reads fresh
+        }
         handle = pathIt->second;
     }
 
@@ -344,23 +373,78 @@ void MediaPool::invalidatePath(const std::filesystem::path& filePath)
     }
     m_scheduler.cancel(handle);
 
+    // Drop the per-handle stale-frame fallback.  tryGetFrame() (the
+    // compositor's non-blocking path) returns m_lastGoodFrame[handle] on a
+    // cache miss instead of forcing a decode — so if we don't clear it
+    // here, every post-invalidation composite keeps serving the OLD pixels
+    // and the new file is never decoded (exactly the "doesn't refresh"
+    // bug: the log shows invalidate + reopen but no subsequent decode).
+    // Separate lock scope, taken BEFORE m_mutex, to avoid lock-order
+    // inversion with the frame-access paths.
+    {
+        std::lock_guard lg(m_lastGoodMtx);
+        m_lastGoodFrame.erase(handle);
+    }
+
     std::lock_guard lock(m_mutex);
     auto it = m_entries.find(handle);
     if (it == m_entries.end())
-        return;
+        return handle;  // entry gone but GPU textures keyed by handle may
+                        // still exist — let the caller evict them
 
-    spdlog::info("MediaPool: invalidating handle {} '{}' (file changed)",
-                 handle, it->second.path.filename().string());
+    MediaEntry& entry = it->second;
 
-    m_pathToHandle.erase(key);
-    m_cache->evictMedia(handle);
+    // Re-point the SAME handle at the (now changed) file rather than
+    // erasing it.  Every consumer — the compositor's path→handle cache,
+    // the Source Monitor, ImageClip/VideoClip — holds this handle by value;
+    // erasing it would leave them resolving a dead handle (getFrame →
+    // nullptr → they keep showing the last GPU texture, i.e. the OLD
+    // image, which is exactly the "doesn't refresh" bug).  Keeping the
+    // handle valid and re-opening its decoder means the very next
+    // getFrame() transparently decodes the new file for all of them, with
+    // zero path-string matching anywhere (which was fragile: the watcher
+    // delivers 'G:\..\F.png' while the compositor keyed 'G:/../F.png').
+    spdlog::warn("MediaPool: invalidating handle {} '{}' (file changed) — "
+                 "evicting CPU+disk cache, reopening decoder in place, "
+                 "next getFrame re-decodes for all consumers",
+                 handle, entry.path.filename().string());
+
+    m_cache->evictMedia(handle);          // drops the pinned still frame too
+    if (m_diskCache)
+        m_diskCache->evictMedia(handle);  // mtime-keyed, but be explicit
 
 #ifdef ROUNDTABLE_HAS_FFMPEG
-    if (it->second.swsCtx)
-        sws_freeContext(static_cast<SwsContext*>(it->second.swsCtx));
+    if (entry.swsCtx) {
+        sws_freeContext(static_cast<SwsContext*>(entry.swsCtx));
+        entry.swsCtx = nullptr;
+    }
 #endif
-    m_entries.erase(it);
+    entry.swsSrcW = entry.swsSrcH = 0;
+    entry.swsSrcFmt = -1;
+    entry.swsDstW = entry.swsDstH = 0;
+    entry.lastDecodedFrame   = -1;
+    entry.decodePathLogged   = 0;
+    entry.loopPreDecodeStarted = false;
 
+    // Reopen the decoder on the new file so video seeks work immediately
+    // and entry.info reflects any new dimensions.  (Stills additionally
+    // close()+open() inside decodeFrame()'s isStillImage branch, which is
+    // harmless on an already-open decoder.)  If the file is momentarily
+    // unreadable mid-write, getFrame() fails gracefully and a later
+    // composite retries.
+    if (entry.decoder) {
+        entry.decoder->close();
+        if (entry.decoder->open(entry.path)) {
+            entry.info        = entry.decoder->info();
+            entry.packedAlpha = entry.info.packedAlpha;
+        } else {
+            spdlog::warn("MediaPool: invalidate reopen failed for '{}' "
+                         "(handle {}) — will retry on next getFrame",
+                         entry.path.filename().string(), handle);
+        }
+    }
+
+    // Drop the dedicated scrub decoder so it reopens against the new file.
     auto scrubIt = m_scrubDecoders.find(handle);
     if (scrubIt != m_scrubDecoders.end()) {
 #ifdef ROUNDTABLE_HAS_FFMPEG
@@ -369,6 +453,11 @@ void MediaPool::invalidatePath(const std::filesystem::path& filePath)
 #endif
         m_scrubDecoders.erase(scrubIt);
     }
+    // m_pathToHandle intentionally left intact — handle stays valid.
+    return handle;  // caller evicts this media's GPU textures (keyed by
+                    // mediaId): since the handle is preserved, the GPU
+                    // texture cache key (handle,frame,tier) is unchanged
+                    // and would otherwise serve the stale uploaded texture.
 }
 
 // ─── Async open worker ─────────────────────────────────────────────────────
@@ -380,6 +469,22 @@ bool MediaPool::isPathOpen(const std::filesystem::path& filePath) const
     std::string key = ec ? filePath.string() : canonical.string();
     std::lock_guard lock(m_mutex);
     return m_pathToHandle.find(key) != m_pathToHandle.end();
+}
+
+std::vector<std::filesystem::path> MediaPool::openMediaPaths() const
+{
+    std::lock_guard lock(m_mutex);
+    std::vector<std::filesystem::path> paths;
+    paths.reserve(m_pathToHandle.size());
+    for (const auto& kv : m_pathToHandle)
+        paths.emplace_back(kv.first);
+    return paths;
+}
+
+void MediaPool::setOnMediaOpened(std::function<void(std::filesystem::path)> cb)
+{
+    std::lock_guard lock(m_mutex);
+    m_onMediaOpened = std::move(cb);
 }
 
 void MediaPool::openAsync(const std::filesystem::path& filePath)

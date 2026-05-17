@@ -93,6 +93,11 @@ void TimelineWorkspace::schedulePostEditWork()
         warmNewSpineClips();
 #endif
         ensureAudioSourcesLoaded();
+        // Re-arm the live file-swap watcher: a clip may have just been
+        // added/relinked (e.g. media dragged onto the timeline), so its
+        // source file isn't watched yet.  rescanMediaWatch() diffs against
+        // the already-watched set, so this is cheap when nothing changed.
+        rescanMediaWatch();
     });
 }
 

@@ -98,6 +98,10 @@ void TimelinePanel::rebuildTracks()
     // while paint events are still pending.
     setUpdatesEnabled(false);
 
+    // Make sure a divider track separates the video and audio sections
+    // BEFORE we build widgets, so it's part of the single build pass.
+    ensureSectionDivider();
+
     spdlog::info("[TimelinePanel] ENTER rebuildTracks: m_timeline={} trackCount={}", (void*)m_timeline, m_timeline ? m_timeline->trackCount() : 0);
     spdlog::info("rebuildTracks: disconnecting and deleting old widgets");
     for (size_t i = 0; i < m_trackHeaders.size(); ++i) {
@@ -610,6 +614,7 @@ void TimelinePanel::rebuildTracks()
     // layout pass settles widget widths). This ensures newly created track
     // headers reposition their label/buttons based on actual name length and
     // height — matching the behavior existing tracks get on resize.
+
     updateMinHeaderWidth();
     QTimer::singleShot(0, this, [this]() {
         if (m_destroying.load(std::memory_order_acquire)) return;
@@ -877,6 +882,50 @@ void TimelinePanel::ensureDefaultTracks()
 // ═════════════════════════════════════════════════════════════════════════════
 //  refreshTrackContents — Lightweight content refresh, NO widget rebuild
 // ═════════════════════════════════════════════════════════════════════════════
+
+void TimelinePanel::ensureSectionDivider()
+{
+    if (!m_timeline) return;
+    const size_t n = m_timeline->trackCount();
+
+    // Find the first real audio track and whether a real video track
+    // precedes it. Divider tracks are TrackType::Video+isDivider, so
+    // skip them when classifying sections.
+    size_t firstAudio = SIZE_MAX;
+    bool hasVideo = false;
+    for (size_t i = 0; i < n; ++i) {
+        Track* t = m_timeline->track(i);
+        if (!t || t->isDivider()) continue;
+        if (t->type() == TrackType::Audio) { firstAudio = i; break; }
+        if (t->type() == TrackType::Video) hasVideo = true;
+    }
+    // Need both a video and an audio section to separate.
+    if (firstAudio == SIZE_MAX || !hasVideo) return;
+
+    // Dark grey (0xAARRGGBB) — noticeably darker than the empty track
+    // background (trackBg ~20,20,26) so the V/A split reads as a recessed
+    // separator rather than another track.
+    constexpr uint32_t kSepColor = 0xFF0A0A0Cu;
+
+    // If a divider already sits at the boundary, just keep its appearance
+    // in sync (also upgrades dividers created by older builds). Only
+    // touch nameless auto-dividers so a user-named divider is left alone.
+    if (firstAudio > 0) {
+        Track* prev = m_timeline->track(firstAudio - 1);
+        if (prev && prev->isDivider()) {
+            if (prev->name().empty() && prev->color() != kSepColor)
+                prev->setColor(kSepColor);
+            return;
+        }
+    }
+
+    // Insert a dedicated divider track at the V/A boundary.
+    if (Track* d = m_timeline->addDividerTrack(firstAudio)) {
+        d->setName("");
+        d->setColor(kSepColor);
+        d->setHeight(10.0f);
+    }
+}
 
 void TimelinePanel::refreshTrackContents()
 {

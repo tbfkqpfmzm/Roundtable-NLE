@@ -352,6 +352,25 @@ void CompositeEngine::clearTextureCache()
     clearGpuTexCache();
 }
 
+void CompositeEngine::invalidateMediaPoolSlots(uint64_t mediaId)
+{
+    if (mediaId == 0) return;
+    size_t reset = 0;
+    for (auto& key : m_gpuLayerTexKeys) {
+        if (key.mediaId == mediaId) {
+            key.mediaId     = 0;
+            key.frameNumber = -1;
+            key.framePtr    = nullptr;
+            ++reset;
+        }
+    }
+    if (reset > 0) {
+        spdlog::warn("[LIVE-RELOAD] CompositeEngine: reset {} pool-slot "
+                     "dirty-tracking key(s) for mediaId={} — next upload "
+                     "will re-stage new pixels", reset, mediaId);
+    }
+}
+
 void CompositeEngine::clearGpuTexCache()
 {
     m_gpuTexCache.reset();
@@ -904,6 +923,7 @@ std::shared_ptr<CachedFrame> CompositeEngine::compositeViaRenderGraph(
                             layer, *m_gpuLayerTextures[li],
                             m_gpuLayerTexKeys[li].mediaId,
                             m_gpuLayerTexKeys[li].frameNumber,
+                            m_gpuLayerTexKeys[li].framePtr,
                             scrubMode);
 
                         if (uploadResult.success) {

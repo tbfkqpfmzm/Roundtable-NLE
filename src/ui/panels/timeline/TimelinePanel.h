@@ -120,6 +120,10 @@ class TimelinePanel : public QWidget
     Q_OBJECT
 
 public:
+    /// Source-monitor drag-out mode threaded through the drop signals.
+    /// 0 = video+audio (default), 1 = video only, 2 = audio only.
+    enum StreamDragMode { DragBoth = 0, DragVideoOnly = 1, DragAudioOnly = 2 };
+
     /// Represents a selected gap between clips on a track.
     struct GapSelection {
         size_t  trackIndex{SIZE_MAX};
@@ -157,6 +161,11 @@ public:
     /// edits that don't change the number or order of tracks (splits,
     /// deletes, cuts, pastes within existing tracks, razor).
     void refreshTrackContents();
+
+    /// Ensure a single divider track sits between the video and audio
+    /// sections (Premiere-style). Mutates the timeline model; call before
+    /// (re)building track widgets.
+    void ensureSectionDivider();
 
     /// Zoom to fit the entire timeline.
     void zoomToFit();
@@ -278,12 +287,14 @@ signals:
     void deleteTrack(size_t trackIndex);
 
     /// Emitted when media is dropped from the project bin onto the timeline.
-    void mediaDropped(const QString& filePath, uint64_t mediaHandle, int64_t atTick, size_t trackIndex);
+    void mediaDropped(const QString& filePath, uint64_t mediaHandle, int64_t atTick,
+                      size_t trackIndex, int dragMode = 0);
 
     /// Emitted when media is dropped from the Source Monitor with in/out points.
     void mediaDroppedWithRegion(const QString& filePath, uint64_t mediaHandle,
                                 int64_t atTick, size_t trackIndex,
-                                int64_t sourceIn, int64_t sourceOut);
+                                int64_t sourceIn, int64_t sourceOut,
+                                int dragMode = 0);
 
     /// Emitted when an external file (from Windows Explorer) is dropped onto the timeline.
     void externalFileDropped(const QString& filePath, int64_t atTick, size_t trackIndex);
@@ -306,8 +317,10 @@ signals:
     void nestSelectedClips(const std::vector<ClipRef>& clips, const QString& nestName);
 
     /// Emitted when a sequence is dropped from the project bin onto the timeline.
+    /// dragMode: 0 = video+audio, 1 = video only, 2 = audio only.
     void sequenceDropped(size_t sequenceIndex, int64_t atTick, size_t trackIndex,
-                         int64_t sourceIn = -1, int64_t sourceOut = -1);
+                         int64_t sourceIn = -1, int64_t sourceOut = -1,
+                         int dragMode = 0);
 
     /// Emitted when user wants to open a nested sequence (double-click or right-click).
     void openNestedSequence(size_t sequenceIndex);

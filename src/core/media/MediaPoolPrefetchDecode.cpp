@@ -14,6 +14,30 @@
 
 namespace rt {
 
+namespace {
+
+// Premiere-style live file replacement: a still image (single frame /
+// zero duration) is decoded exactly once and pinned in the cache, so the
+// scrub/prefetch decoder that just produced it is never needed again.
+// Fully release it (reset(), not just close()) so the underlying OS file
+// HANDLE is dropped and the image can be overwritten/deleted live in
+// Explorer.  getScrubDecoder() recreates a fresh decoder on demand if the
+// pinned frame is ever evicted and the still must be re-decoded.
+void releaseStillDecoder(PrefetchDecoderState& state, const PrefetchTask& task)
+{
+    if (task.info.frameCount > 1 && task.info.duration > 0.0)
+        return;  // real video — keep the streaming decoder open
+    if (!state.decoder)
+        return;
+    state.decoder.reset();
+    state.lastDecodedFrame = -1;
+    spdlog::warn("MediaPool: released scrub/prefetch handle for still image "
+                 "'{}' (handle={}) — live replace enabled",
+                 task.filePath.filename().string(), task.handle);
+}
+
+} // namespace
+
 std::shared_ptr<CachedFrame> MediaPool::decodePrefetchFrame(
     PrefetchDecoderState& state, const PrefetchTask& task)
 {
@@ -73,6 +97,7 @@ std::shared_ptr<CachedFrame> MediaPool::decodePrefetchFrame(
 
         logDecodePerf(task, true, fwdCount, decodeOnlyMs, convertMs, totalMs,
                       fwd.width, fwd.height);
+        releaseStillDecoder(state, task);
         return cached;
     }
 
@@ -132,6 +157,7 @@ std::shared_ptr<CachedFrame> MediaPool::decodePrefetchFrame(
         m_perf.avgDecodeUs.store(avg, std::memory_order_relaxed);
     }
 
+    releaseStillDecoder(state, task);
     return cached;
 }
 

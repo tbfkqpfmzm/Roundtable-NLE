@@ -77,6 +77,14 @@ public:
     /// Release all uploaded frames.
     void releaseAll();
 
+    /// Evict every uploaded GPU texture belonging to a media handle. The
+    /// upload() cache is keyed by (mediaId, frameNumber); after a live
+    /// file replacement the CPU CachedFrame has new pixels but upload()
+    /// would still return the OLD uploaded texture under the unchanged
+    /// (mediaId, 0) key. Call this on invalidate so the next upload()
+    /// does a real re-upload from the new CPU pixels.
+    void evictMedia(uint64_t mediaId);
+
     /// Number of frames currently uploaded.
     [[nodiscard]] size_t uploadedCount() const;
 

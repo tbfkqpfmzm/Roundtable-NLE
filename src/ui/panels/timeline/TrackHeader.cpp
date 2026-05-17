@@ -91,18 +91,16 @@ void TrackHeader::paintEvent(QPaintEvent* event)
         painter.drawLine(0, 0, w, 0);
         painter.drawLine(0, h - 1, w, h - 1);
 
-        // Long horizontal rule across the label area.  Drawn first so the
-        // (optional) text sits on top of it.
-        QColor ruleColor = tc.trackDivider;
-        painter.setPen(ruleColor);
-        const int midY = h / 2;
-        painter.drawLine(6, midY, w - 6, midY);
-
-        // If the divider has a name, paint it centered over the rule in a
-        // slightly darker / muted colour so it reads as a separator rather
-        // than a real track label.
+        // If the divider has a name, paint it centered over a short rule
+        // in a muted colour so it reads as a separator rather than a real
+        // track label. A nameless divider draws no rule at all — just the
+        // flat bar (avoids a stray line in the empty header area).
         const QString label = QString::fromStdString(m_track->name());
         if (!label.isEmpty()) {
+            QColor ruleColor = tc.trackDivider;
+            painter.setPen(ruleColor);
+            const int midY = h / 2;
+            painter.drawLine(6, midY, w - 6, midY);
             QFont f("Segoe UI", 8, QFont::DemiBold);
             painter.setFont(f);
             QFontMetrics fm(f);

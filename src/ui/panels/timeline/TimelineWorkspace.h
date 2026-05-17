@@ -34,13 +34,16 @@
 #include <QString>
 
 #include <atomic>
+#include <cstdint>
 #include <filesystem>
 #include <future>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <unordered_set>
 #include <vector>
 
@@ -251,6 +254,13 @@ private:
     QFileSystemWatcher* m_mediaWatcher{nullptr};
     QTimer*             m_mediaWatchDebounce{nullptr};
     std::set<std::string> m_mediaWatchPending;   ///< paths awaiting debounced reload
+    std::atomic<bool>   m_mediaWatchRescanQueued{false}; ///< coalesces MediaPool open notifications
+    /// Per-path (size, mtime) signature so a fileChanged whose content
+    /// didn't actually change (Windows delivers spurious/coalesced events
+    /// on window restore, attribute touches, etc.) does NOT trigger a
+    /// reload+composite-invalidate — that left the Program Monitor blank
+    /// on minimize/restore.
+    std::map<std::string, std::pair<std::uintmax_t, std::int64_t>> m_mediaWatchSig;
 
     // Composite service (GPU compositing + spine rendering)
     std::unique_ptr<CompositeService> m_compositeService;

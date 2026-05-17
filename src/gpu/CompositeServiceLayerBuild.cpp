@@ -516,9 +516,22 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
                 if (m_project && seqClip->sequenceIndex() < m_project->sequenceCount()) {
                     auto* innerTimeline = m_project->sequence(seqClip->sequenceIndex());
                     if (innerTimeline && innerTimeline != m_timeline) {
-                        // Map the local tick to the inner timeline's tick space
-                        int64_t innerTick = localTick;
+                        // Map the local tick into the inner timeline, honoring
+                        // the clip's sourceIn so a trimmed nested sequence
+                        // (in/out set in the source monitor) shows the right
+                        // inner content instead of always starting at 0.
+                        int64_t innerTick = localTick + clip->sourceIn();
                         if (innerTick < 0) innerTick = 0;
+
+                        // Force CPU display mode for the recursive composite
+                        // so it does the GPU→CPU readback INLINE while we
+                        // still hold the composite mutex. In GPU display mode
+                        // the inner composite returns a GPU-resident frame
+                        // backed by the SHARED composite output image; the
+                        // outer composite then immediately reuses that image,
+                        // racing the inner's deferred readback.
+                        const bool wasGpuMode = m_gpuDisplayMode;
+                        m_gpuDisplayMode = false;
 
                         // Temporarily swap to the inner timeline and release
                         // the lock so the recursive compositeFrame can acquire it.
@@ -526,12 +539,47 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
                         m_timeline = innerTimeline;
                         lock.unlock();
 
-                        frame = compositeFrame(innerTick, outW, outH, scrubMode);
-                        fromNestedSequence = true;
+                        auto innerFrame = compositeFrame(innerTick, outW, outH, scrubMode);
+
+                        // Snapshot into a clean CPU-only BGRA frame. The
+                        // inner composite returns its shared m_lastGoodComposite,
+                        // which:
+                        //   • still has gpuReady/gpuImageView set (CPU display
+                        //     mode only changes presentation, tryCompositeOnGpu
+                        //     still tags the frame GPU-resident), AND
+                        //   • alternates between the GPU-composited frame and
+                        //     the single-layer fast path that returns the raw
+                        //     decoded frame.
+                        // Those two cases differ in channel order, so the old
+                        // unconditional needsSwapRB swapped only every other
+                        // frame → "every other frame inverted". A decoded /
+                        // read-back frame is ALWAYS straight BGRA (the project
+                        // convention), so copying pixels into a plain CPU
+                        // frame and treating it exactly like a normal video
+                        // layer (needsSwapRB=false) is correct for BOTH inner
+                        // paths and removes the GPU-aliasing race entirely.
+                        if (innerFrame && innerFrame->ensurePixels() &&
+                            !innerFrame->pixels.empty()) {
+                            auto cpu = std::make_shared<CachedFrame>();
+                            cpu->width              = innerFrame->width;
+                            cpu->height             = innerFrame->height;
+                            cpu->stride             = innerFrame->stride
+                                ? innerFrame->stride : innerFrame->width * 4;
+                            cpu->pixels             = innerFrame->pixels;
+                            cpu->unpackedAlpha      = true;
+                            cpu->premultipliedAlpha = innerFrame->premultipliedAlpha;
+                            frame = std::move(cpu);
+                        } else {
+                            frame = nullptr;
+                        }
+                        // NOTE: deliberately NOT setting fromNestedSequence —
+                        // the snapshot is plain BGRA, identical to any other
+                        // CPU video layer, so no R/B swap is needed.
 
                         // Restore outer timeline and reacquire the lock
                         lock.lock();
                         m_timeline = outerTimeline;
+                        m_gpuDisplayMode = wasGpuMode;
                     }
                 }
             }

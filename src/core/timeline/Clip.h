@@ -48,6 +48,10 @@ public:
     // ── Identity ────────────────────────────────────────────────────────
     [[nodiscard]] ClipType          clipType() const noexcept { return m_type; }
     [[nodiscard]] uint64_t          id()       const noexcept { return m_id; }
+    /// Override the auto-assigned id. Used for synthetic clips (e.g. the
+    /// audio clips a nested-sequence clip expands into) so their playback
+    /// provider stays stable across reloads.
+    void setId(uint64_t id) noexcept { m_id = id; }
     [[nodiscard]] const std::string& label()   const noexcept { return m_label; }
     void setLabel(const std::string& label) { m_label = label; }
 

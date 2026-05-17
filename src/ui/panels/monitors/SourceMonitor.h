@@ -46,6 +46,7 @@ class QStackedLayout;
 namespace rt {
 
 class AudioEngine;
+class AudioPlaybackService;
 class AVSyncClock;
 class TransportButton;
 class Viewport;
@@ -53,6 +54,8 @@ class MiniTimeline;
 class PlaybackController;
 class MediaPool;
 class MediaSourceService;
+class Project;
+class Timeline;
 class WaveformDisplayWidget;
 class SpineClip;
 class CompositeService;
@@ -76,10 +79,18 @@ public:
     using SequenceFrameProvider = std::function<
         std::shared_ptr<CachedFrame>(int64_t tick, uint32_t w, uint32_t h, bool scrub)>;
 
+    /// Resolves the inner sequence's Timeline lazily so the source monitor
+    /// never holds a stale pointer when the project changes.
+    using SequenceTimelineGetter = std::function<Timeline*()>;
+
     /// Load a sequence for preview (renders via compositeFrame callback).
+    /// @param timelineGetter  Optional — when set, the source monitor uses it
+    /// to resolve the inner sequence's Timeline for audio playback. When
+    /// null, sequence preview plays without audio (legacy behaviour).
     void loadSequence(size_t sequenceIndex, const QString& name,
                       int64_t durationTicks, double fps,
-                      SequenceFrameProvider frameProvider);
+                      SequenceFrameProvider frameProvider,
+                      SequenceTimelineGetter timelineGetter = nullptr);
 
     /// Load a SpineClip for live preview (renders with SpineRenderer).
     /// @param spineClip  The SpineClip to preview (non-owning).
@@ -207,6 +218,10 @@ public:
     /// Set the shared MediaSourceService for frame access.
     void setMediaSourceService(MediaSourceService* service) noexcept { m_mediaSources = service; }
 
+    /// Inject the Project so previewed sequences that themselves contain
+    /// nested SequenceClips on audio tracks can be expanded for playback.
+    void setSequenceProject(Project* project);
+
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;
@@ -231,6 +246,22 @@ private:
     bool ensureScrubAudioLoaded(int64_t frame, int64_t durationFrames);
     void scrubAudioAt(int64_t tick);
 
+    // Sequence-preview audio (uses an AudioPlaybackService pointed at the
+    // inner sequence's Timeline, mirroring how the main timeline plays).
+    void startSequenceAudio();
+    void stopSequenceAudio();
+    Timeline* resolveSequenceTimeline() const;
+
+    // Premiere-style source-monitor drag-out. Both = video+audio (the
+    // viewport drag); VideoOnly / AudioOnly = the dedicated drag buttons.
+    enum class SourceDragMode { Both, VideoOnly, AudioOnly };
+    void startSourceDrag(SourceDragMode mode);
+
+    /// Enable/disable + fade the drag-video / drag-audio buttons to match
+    /// what the loaded source actually has (e.g. no audio button for a
+    /// still image; no video button for a .wav).
+    void refreshDragButtons(bool hasVideo, bool hasAudio);
+
     // Widgets
     QLabel*           m_clipLabel{nullptr};
     Viewport*         m_viewport{nullptr};
@@ -254,6 +285,9 @@ private:
     QComboBox*        m_playbackResCombo{nullptr};
     QComboBox*        m_fitModeCombo{nullptr};
     QPushButton*      m_btnSafeArea{nullptr};
+    QPushButton*      m_btnDragVideo{nullptr};
+    QPushButton*      m_btnDragAudio{nullptr};
+    QPoint            m_dragBtnStartPos;
 
     QTimer*           m_pollTimer{nullptr};
 
@@ -303,6 +337,9 @@ private:
     bool              m_isSequence{false};
     size_t            m_sequenceIndex{0};
     SequenceFrameProvider m_seqFrameProvider;
+    SequenceTimelineGetter m_seqTimelineGetter;
+    std::unique_ptr<AudioPlaybackService> m_seqAudioPlayback;
+    bool              m_seqAudioWindowRefreshScheduled{false};
 };
 
 } // namespace rt

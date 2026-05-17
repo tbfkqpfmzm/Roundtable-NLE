@@ -18,7 +18,12 @@
 #include "media/MediaSourceService.h"
 #include "media/AudioFile.h"
 #include "media/AudioEngine.h"
+#include "media/AudioPlaybackService.h"
 #include "media/AVSyncClock.h"
+#include "timeline/Timeline.h"
+#include "timeline/Track.h"
+#include "timeline/AudioClip.h"
+#include "timeline/SequenceClip.h"
 
 #ifdef ROUNDTABLE_HAS_SPINE
 #include "CompositeService.h"
@@ -78,6 +83,20 @@ bool loadResampledAudioFile(const std::filesystem::path& filePath,
 
 } // namespace
 
+
+void SourceMonitor::refreshDragButtons(bool hasVideo, bool hasAudio)
+{
+    if (m_btnDragVideo) {
+        m_btnDragVideo->setEnabled(hasVideo);
+        m_btnDragVideo->setCursor(hasVideo ? Qt::OpenHandCursor
+                                           : Qt::ArrowCursor);
+    }
+    if (m_btnDragAudio) {
+        m_btnDragAudio->setEnabled(hasAudio);
+        m_btnDragAudio->setCursor(hasAudio ? Qt::OpenHandCursor
+                                           : Qt::ArrowCursor);
+    }
+}
 
 void SourceMonitor::loadClip(uint64_t mediaHandle, MediaPool* pool)
 {
@@ -141,17 +160,24 @@ void SourceMonitor::loadClip(uint64_t mediaHandle, MediaPool* pool)
     if (m_audioOnly) {
         loadWaveformAsync();
     }
+
+    // A still image / single-frame media has a video stream but no audio;
+    // a .wav has audio but no video. Enable only the applicable buttons.
+    const bool clipHasAudio = (info && info->audioStreamIndex >= 0);
+    refreshDragButtons(/*hasVideo=*/!m_audioOnly, /*hasAudio=*/clipHasAudio);
 }
 
 void SourceMonitor::loadSequence(size_t sequenceIndex, const QString& name,
                                  int64_t durationTicks, double fps,
-                                 SequenceFrameProvider frameProvider)
+                                 SequenceFrameProvider frameProvider,
+                                 SequenceTimelineGetter timelineGetter)
 {
     clearClip();
 
     m_isSequence      = true;
     m_sequenceIndex   = sequenceIndex;
     m_seqFrameProvider = std::move(frameProvider);
+    m_seqTimelineGetter = std::move(timelineGetter);
     m_hasClip         = true;
     m_audioOnly       = false;
     m_fps             = fps > 0.0 ? fps : 24.0;
@@ -165,9 +191,35 @@ void SourceMonitor::loadSequence(size_t sequenceIndex, const QString& name,
     m_miniTimeline->setFrameRate(m_fps);
     setClipName(name);
 
+    // Reset the sequence audio service so the first play rebuilds sources
+    // from the (now-current) inner timeline rather than reusing stale state
+    // from a previously-previewed sequence.
+    if (m_seqAudioPlayback)
+        m_seqAudioPlayback->reset();
+
     m_controller->seekTo(0);
     m_viewStack->setCurrentIndex(0); // video viewport
     updateFrameDisplay();
+
+    // A sequence always has a (composited) video stream. Audio is only
+    // available if the inner timeline actually has audio content — mirror
+    // the nesting drop's innerHasAudio test.
+    bool seqHasAudio = false;
+    if (Timeline* inner = resolveSequenceTimeline()) {
+        for (size_t ti = 0; ti < inner->trackCount() && !seqHasAudio; ++ti) {
+            auto* trk = inner->track(ti);
+            if (!trk || trk->type() != TrackType::Audio) continue;
+            for (size_t ci = 0; ci < trk->clipCount(); ++ci) {
+                auto* c = trk->clip(ci);
+                if (c && c->isEnabled() &&
+                    (dynamic_cast<AudioClip*>(c) ||
+                     dynamic_cast<SequenceClip*>(c))) {
+                    seqHasAudio = true; break;
+                }
+            }
+        }
+    }
+    refreshDragButtons(/*hasVideo=*/true, /*hasAudio=*/seqHasAudio);
 
     // The first compositeFrame for the inner sequence usually returns an
     // empty frame because no clips are decoded yet. Kick the poll timer
@@ -212,6 +264,9 @@ void SourceMonitor::loadSpineClip(SpineClip* spineClip, CompositeService* compos
         m_viewport->displayFrame(*frame);
         updateTimecodeDisplay();
     }
+
+    // Spine characters are video-only.
+    refreshDragButtons(/*hasVideo=*/true, /*hasAudio=*/false);
 }
 #endif // ROUNDTABLE_HAS_SPINE
 
@@ -247,6 +302,11 @@ void SourceMonitor::clearClip()
     m_isSequence   = false;
     m_sequenceIndex = 0;
     m_seqFrameProvider = nullptr;
+    m_seqTimelineGetter = nullptr;
+    if (m_seqAudioPlayback) {
+        m_seqAudioPlayback->setTimeline(nullptr);
+        m_seqAudioPlayback->reset();
+    }
     m_frameCount   = 0;
     m_clipDuration = 0;
     m_fps          = 24.0;
@@ -258,6 +318,9 @@ void SourceMonitor::clearClip()
     m_miniTimeline->clearInOutPoints();
     m_clipLabel->setText(tr("No clip loaded"));
     m_timecodeLabel->setText(QStringLiteral("00:00:00:00"));
+
+    // Nothing loaded — neither stream is draggable.
+    refreshDragButtons(/*hasVideo=*/false, /*hasAudio=*/false);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -412,6 +475,22 @@ void SourceMonitor::onPollTimer()
 
     (void)m_controller->pollPosition();
     updateFrameDisplay();
+
+    // For sequence playback, periodically refresh the audio decode window
+    // so audio keeps playing past the initial 16-second look-ahead — same
+    // mechanism the main timeline uses via scheduleAudioPlaybackWindowRefresh.
+    if (m_isSequence && m_sourceAudioActive && m_seqAudioPlayback &&
+        m_seqAudioPlayback->needsPlaybackWindowRefresh() &&
+        !m_seqAudioWindowRefreshScheduled) {
+        m_seqAudioWindowRefreshScheduled = true;
+        m_seqAudioPlayback->warmCacheAsync();
+        QTimer::singleShot(0, this, [this]() {
+            m_seqAudioWindowRefreshScheduled = false;
+            if (m_destroying.load(std::memory_order_acquire)) return;
+            if (m_seqAudioPlayback && m_seqAudioPlayback->needsPlaybackWindowRefresh())
+                m_seqAudioPlayback->loadSources(/*allowBlockingMisses=*/false);
+        });
+    }
 
     // Stop polling if playback ended (but honour scrub settle window)
     if (!m_controller->isPlaying()) {
@@ -623,77 +702,115 @@ bool SourceMonitor::eventFilter(QObject* watched, QEvent* event)
                 && !m_dragStartPos.isNull()
                 && (me->pos() - m_dragStartPos).manhattanLength()
                        >= QApplication::startDragDistance()) {
-
-                auto region = sourceRegion();
-                auto* mimeData = new QMimeData;
-
-                if (m_isSequence) {
-                    // Sequence drag-out: encode sequence index + in/out
-                    mimeData->setData("application/x-roundtable-sequence",
-                                      QByteArray::number(qulonglong(m_sequenceIndex)));
-                    mimeData->setData("application/x-roundtable-sequence-duration",
-                                      QByteArray::number(qlonglong(m_clipDuration)));
-                    mimeData->setData("application/x-roundtable-source-in",
-                                      QByteArray::number(qlonglong(region.sourceIn)));
-                    mimeData->setData("application/x-roundtable-source-out",
-                                      QByteArray::number(qlonglong(region.sourceOut)));
-                } else {
-                    auto filePath = m_mediaSources
-                        ? m_mediaSources->sourceInfo(m_mediaHandle).value().path
-                        : (m_pool ? m_pool->getPath(m_mediaHandle) : std::filesystem::path());
-                    if (filePath.empty()) { m_dragStartPos = QPoint(); return false; }
-
-                    mimeData->setData("application/x-roundtable-media",
-                                      QByteArray::number(qulonglong(m_mediaHandle)));
-                    mimeData->setUrls({QUrl::fromLocalFile(
-                        QString::fromStdString(filePath.string()))});
-
-                    // Attach source in/out so the timeline can trim the clip
-                    mimeData->setData("application/x-roundtable-source-in",
-                                      QByteArray::number(qlonglong(region.sourceIn)));
-                    mimeData->setData("application/x-roundtable-source-out",
-                                      QByteArray::number(qlonglong(region.sourceOut)));
-                }
-
-                // Create a clean drag pixmap (Premiere-style pill)
-                QString label = m_clipLabel ? m_clipLabel->text()
-                                            : QStringLiteral("Source");
-                QFontMetrics fm(font());
-                int textW = fm.horizontalAdvance(label);
-                int pillW = qBound(120, textW + 24, 300);
-                int pillH = 28;
-                QPixmap pix(pillW, pillH);
-                pix.fill(Qt::transparent);
-                {
-                    const auto& tc = Theme::colors();
-                    QPainter p(&pix);
-                    p.setRenderHint(QPainter::Antialiasing);
-                    p.setBrush(QColor(tc.surface2));
-                    p.setPen(Qt::NoPen);
-                    p.drawRoundedRect(0, 0, pillW, pillH, 4, 4);
-                    // accent stripe – purple for sequences, blue for media
-                    p.setBrush(m_isSequence ? QColor("#7B68EE")
-                                            : QColor(tc.accent));
-                    p.drawRoundedRect(0, 0, 4, pillH, 2, 2);
-                    // text
-                    p.setPen(QColor(tc.text));
-                    p.drawText(QRect(10, 0, pillW - 14, pillH),
-                               Qt::AlignVCenter | Qt::AlignLeft,
-                               fm.elidedText(label, Qt::ElideRight, pillW - 18));
-                }
-
-                auto* drag = new QDrag(this);
-                drag->setMimeData(mimeData);
-                drag->setPixmap(pix);
-                drag->setHotSpot(QPoint(pillW / 2, pillH / 2));
-                drag->exec(Qt::CopyAction);
-
                 m_dragStartPos = QPoint();
+                startSourceDrag(SourceDragMode::Both);
+                return true;
+            }
+        }
+    }
+
+    // Drag-out from the dedicated video / audio drag buttons. A disabled
+    // button (source lacks that stream) must not start a drag.
+    if ((watched == m_btnDragVideo || watched == m_btnDragAudio) && m_hasClip
+        && static_cast<QWidget*>(watched)->isEnabled()) {
+        if (event->type() == QEvent::MouseButtonPress) {
+            auto* me = static_cast<QMouseEvent*>(event);
+            if (me->button() == Qt::LeftButton)
+                m_dragBtnStartPos = me->pos();
+        } else if (event->type() == QEvent::MouseMove) {
+            auto* me = static_cast<QMouseEvent*>(event);
+            if ((me->buttons() & Qt::LeftButton)
+                && !m_dragBtnStartPos.isNull()
+                && (me->pos() - m_dragBtnStartPos).manhattanLength()
+                       >= QApplication::startDragDistance()) {
+                m_dragBtnStartPos = QPoint();
+                startSourceDrag(watched == m_btnDragVideo
+                                    ? SourceDragMode::VideoOnly
+                                    : SourceDragMode::AudioOnly);
                 return true;
             }
         }
     }
     return QWidget::eventFilter(watched, event);
+}
+
+void SourceMonitor::startSourceDrag(SourceDragMode mode)
+{
+    if (!m_hasClip) return;
+
+    auto region = sourceRegion();
+    auto* mimeData = new QMimeData;
+
+    if (m_isSequence) {
+        // Sequence drag-out: encode sequence index + in/out
+        mimeData->setData("application/x-roundtable-sequence",
+                          QByteArray::number(qulonglong(m_sequenceIndex)));
+        mimeData->setData("application/x-roundtable-sequence-duration",
+                          QByteArray::number(qlonglong(m_clipDuration)));
+        mimeData->setData("application/x-roundtable-source-in",
+                          QByteArray::number(qlonglong(region.sourceIn)));
+        mimeData->setData("application/x-roundtable-source-out",
+                          QByteArray::number(qlonglong(region.sourceOut)));
+    } else {
+        auto filePath = m_mediaSources
+            ? m_mediaSources->sourceInfo(m_mediaHandle).value().path
+            : (m_pool ? m_pool->getPath(m_mediaHandle) : std::filesystem::path());
+        if (filePath.empty()) { delete mimeData; return; }
+
+        mimeData->setData("application/x-roundtable-media",
+                          QByteArray::number(qulonglong(m_mediaHandle)));
+        mimeData->setUrls({QUrl::fromLocalFile(
+            QString::fromStdString(filePath.string()))});
+
+        // Attach source in/out so the timeline can trim the clip
+        mimeData->setData("application/x-roundtable-source-in",
+                          QByteArray::number(qlonglong(region.sourceIn)));
+        mimeData->setData("application/x-roundtable-source-out",
+                          QByteArray::number(qlonglong(region.sourceOut)));
+    }
+
+    // Premiere-style video-only / audio-only drag flag. Absent = both.
+    const char* modeStr = (mode == SourceDragMode::VideoOnly) ? "video"
+                        : (mode == SourceDragMode::AudioOnly) ? "audio"
+                        : nullptr;
+    if (modeStr)
+        mimeData->setData("application/x-roundtable-drag-mode",
+                          QByteArray(modeStr));
+
+    // Create a clean drag pixmap (Premiere-style pill)
+    QString label = m_clipLabel ? m_clipLabel->text()
+                                : QStringLiteral("Source");
+    if (mode == SourceDragMode::VideoOnly)      label += QStringLiteral(" (V)");
+    else if (mode == SourceDragMode::AudioOnly) label += QStringLiteral(" (A)");
+    QFontMetrics fm(font());
+    int textW = fm.horizontalAdvance(label);
+    int pillW = qBound(120, textW + 24, 300);
+    int pillH = 28;
+    QPixmap pix(pillW, pillH);
+    pix.fill(Qt::transparent);
+    {
+        const auto& tc = Theme::colors();
+        QPainter p(&pix);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setBrush(QColor(tc.surface2));
+        p.setPen(Qt::NoPen);
+        p.drawRoundedRect(0, 0, pillW, pillH, 4, 4);
+        // accent stripe – purple for sequences, blue for media
+        p.setBrush(m_isSequence ? QColor("#7B68EE")
+                                : QColor(tc.accent));
+        p.drawRoundedRect(0, 0, 4, pillH, 2, 2);
+        // text
+        p.setPen(QColor(tc.text));
+        p.drawText(QRect(10, 0, pillW - 14, pillH),
+                   Qt::AlignVCenter | Qt::AlignLeft,
+                   fm.elidedText(label, Qt::ElideRight, pillW - 18));
+    }
+
+    auto* drag = new QDrag(this);
+    drag->setMimeData(mimeData);
+    drag->setPixmap(pix);
+    drag->setHotSpot(QPoint(pillW / 2, pillH / 2));
+    drag->exec(Qt::CopyAction);
 }
 
 // Accept any drag that carries either our custom MIME, a tree-widget
@@ -1037,6 +1154,12 @@ void SourceMonitor::startSourceAudio()
 {
     if (!m_audioEngine) return;
     if (m_sourceAudioActive) return;
+
+    if (m_isSequence) {
+        startSequenceAudio();
+        return;
+    }
+
     if (!ensureSourceAudioLoaded()) return;
 
     // Detach the timeline's sync clock so audioEngine->play() won't
@@ -1067,12 +1190,85 @@ void SourceMonitor::stopSourceAudio()
 {
     if (!m_audioEngine || !m_sourceAudioActive) return;
 
+    if (m_isSequence) {
+        stopSequenceAudio();
+        return;
+    }
+
     m_audioEngine->pause();
     m_audioEngine->setPlaybackSpeed(1.0);  // Reset to normal speed
     m_audioEngine->clearTrackSources();
     m_audioEngine->resetStretchers();
 
     // Restore the timeline's sync clock
+    m_audioEngine->setSyncClock(m_savedSyncClock);
+    m_savedSyncClock = nullptr;
+    m_sourceAudioActive = false;
+}
+
+Timeline* SourceMonitor::resolveSequenceTimeline() const
+{
+    if (!m_isSequence || !m_seqTimelineGetter) return nullptr;
+    return m_seqTimelineGetter();
+}
+
+void SourceMonitor::startSequenceAudio()
+{
+    if (!m_audioEngine || !m_seqAudioPlayback) return;
+    if (m_sourceAudioActive) return;
+
+    Timeline* innerTimeline = resolveSequenceTimeline();
+    // Mark active and emit playbackStarted even when the inner timeline has
+    // no audio clips — playbackStarted is also what halts the main
+    // timeline's playback (see TimelineWorkspacePanelsCreate). Without it,
+    // dragging a silent sequence into the source monitor would leave the
+    // main timeline's audio playing.
+    m_savedSyncClock = m_audioEngine->syncClock();
+    m_audioEngine->setSyncClock(nullptr);
+    m_sourceAudioActive = true;
+
+    emit playbackStarted();
+
+    if (!innerTimeline) {
+        // Nothing to play — leave engine paused but in source-monitor mode
+        // so stopSequenceAudio() correctly restores the timeline sync clock
+        // when the user pauses.
+        return;
+    }
+
+    // Build track sources from the inner sequence (mirroring how the main
+    // timeline drives audio via its own AudioPlaybackService instance).
+    m_seqAudioPlayback->setTimeline(innerTimeline);
+    m_seqAudioPlayback->setAudioEngine(m_audioEngine);
+    m_seqAudioPlayback->setPlaybackController(m_controller.get());
+    m_seqAudioPlayback->invalidateSources();
+    m_seqAudioPlayback->loadSources(/*allowBlockingMisses=*/true);
+
+    // Match audio speed to controller shuttle speed
+    double speed = m_controller->shuttleSpeed();
+    if (speed == 0.0) speed = 1.0;
+    m_audioEngine->setPlaybackSpeed(speed);
+
+    // Seek audio engine to current playhead
+    int64_t tick = m_controller->currentTick();
+    int64_t frame = static_cast<int64_t>(
+        static_cast<double>(tick) / 48000.0 * m_audioEngine->sampleRate());
+    m_audioEngine->seekToFrame(frame);
+    m_audioEngine->play();
+}
+
+void SourceMonitor::stopSequenceAudio()
+{
+    if (!m_audioEngine || !m_sourceAudioActive) return;
+
+    m_audioEngine->pause();
+    m_audioEngine->setPlaybackSpeed(1.0);
+    m_audioEngine->clearTrackSources();
+    m_audioEngine->resetStretchers();
+
+    if (m_seqAudioPlayback)
+        m_seqAudioPlayback->invalidateSources();
+
     m_audioEngine->setSyncClock(m_savedSyncClock);
     m_savedSyncClock = nullptr;
     m_sourceAudioActive = false;
@@ -1106,6 +1302,35 @@ void SourceMonitor::scrubAudioAt(int64_t tick)
     const int64_t frame = static_cast<int64_t>(
         static_cast<double>(tick) / 48000.0 * m_audioEngine->sampleRate());
     constexpr int64_t scrubDurationFrames = 2048;
+
+    // Sequence preview: build track sources from the inner timeline (same
+    // path startSequenceAudio uses) and let AudioEngine::scrub play a short
+    // burst from those mixed sources.
+    if (m_isSequence) {
+        if (!m_seqAudioPlayback) return;
+
+        Timeline* innerTimeline = resolveSequenceTimeline();
+        if (!innerTimeline) return;
+
+        const bool wasActive = m_sourceAudioActive;
+        if (!wasActive) {
+            m_savedSyncClock = m_audioEngine->syncClock();
+            m_audioEngine->setSyncClock(nullptr);
+        }
+
+        m_seqAudioPlayback->setTimeline(innerTimeline);
+        m_seqAudioPlayback->setAudioEngine(m_audioEngine);
+        m_seqAudioPlayback->setPlaybackController(m_controller.get());
+        m_seqAudioPlayback->ensureSourcesLoaded();
+
+        m_audioEngine->scrub(frame, scrubDurationFrames);
+
+        if (!wasActive) {
+            m_audioEngine->setSyncClock(m_savedSyncClock);
+            m_savedSyncClock = nullptr;
+        }
+        return;
+    }
 
     if (!ensureScrubAudioLoaded(frame, scrubDurationFrames)) {
         return;

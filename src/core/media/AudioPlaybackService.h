@@ -21,6 +21,7 @@ namespace rt {
 class AudioEngine;
 class AudioSampleProvider;
 class PlaybackController;
+class Project;
 class Timeline;
 
 class AudioPlaybackService {
@@ -35,6 +36,9 @@ public:
     void setTimeline(Timeline* tl)                    { m_timeline = tl; }
     void setAudioEngine(AudioEngine* engine)          { m_audioEngine = engine; }
     void setPlaybackController(PlaybackController* c) { m_playbackController = c; }
+    /// Project reference — needed to resolve nested-sequence audio
+    /// (SequenceClip on an audio track). May be null (no nesting support).
+    void setProject(Project* p)                       { m_project = p; }
 
     // ── Core operations ─────────────────────────────────────────────────
     /// Scan the timeline for audio clips and feed decoded buffers to the
@@ -85,6 +89,7 @@ private:
     Timeline*            m_timeline{nullptr};
     AudioEngine*         m_audioEngine{nullptr};
     PlaybackController*  m_playbackController{nullptr};
+    Project*             m_project{nullptr};
 
     // Provider mapping (clipId → window provider)
     std::vector<std::shared_ptr<std::vector<float>>> m_audioBuffers;

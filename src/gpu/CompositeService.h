@@ -215,6 +215,14 @@ public:
         m_openMediaHandles.erase(path);
     }
 
+    /// Evict every cached GPU texture belonging to a media handle. Called
+    /// after MediaPool::invalidatePath() on a live file replacement: the
+    /// GpuTextureCache is keyed by (mediaId, frame, tier) and the handle
+    /// is preserved across invalidation, so without this the compositor
+    /// keeps drawing the stale uploaded texture even though MediaPool now
+    /// decodes the new file. Defined in the .cpp (needs CompositeEngine).
+    void invalidateMediaTextures(uint64_t mediaId);
+
     // ── Video fallback cache ────────────────────────────────────────────
     struct VideoFallbackInfo {
         std::string videoPath;  // empty = not a video character

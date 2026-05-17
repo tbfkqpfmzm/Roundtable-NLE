@@ -3,8 +3,10 @@
 
 #include <volk.h>
 
+#include <algorithm>
 #include <map>
 #include <set>
+#include <unordered_map>
 
 #include "panels/timeline/TimelineWorkspace.h"
 #include "panels/timeline/ClipRenderers.h"
@@ -258,8 +260,10 @@ void TimelineWorkspace::wireNestSignals()
         // -- Sequence dropped from project bin or Source Monitor --------
         connect(m_timelinePanel, &TimelinePanel::sequenceDropped,
                 this, [this](size_t sequenceIndex, int64_t atTick, size_t trackIndex,
-                             int64_t sourceIn, int64_t sourceOut) {
+                             int64_t sourceIn, int64_t sourceOut, int dragMode) {
             if (m_destroying.load(std::memory_order_acquire)) return;
+            const bool dropVideo = (dragMode != TimelinePanel::DragAudioOnly);
+            const bool dropAudio = (dragMode != TimelinePanel::DragVideoOnly);
             if (!m_timeline || !m_project || !m_commandStack) return;
             if (sequenceIndex >= m_project->sequenceCount()) return;
 
@@ -309,6 +313,35 @@ void TimelineWorkspace::wireNestSignals()
             auto overlapCmd2 = std::make_shared<std::unique_ptr<Command>>(nullptr);
             std::string seqName = nestedTimeline->name();
 
+            // ── Audio nest: mirror the video SequenceClip onto an audio
+            //    track so the parent timeline plays the inner sequence's
+            //    audio (Premiere-style nesting). Determined here only if
+            //    the inner sequence actually has any audio content.
+            bool innerHasAudio = false;
+            for (size_t ti = 0; ti < nestedTimeline->trackCount() && !innerHasAudio; ++ti) {
+                auto* trk = nestedTimeline->track(ti);
+                if (!trk || trk->type() != TrackType::Audio) continue;
+                for (size_t ci = 0; ci < trk->clipCount(); ++ci) {
+                    auto* c = trk->clip(ci);
+                    if (c && dynamic_cast<AudioClip*>(c) && c->isEnabled()) {
+                        innerHasAudio = true; break;
+                    }
+                }
+            }
+            // Honour the drop target: if the cursor was over an audio
+            // track, the audio nest clip goes THERE (not always the top
+            // audio track). Captured by Track* so it survives any video
+            // track insertion that shifts indices before audio placement.
+            Track* preferredAudioTrack = nullptr;
+            if (trackIndex < m_timeline->trackCount() &&
+                m_timeline->track(trackIndex)->type() == TrackType::Audio)
+                preferredAudioTrack = m_timeline->track(trackIndex);
+
+            auto audioClipId      = std::make_shared<uint64_t>(0);
+            auto audioTkIdx       = std::make_shared<size_t>(SIZE_MAX);
+            auto createdAudioTk   = std::make_shared<bool>(false);
+            auto audioOverlapCmd  = std::make_shared<std::unique_ptr<Command>>(nullptr);
+
             auto refreshAfter = [this](bool trackStructureChanged = false) {
                 if (m_destroying.load(std::memory_order_acquire)) return;
                 if (trackStructureChanged)
@@ -317,57 +350,136 @@ void TimelineWorkspace::wireNestSignals()
                     m_timelinePanel->refreshTrackContents();
                 invalidateCompositeCache();
                 if (m_programMonitor) m_programMonitor->requestRefresh();
+                // Audio topology changed — reload sources so the next play
+                // pulls audio from the newly-nested sequence.
+                invalidateAudioSources();
             };
 
             m_commandStack->execute(std::make_unique<LambdaCommand>(
                 "Add Sequence to Timeline",
                 /* execute / redo */
                 [this, sequenceIndex, atTick, sourceIn, sourceOut, dur,
-                 needsNewTrack, forceGhostVideoTrack,
+                 needsNewTrack, forceGhostVideoTrack, innerHasAudio,
+                 dropVideo, dropAudio,
                  clipId, createdTk, tkIdx, overlapCmd2, seqName,
+                 preferredAudioTrack,
+                 audioClipId, audioTkIdx, createdAudioTk, audioOverlapCmd,
                  refreshAfter]() {
-                    if (needsNewTrack && *tkIdx == SIZE_MAX) {
-                        Track* t = nullptr;
-                        if (forceGhostVideoTrack) {
-                            auto newTrack = std::make_unique<Track>(TrackType::Video, "");
-                            t = m_timeline->insertTrack(0, std::move(newTrack));
-                        } else {
-                            t = m_timeline->addVideoTrack("V1");
+                    if (dropVideo) {
+                        if (needsNewTrack && *tkIdx == SIZE_MAX) {
+                            Track* t = nullptr;
+                            if (forceGhostVideoTrack) {
+                                auto newTrack = std::make_unique<Track>(TrackType::Video, "");
+                                t = m_timeline->insertTrack(0, std::move(newTrack));
+                            } else {
+                                t = m_timeline->addVideoTrack("V1");
+                            }
+                            for (size_t i = 0; i < m_timeline->trackCount(); ++i) {
+                                if (m_timeline->track(i) == t) {
+                                    *tkIdx = i; break;
+                                }
+                            }
+                            *createdTk = true;
                         }
-                        for (size_t i = 0; i < m_timeline->trackCount(); ++i) {
-                            if (m_timeline->track(i) == t) {
-                                *tkIdx = i; break;
+                        auto* track = m_timeline->track(*tkIdx);
+                        if (track) {
+                            auto seqClip = std::make_unique<SequenceClip>();
+                            seqClip->setSequenceIndex(sequenceIndex);
+                            seqClip->setSequenceName(seqName);
+                            seqClip->setLabel(seqName);
+                            seqClip->setTimelineIn(atTick);
+
+                            if (sourceIn >= 0 && sourceOut > sourceIn) {
+                                seqClip->setSourceIn(sourceIn);
+                                seqClip->setDuration(sourceOut - sourceIn);
+                            } else {
+                                seqClip->setDuration(dur);
+                            }
+                            *clipId = seqClip->id();
+                            track->addClip(std::move(seqClip));
+
+                            *overlapCmd2 = EditOperations::resolveOverlaps(
+                                *m_timeline, *tkIdx, *clipId);
+                            if (*overlapCmd2) (*overlapCmd2)->execute();
+                        }
+                    }
+
+                    // ── Audio nest: place a single SequenceClip on a
+                    //    parent audio track. AudioPlaybackService recurses
+                    //    into the inner sequence at playback time so
+                    //    edits to the inner propagate live.
+                    *audioTkIdx     = SIZE_MAX;
+                    *createdAudioTk = false;
+                    *audioClipId    = 0;
+                    audioOverlapCmd->reset();
+                    if (dropAudio && innerHasAudio) {
+                        size_t aIdx = SIZE_MAX;
+                        // 1) Drop target audio track (resolved by identity so
+                        //    a just-inserted video track doesn't misalign it).
+                        if (preferredAudioTrack) {
+                            for (size_t i = 0; i < m_timeline->trackCount(); ++i) {
+                                if (m_timeline->track(i) == preferredAudioTrack) {
+                                    aIdx = i; break;
+                                }
                             }
                         }
-                        *createdTk = true;
+                        // 2) Otherwise the first existing audio track.
+                        if (aIdx == SIZE_MAX) {
+                            for (size_t i = 0; i < m_timeline->trackCount(); ++i) {
+                                if (m_timeline->track(i)->type() == TrackType::Audio) {
+                                    aIdx = i; break;
+                                }
+                            }
+                        }
+                        // 3) None exist — create one.
+                        if (aIdx == SIZE_MAX) {
+                            Track* nt = m_timeline->addAudioTrack("A1");
+                            for (size_t i = 0; i < m_timeline->trackCount(); ++i) {
+                                if (m_timeline->track(i) == nt) {
+                                    aIdx = i; break;
+                                }
+                            }
+                            *createdAudioTk = true;
+                        }
+                        if (aIdx != SIZE_MAX) {
+                            auto* aTrack = m_timeline->track(aIdx);
+                            if (aTrack) {
+                                auto aClip = std::make_unique<SequenceClip>();
+                                aClip->setSequenceIndex(sequenceIndex);
+                                aClip->setSequenceName(seqName);
+                                aClip->setLabel(seqName);
+                                aClip->setTimelineIn(atTick);
+                                if (sourceIn >= 0 && sourceOut > sourceIn) {
+                                    aClip->setSourceIn(sourceIn);
+                                    aClip->setDuration(sourceOut - sourceIn);
+                                } else {
+                                    aClip->setDuration(dur);
+                                }
+                                *audioClipId = aClip->id();
+                                aTrack->addClip(std::move(aClip));
+                                *audioTkIdx = aIdx;
+
+                                *audioOverlapCmd = EditOperations::resolveOverlaps(
+                                    *m_timeline, aIdx, *audioClipId);
+                                if (*audioOverlapCmd) (*audioOverlapCmd)->execute();
+                            }
+                        }
                     }
-                    auto* track = m_timeline->track(*tkIdx);
-                    if (!track) return;
 
-                    auto seqClip = std::make_unique<SequenceClip>();
-                    seqClip->setSequenceIndex(sequenceIndex);
-                    seqClip->setSequenceName(seqName);
-                    seqClip->setLabel(seqName);
-                    seqClip->setTimelineIn(atTick);
-
-                    if (sourceIn >= 0 && sourceOut > sourceIn) {
-                        seqClip->setSourceIn(sourceIn);
-                        seqClip->setDuration(sourceOut - sourceIn);
-                    } else {
-                        seqClip->setDuration(dur);
-                    }
-                    *clipId = seqClip->id();
-                    track->addClip(std::move(seqClip));
-
-                    *overlapCmd2 = EditOperations::resolveOverlaps(
-                        *m_timeline, *tkIdx, *clipId);
-                    if (*overlapCmd2) (*overlapCmd2)->execute();
-
-                    refreshAfter(*createdTk);
+                    refreshAfter(*createdTk || *createdAudioTk);
                 },
                 /* undo */
-                [this, clipId, createdTk, tkIdx, overlapCmd2, refreshAfter]() {
-                    const bool trackStructureChanged = *createdTk;
+                [this, clipId, createdTk, tkIdx, overlapCmd2,
+                 audioClipId, audioTkIdx, createdAudioTk, audioOverlapCmd,
+                 refreshAfter]() {
+                    const bool trackStructureChanged = *createdTk || *createdAudioTk;
+
+                    if (*audioOverlapCmd) (*audioOverlapCmd)->undo();
+                    if (*audioTkIdx < m_timeline->trackCount() && *audioClipId != 0) {
+                        auto* aTrack = m_timeline->track(*audioTkIdx);
+                        if (aTrack) aTrack->removeClipById(*audioClipId);
+                    }
+
                     if (*overlapCmd2) (*overlapCmd2)->undo();
 
                     if (*tkIdx < m_timeline->trackCount()) {
@@ -378,6 +490,12 @@ void TimelineWorkspace::wireNestSignals()
                         m_timeline->removeTrack(*tkIdx);
                         *tkIdx = SIZE_MAX;
                         *createdTk = false;
+                    }
+                    if (*createdAudioTk && *audioTkIdx != SIZE_MAX &&
+                        *audioTkIdx < m_timeline->trackCount()) {
+                        m_timeline->removeTrack(*audioTkIdx);
+                        *audioTkIdx = SIZE_MAX;
+                        *createdAudioTk = false;
                     }
                     refreshAfter(trackStructureChanged);
                 }));

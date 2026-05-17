@@ -74,6 +74,7 @@ public:
     /// Get the track index.
     size_t trackIndex() const noexcept { return m_trackIndex; }
 
+
     /// Set pointer to thumbnail cache (clipId → QPixmap, owned externally).
     void setThumbnailCache(const std::unordered_map<uint64_t, QPixmap>* cache);
 

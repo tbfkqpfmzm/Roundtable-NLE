@@ -514,6 +514,29 @@ void VideoUploader::releaseAll()
     m_impl->uploaded.clear();
 }
 
+void VideoUploader::evictMedia(uint64_t mediaId)
+{
+    std::lock_guard lock(m_impl->mutex);
+
+    size_t evicted = 0;
+    for (auto it = m_impl->uploaded.begin(); it != m_impl->uploaded.end(); ) {
+        if (it->first.mediaId == mediaId) {
+            it->second.gpuFrame->valid = false;
+            if (it->second.slotIndex < m_impl->textureSlots.size())
+                m_impl->textureSlots[it->second.slotIndex].inUse = false;
+            it = m_impl->uploaded.erase(it);
+            ++evicted;
+        } else {
+            ++it;
+        }
+    }
+    if (evicted > 0) {
+        spdlog::warn("[LIVE-RELOAD] VideoUploader: evicted {} uploaded "
+                     "GPU texture(s) for mediaId={} — next upload will "
+                     "re-stage from CPU pixels", evicted, mediaId);
+    }
+}
+
 size_t VideoUploader::uploadedCount() const
 {
     std::lock_guard lock(m_impl->mutex);

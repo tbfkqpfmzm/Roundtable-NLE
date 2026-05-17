@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -34,6 +35,7 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace rt {
 
@@ -187,14 +189,34 @@ public:
     /// Close all media. Clears the frame cache.
     void closeAll();
 
-    /// Force a single media file to be re-read from disk: closes its
-    /// decoder, evicts its cached frames, cancels pending prefetch, and
-    /// drops the path→handle mapping regardless of refcount. The next
-    /// open()/getFrame() for this path re-decodes the (now-changed)
-    /// file. Any existing handle for this path becomes invalid, so
-    /// callers that cached one must re-resolve by path. Used when a
-    /// generated asset (e.g. a Color Matte) is edited in place.
-    void invalidatePath(const std::filesystem::path& filePath);
+    /// Force a single media file to be re-read from disk after its
+    /// contents changed (live file replacement / edited Color Matte).
+    /// Evicts the CPU + disk frame cache for the file, cancels pending
+    /// prefetch, and reopens the decoder IN PLACE. The handle and the
+    /// path→handle mapping are intentionally preserved: every consumer
+    /// that cached the handle (compositor, Source Monitor, clips) keeps
+    /// it and transparently receives freshly decoded pixels on the next
+    /// getFrame() — no path re-resolution required.
+    /// Returns the (preserved) handle so the caller can also evict GPU-side
+    /// textures for it: GpuTextureCache is keyed by mediaId+frame+tier, and
+    /// because the handle is preserved that key is unchanged — it would
+    /// otherwise keep serving the stale uploaded texture. Returns
+    /// InvalidMedia if the path was not open.
+    [[nodiscard]] MediaHandle invalidatePath(const std::filesystem::path& filePath);
+
+    /// Snapshot of every source file currently open in the pool (the
+    /// canonical resolved paths actually decoded — covers timeline clips,
+    /// bin/source-monitor previews, prewarm/lookahead opens, regardless of
+    /// clip subtype). Used by the live file-swap watcher so it watches what
+    /// the app actually touches rather than re-deriving it from clip types.
+    [[nodiscard]] std::vector<std::filesystem::path> openMediaPaths() const;
+
+    /// Set a callback invoked (on the calling thread, outside the pool
+    /// mutex) right after a NEW media file is opened. The live file-swap
+    /// watcher uses this to arm a watch on the just-opened path. Pass {}
+    /// to clear. The callback must be cheap and thread-safe (open() is
+    /// called from prefetch workers, the compositor, and the UI thread).
+    void setOnMediaOpened(std::function<void(std::filesystem::path)> cb);
 
     // ── Frame access ────────────────────────────────────────────────────
 
@@ -364,6 +386,7 @@ private:
     mutable std::mutex                             m_mutex;
     std::unordered_map<MediaHandle, MediaEntry>     m_entries;
     std::unordered_map<std::string, MediaHandle>    m_pathToHandle; // canonical path → handle
+    std::function<void(std::filesystem::path)>      m_onMediaOpened; // live-swap watcher hook
     std::unordered_set<std::string>                 m_failedPaths;  // paths that failed to open (no retry)
     std::shared_ptr<FrameCache>                     m_cache;
     std::shared_ptr<DiskFrameCache>                 m_diskCache;

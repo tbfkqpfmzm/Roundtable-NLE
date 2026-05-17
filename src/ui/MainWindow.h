@@ -208,6 +208,11 @@ protected:
     void closeEvent(QCloseEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
+    /// Restoring from minimized recreates the Vulkan swapchain; the last
+    /// presented frame is gone and, when paused, nothing recomposites
+    /// until the user scrubs/plays — the Program Monitor stays blank.
+    /// Force a recomposite+present on un-minimize.
+    void changeEvent(QEvent* event) override;
 
 public slots:
     void switchSequence(size_t index);

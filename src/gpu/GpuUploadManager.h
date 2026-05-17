@@ -93,6 +93,7 @@ public:
                                 Texture& poolTex,
                                 uint64_t& poolMediaId,
                                 int64_t& poolFrameNo,
+                                const void*& poolFramePtr,
                                 bool scrubMode);
 
     // ── Mask texture upload ────────────────────────────────────────────

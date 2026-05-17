@@ -114,6 +114,17 @@ public:
     void clearTextureCache();
     [[nodiscard]] int vramUsagePercent() const noexcept;
 
+    /// Reset per-layer-slot dirty-tracking keys for a given media handle.
+    /// GpuUploadManager::uploadLayer() skips the CPU→GPU upload when the
+    /// pool-slot's recorded (mediaId, frameNumber) matches the requested
+    /// frame — used to avoid PCIe transfers on stable layers.  On live
+    /// file replacement the (mediaId, frameNumber) are unchanged but the
+    /// CachedFrame's pixels are different; without resetting these keys
+    /// the dirty-tracking incorrectly skips the upload and the layer
+    /// keeps drawing the OLD GPU texture.  Call this on invalidate so
+    /// the next composite re-uploads the freshly decoded pixels.
+    void invalidateMediaPoolSlots(uint64_t mediaId);
+
     // ── Semaphore pool (inter-queue compute->graphics sync) ──────────────
     /// Each composite frame acquires a dedicated binary semaphore to
     /// avoid the ring-buffer wrap race: the per-slot semaphore in
@@ -153,7 +164,22 @@ private:
     std::unique_ptr<rt::GpuTextureCache> m_gpuTexCache;
 
     // Layer texture pool
-    struct PoolTexKey { uint64_t mediaId{0}; int64_t frameNumber{-1}; };
+    //
+    // PoolTexKey identifies the most-recently-uploaded CPU frame for each
+    // pool slot.  GpuUploadManager::uploadLayer() skips the CPU→GPU upload
+    // when the request matches the slot's key.
+    //
+    // The CachedFrame pointer is part of the identity: live file replacement
+    // produces a NEW CachedFrame (shared_ptr) carrying new pixels under the
+    // same (mediaId, frameNumber) tuple.  Comparing (mediaId, frameNumber)
+    // alone would incorrectly skip the upload (the bug "needs scrub to
+    // refresh").  Comparing the frame pointer too forces a re-upload
+    // whenever the decoded frame object changes.
+    struct PoolTexKey {
+        uint64_t mediaId{0};
+        int64_t  frameNumber{-1};
+        const void* framePtr{nullptr};  // CachedFrame identity for re-decode detection
+    };
     std::vector<std::unique_ptr<rt::Texture>> m_gpuLayerTextures;
     std::vector<PoolTexKey> m_gpuLayerTexKeys;
     std::vector<std::unique_ptr<rt::Texture>> m_gpuMaskTextures;

@@ -13,15 +13,20 @@
 #include "effects/EffectStack.h"
 
 #include "timeline/AudioClip.h"
+#include "timeline/SequenceClip.h"
 #include "timeline/Timeline.h"
 #include "timeline/Track.h"
 #include "timeline/Transition.h"
 
+#include "project/Project.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <memory>
 #include <optional>
 #include <unordered_set>
+#include <vector>
 #include <spdlog/spdlog.h>
 
 namespace rt {
@@ -277,6 +282,131 @@ std::optional<TimelineAudioRegion> computeTimelineAudioRegion(const AudioClip& c
     return region;
 }
 
+// ── Nested-sequence audio expansion ─────────────────────────────────────────
+//
+// A SequenceClip on an audio track represents the inner sequence's mixed
+// audio. The AudioEngine only understands AudioClips, so we recursively
+// expand each SequenceClip into synthetic AudioClips mapped from the inner
+// sequence's time space into the host (parent) time space, using the same
+// in/out + offset math the video compositor uses for nested video.
+//
+// Synthetic clips get a deterministic id derived from the outer SequenceClip
+// id and the inner clip id so their playback provider stays stable across
+// reloads (no provider churn → no audio glitches).
+
+constexpr int kMaxNestDepth = 4;
+
+inline uint64_t mixNestId(uint64_t outer, uint64_t inner)
+{
+    // 64-bit splitmix-style hash so synthetic ids don't collide with real
+    // clip ids or with each other across nesting levels.
+    uint64_t x = outer * 0x9E3779B97F4A7C15ull;
+    x ^= (inner + 0x165667B19E3779F9ull);
+    x ^= x >> 30; x *= 0xBF58476D1CE4E5B9ull;
+    x ^= x >> 27; x *= 0x94D049BB133111EBull;
+    x ^= x >> 31;
+    return x | 0x8000000000000000ull; // set high bit: clearly synthetic
+}
+
+void expandSequenceAudio(const SequenceClip& outerSeq,
+                         const Timeline* hostTimeline,
+                         Project* project,
+                         int depth,
+                         std::vector<std::unique_ptr<AudioClip>>& out)
+{
+    if (!project || depth >= kMaxNestDepth) return;
+    Timeline* inner = project->sequence(outerSeq.sequenceIndex());
+    if (!inner || inner == hostTimeline) return;
+
+    const int64_t T_o = outerSeq.timelineIn();
+    const int64_t D_o = outerSeq.duration();
+    const int64_t S_o = outerSeq.sourceIn();
+    const int64_t innerSrcIn  = S_o;
+    const int64_t innerSrcOut = S_o + D_o;
+
+    // Map a clip living at [T_i, T_i+D_i) (inner-sequence time, source S_i)
+    // into the outer host time space. Returns false if it falls entirely
+    // outside the outer clip's visible window.
+    auto mapToOuter = [&](int64_t T_i, int64_t D_i, int64_t S_i,
+                          int64_t& outIn, int64_t& outDur, int64_t& outSrcIn) {
+        const int64_t visStart = std::max(T_i, innerSrcIn);
+        const int64_t visEnd   = std::min(T_i + D_i, innerSrcOut);
+        if (visEnd <= visStart) return false;
+        outIn    = T_o + (visStart - innerSrcIn);
+        outDur   = visEnd - visStart;
+        outSrcIn = S_i + (visStart - T_i);
+        return true;
+    };
+
+    for (size_t ti = 0; ti < inner->trackCount(); ++ti) {
+        auto* trk = inner->track(ti);
+        if (!trk || trk->type() != TrackType::Audio || trk->isMuted())
+            continue;
+
+        for (size_t ci = 0; ci < trk->clipCount(); ++ci) {
+            auto* c = trk->clip(ci);
+            if (!c || !c->isEnabled()) continue;
+
+            if (auto* ac = dynamic_cast<AudioClip*>(c)) {
+                int64_t nIn, nDur, nSrcIn;
+                if (!mapToOuter(ac->timelineIn(), ac->duration(),
+                                ac->sourceIn(), nIn, nDur, nSrcIn))
+                    continue;
+                auto cloneBase = ac->clone();
+                auto* synth = dynamic_cast<AudioClip*>(cloneBase.get());
+                if (!synth) continue;
+                synth->setTimelineIn(nIn);
+                synth->setDuration(nDur);
+                synth->setSourceIn(nSrcIn);
+                synth->setId(mixNestId(outerSeq.id(), ac->id()));
+
+                // Bake inner-sequence audio crossfades. The parent track
+                // has no transitions for this synthetic clip (its id is
+                // synthetic), so the main loop's transition-envelope path
+                // can't see the inner crossfade. Decompose each inner
+                // transition the standard way: the clip on the left of the
+                // transition fades OUT over the overlap, the clip on the
+                // right fades IN over it. The main loop then turns these
+                // fade durations into a playback gain envelope.
+                for (size_t tri = 0; tri < trk->transitionCount(); ++tri) {
+                    const Transition* tr = trk->transition(tri);
+                    if (!tr) continue;
+                    int64_t tS, tE;
+                    tr->getRange(tS, tE);
+                    const int64_t tDur = tE - tS;
+                    if (tDur <= 0) continue;
+                    if (tr->leftClipId == ac->id())
+                        synth->setFadeOutDuration(
+                            std::max<int64_t>(synth->fadeOutDuration(), tDur));
+                    if (tr->rightClipId == ac->id())
+                        synth->setFadeInDuration(
+                            std::max<int64_t>(synth->fadeInDuration(), tDur));
+                }
+
+                out.push_back(std::unique_ptr<AudioClip>(
+                    static_cast<AudioClip*>(cloneBase.release())));
+            }
+            else if (auto* sc = dynamic_cast<SequenceClip*>(c)) {
+                // Recurse: get the deeper sequence's synthetics in *inner*
+                // time, then fold them through this outer clip's window.
+                std::vector<std::unique_ptr<AudioClip>> deeper;
+                expandSequenceAudio(*sc, inner, project, depth + 1, deeper);
+                for (auto& d : deeper) {
+                    int64_t nIn, nDur, nSrcIn;
+                    if (!mapToOuter(d->timelineIn(), d->duration(),
+                                    d->sourceIn(), nIn, nDur, nSrcIn))
+                        continue;
+                    d->setTimelineIn(nIn);
+                    d->setDuration(nDur);
+                    d->setSourceIn(nSrcIn);
+                    d->setId(mixNestId(outerSeq.id(), d->id()));
+                    out.push_back(std::move(d));
+                }
+            }
+        }
+    }
+}
+
 } // anonymous namespace
 
 // ─── loadSources ────────────────────────────────────────────────────────────
@@ -296,6 +426,12 @@ void AudioPlaybackService::loadSources(bool allowBlockingMisses)
     const TimelineAudioWindow audioWindow = currentTimelineAudioWindow(m_playbackController);
     size_t deferredCacheMisses = 0;
 
+    // Keeps synthetic AudioClips (from expanding nested-sequence clips on
+    // audio tracks) alive for the duration of this call. The build loop
+    // only reads them synchronously into AudioTrackSources, so function
+    // scope is sufficient.
+    std::vector<std::unique_ptr<AudioClip>> synthStorage;
+
     spdlog::debug("loadAudioSources: scanning {} tracks in window [{}..{})",
                   m_timeline->trackCount(), audioWindow.startFrame, audioWindow.endFrame);
 
@@ -306,20 +442,36 @@ void AudioPlaybackService::loadSources(bool allowBlockingMisses)
         spdlog::debug("loadAudioSources: track {} '{}' has {} clips",
                      ti, track->name(), track->clipCount());
 
-        int audioClipsLoaded = 0;
+        // Build the effective AudioClip list for this track: real audio
+        // clips plus the synthetic clips that any nested SequenceClip on
+        // this track expands into.
+        std::vector<AudioClip*> effectiveClips;
         for (size_t ci = 0; ci < track->clipCount(); ++ci) {
-            auto* clip = track->clip(ci);
-            if (!clip) continue;
+            auto* tc = track->clip(ci);
+            if (!tc || !tc->isEnabled()) continue;
+            if (auto* ac = dynamic_cast<AudioClip*>(tc)) {
+                effectiveClips.push_back(ac);
+            } else if (auto* sc = dynamic_cast<SequenceClip*>(tc)) {
+                std::vector<std::unique_ptr<AudioClip>> expanded;
+                expandSequenceAudio(*sc, m_timeline, m_project, 0, expanded);
+                for (auto& e : expanded) {
+                    effectiveClips.push_back(e.get());
+                    synthStorage.push_back(std::move(e));
+                }
+            }
+        }
 
-            auto* audioClip = dynamic_cast<AudioClip*>(clip);
-            if (!audioClip || !clip->isEnabled()) continue;
+        int audioClipsLoaded = 0;
+        for (auto* audioClip : effectiveClips) {
+            if (!audioClip) continue;
 
             const auto& path = audioClip->mediaPath();
             if (path.empty()) continue;
 
             if (audioClipsLoaded == 0) {
                 spdlog::debug("  clip {} mediaPath='{}' in={} dur={}",
-                             ci, path, audioClip->timelineIn(), audioClip->duration());
+                             audioClipsLoaded, path, audioClip->timelineIn(),
+                             audioClip->duration());
             }
 
             const uint64_t clipId = audioClip->id();
@@ -513,6 +665,41 @@ void AudioPlaybackService::loadSources(bool allowBlockingMisses)
                             if (clipFrame >= 0.0f && clipFrame <= fadeEndFrame && fadeEndFrame > fadeStartFrame) {
                                 const float t = (clipFrame - fadeStartFrame) / (fadeEndFrame - fadeStartFrame);
                                 v = std::clamp(t, 0.0f, 1.0f);
+                            }
+                            return prevEnv ? prevEnv(pos) * v : v;
+                        };
+                    }
+                }
+
+                // Per-clip fade in/out. Track transitions handle clip-to-
+                // clip crossfades; this handles a clip's own fade handles
+                // AND the crossfades baked into synthetic nested-sequence
+                // clips by expandSequenceAudio() (whose fades can't appear
+                // as parent-track transitions). Composed multiplicatively
+                // with any transition envelope already set above.
+                {
+                    const float fadeInF  =
+                        static_cast<float>(audioClip->fadeInDuration());
+                    const float fadeOutF =
+                        static_cast<float>(audioClip->fadeOutDuration());
+                    const float clipLenF =
+                        static_cast<float>(fullClipSourceFrames);
+                    if (fadeInF > 0.0f || fadeOutF > 0.0f) {
+                        auto prevEnv = src.fadeEnvelope;
+                        src.fadeEnvelope =
+                            [prevEnv, fadeInF, fadeOutF, clipLenF, provider](float pos) {
+                            float v = 1.0f;
+                            const float cf =
+                                provider->clipFrameForNormalizedPosition(pos);
+                            if (cf >= 0.0f) {
+                                if (fadeInF > 0.0f && cf < fadeInF)
+                                    v *= std::clamp(cf / fadeInF, 0.0f, 1.0f);
+                                if (fadeOutF > 0.0f &&
+                                    cf > clipLenF - fadeOutF) {
+                                    const float t =
+                                        (clipLenF - cf) / fadeOutF;
+                                    v *= std::clamp(t, 0.0f, 1.0f);
+                                }
                             }
                             return prevEnv ? prevEnv(pos) * v : v;
                         };

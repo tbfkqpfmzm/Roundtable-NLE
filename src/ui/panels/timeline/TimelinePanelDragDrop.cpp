@@ -240,14 +240,53 @@ void TimelinePanel::dragMoveEvent(QDragMoveEvent* event)
         auto snapRes = m_snapEngine.snapPair(tick, tick + previewDur);
         if (snapRes.didSnap) tick = snapRes.snappedTick;
 
-        // Show preview on video tracks only
-        bool trackCompatible = false;
-        if (m_timeline && trackIdx < m_timeline->trackCount()) {
-            trackCompatible = (m_timeline->track(trackIdx)->type() == TrackType::Video);
+        // Source-monitor video-only / audio-only drag restricts the ghost
+        // to just that lane.
+        bool seqShowVideo = true, seqShowAudio = true;
+        if (event->mimeData()->hasFormat("application/x-roundtable-drag-mode")) {
+            const QByteArray m = event->mimeData()->data(
+                "application/x-roundtable-drag-mode");
+            if (m == "video") seqShowAudio = false;
+            else if (m == "audio") seqShowVideo = false;
         }
+
+        // A nested sequence drops as a video nest clip AND an audio nest
+        // clip (Premiere-style). Show ghosts on BOTH a video track and an
+        // audio track so the user sees where audio will land, mirroring
+        // the behaviour of dragging an A/V media file.
+        size_t videoTrackIdx = SIZE_MAX;
+        if (m_timeline && trackIdx < m_timeline->trackCount() &&
+            m_timeline->track(trackIdx)->type() == TrackType::Video) {
+            videoTrackIdx = trackIdx;
+        } else if (m_timeline) {
+            // Cursor not over a video track — preview on the bottom video
+            // track (same fallback the drop handler uses).
+            for (size_t i = m_timeline->trackCount(); i > 0; --i) {
+                if (m_timeline->track(i - 1)->type() == TrackType::Video) {
+                    videoTrackIdx = i - 1; break;
+                }
+            }
+        }
+        size_t audioTrackIdx = SIZE_MAX;
+        if (m_timeline) {
+            if (trackIdx < m_timeline->trackCount() &&
+                m_timeline->track(trackIdx)->type() == TrackType::Audio) {
+                audioTrackIdx = trackIdx;
+            } else {
+                for (size_t i = 0; i < m_timeline->trackCount(); ++i) {
+                    if (m_timeline->track(i)->type() == TrackType::Audio) {
+                        audioTrackIdx = i; break;
+                    }
+                }
+            }
+        }
+        if (!seqShowVideo) videoTrackIdx = SIZE_MAX;
+        if (!seqShowAudio) audioTrackIdx = SIZE_MAX;
         for (size_t i = 0; i < m_trackWidgets.size(); ++i) {
-            if (i == trackIdx && trackCompatible)
+            if (i == videoTrackIdx)
                 m_trackWidgets[i]->setMediaDragPreview(tick, previewDur, false);
+            else if (i == audioTrackIdx)
+                m_trackWidgets[i]->setMediaDragPreview(tick, previewDur, true);
             else
                 m_trackWidgets[i]->clearMediaDragPreview();
         }
@@ -330,6 +369,16 @@ void TimelinePanel::dragMoveEvent(QDragMoveEvent* event)
             if (audioExts.contains(ext)) isAudio = true;
         }
 
+        // Source-monitor video-only / audio-only drag: restrict the ghost
+        // to a single lane (matches what the drop will actually create).
+        bool mediaForceVideoOnly = false;
+        if (event->mimeData()->hasFormat("application/x-roundtable-drag-mode")) {
+            const QByteArray m = event->mimeData()->data(
+                "application/x-roundtable-drag-mode");
+            if (m == "audio")      isAudio = true;
+            else if (m == "video") mediaForceVideoOnly = true;
+        }
+
         // Snap both head and tail (Premiere Pro-style edge snapping)
         if (previewDur > 0) {
             auto snapRes = m_snapEngine.snapPair(tick, tick + previewDur);
@@ -364,6 +413,9 @@ void TimelinePanel::dragMoveEvent(QDragMoveEvent* event)
                 }
             }
         }
+        // Video-only drag never spawns the companion audio clip.
+        if (mediaForceVideoOnly) mediaHasAudio = false;
+
         // Find target audio track index for companion preview.
         // If the cursor hovers an audio track, the preview follows it there;
         // otherwise fall back to the first audio track.
@@ -665,7 +717,16 @@ void TimelinePanel::dropEvent(QDropEvent* event)
                 if (snapRes.didSnap) tick = snapRes.snappedTick;
             }
 
-            emit sequenceDropped(seqIndex, tick, trackIdx, sourceIn, sourceOut);
+            int dragMode = TimelinePanel::DragBoth;
+            if (event->mimeData()->hasFormat("application/x-roundtable-drag-mode")) {
+                const QByteArray m = event->mimeData()->data(
+                    "application/x-roundtable-drag-mode");
+                if (m == "video") dragMode = TimelinePanel::DragVideoOnly;
+                else if (m == "audio") dragMode = TimelinePanel::DragAudioOnly;
+            }
+
+            emit sequenceDropped(seqIndex, tick, trackIdx, sourceIn, sourceOut,
+                                 dragMode);
         }
         event->acceptProposedAction();
         return;
@@ -699,6 +760,11 @@ void TimelinePanel::dropEvent(QDropEvent* event)
             };
             isAudioDrop = audioExts.contains(ext);
         }
+        // Source-monitor "drag audio only" → route to an audio track even
+        // for video media (the handler creates just an AudioClip).
+        if (event->mimeData()->hasFormat("application/x-roundtable-drag-mode")
+            && event->mimeData()->data("application/x-roundtable-drag-mode") == "audio")
+            isAudioDrop = true;
         bool aboveTopVideo = false;
         bool belowBottomAudio = false;
         computeGhostDropZones(pos, aboveTopVideo, belowBottomAudio);
@@ -742,12 +808,21 @@ void TimelinePanel::dropEvent(QDropEvent* event)
             if (snapRes.didSnap) tick = snapRes.snappedTick;
         }
 
+        int mediaDragMode = TimelinePanel::DragBoth;
+        if (event->mimeData()->hasFormat("application/x-roundtable-drag-mode")) {
+            const QByteArray m = event->mimeData()->data(
+                "application/x-roundtable-drag-mode");
+            if (m == "video") mediaDragMode = TimelinePanel::DragVideoOnly;
+            else if (m == "audio") mediaDragMode = TimelinePanel::DragAudioOnly;
+        }
+
         if (ok && !filePath.isEmpty()) {
             if (sourceIn >= 0 && sourceOut > sourceIn)
                 emit mediaDroppedWithRegion(filePath, handle, tick, trackIdx,
-                                            sourceIn, sourceOut);
+                                            sourceIn, sourceOut, mediaDragMode);
             else
-                emit mediaDropped(filePath, handle, tick, trackIdx);
+                emit mediaDropped(filePath, handle, tick, trackIdx,
+                                  mediaDragMode);
         }
 
         event->acceptProposedAction();

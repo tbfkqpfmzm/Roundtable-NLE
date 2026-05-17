@@ -350,7 +350,19 @@ void TimelineWorkspace::createPanelWidgets()
             return frame;
         };
 
-        m_sourceMonitor->loadSequence(seqIdx, name, dur, fps, std::move(provider));
+        // Timeline getter — resolved lazily so the source monitor never
+        // dereferences a stale Timeline* when the project changes.
+        SourceMonitor::SequenceTimelineGetter timelineGetter =
+            [this, seqIdx]() -> Timeline* {
+            if (m_destroying.load(std::memory_order_acquire)) return nullptr;
+            if (!m_project || seqIdx >= m_project->sequenceCount())
+                return nullptr;
+            return m_project->sequence(seqIdx);
+        };
+
+        m_sourceMonitor->loadSequence(seqIdx, name, dur, fps,
+                                       std::move(provider),
+                                       std::move(timelineGetter));
     });
 
     connect(m_sourceMonitor, &SourceMonitor::playbackStarted,
