@@ -164,4 +164,20 @@ void TimelinePanel::setSnapIndicator(int64_t tick)
             tw->setSnapIndicatorTick(tick);
 }
 
+void TimelinePanel::setEditPointSelection(size_t trackIndex, int64_t tick)
+{
+    for (size_t i = 0; i < m_trackWidgets.size(); ++i) {
+        auto* tw = m_trackWidgets[i].data();
+        if (!tw) continue;
+        tw->setEditPointTick(i == trackIndex ? tick : -1);
+    }
+}
+
+void TimelinePanel::clearEditPointSelection()
+{
+    for (auto& twPtr : m_trackWidgets)
+        if (auto* tw = twPtr.data())
+            tw->setEditPointTick(-1);
+}
+
 } // namespace rt

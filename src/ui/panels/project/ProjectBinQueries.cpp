@@ -9,6 +9,7 @@
 #include "panels/project/ProjectBinInternal.h"
 #include "widgets/MediaDragTreeWidget.h"
 #include "widgets/ThumbnailGrid.h"
+#include "media/MediaSourceService.h"
 
 #include <QTreeWidgetItem>
 
@@ -17,6 +18,53 @@
 #include <map>
 
 namespace rt {
+
+std::vector<Project::BinItem> ProjectBin::exportBinItems() const
+{
+    std::vector<Project::BinItem> out;
+    if (!m_grid) return out;
+    const auto& items = m_grid->items();
+    out.reserve(items.size());
+    for (const auto& it : items) {
+        if (it.isFolder || it.filePath.empty())
+            continue;
+        Project::BinItem bi;
+        bi.id          = it.itemId;
+        bi.path        = it.filePath;
+        bi.displayName = (it.displayName.isEmpty()
+            ? QString::fromStdString(it.filePath.filename().string())
+            : it.displayName).toStdString();
+        bi.labelColor  = it.labelColor;
+        out.push_back(std::move(bi));
+    }
+    return out;
+}
+
+void ProjectBin::restoreBinModel(const std::vector<Project::BinItem>& items,
+                                 const std::vector<BinFolderState>& folders)
+{
+    if (!m_grid) return;
+    clearAll();
+
+    for (const auto& bi : items) {
+        if (bi.path.empty()) continue;
+        uint64_t handle = 0;
+        if (m_mediaSources) {
+            auto r = m_mediaSources->openSource(
+                {bi.path, RenderRequestType::Still, false});
+            handle = r.handle;
+        }
+        m_grid->addRestoredItem(
+            bi.path, MediaType::Unknown, handle, bi.id,
+            QString::fromStdString(bi.displayName), bi.labelColor);
+    }
+    m_grid->loadVisibleThumbnails();
+    syncListView();                 // builds tree rows w/ kBinItemIdRole
+    if (!folders.empty())
+        restoreBinFolders(folders); // matches "@<id>" keys
+    if (!m_listView)
+        syncIconView();
+}
 
 std::vector<std::filesystem::path> ProjectBin::allFiles() const
 {
@@ -62,8 +110,18 @@ std::vector<BinFolderState> ProjectBin::binFolderState() const
                     childPath += child->text(0);
                     visitBin(child, childPath);
                 } else {
-                    folder.childKeys.push_back(
-                        projectBinItemKey(child).toStdString());
+                    // Prefer the file path over the per-instance "@<id>" key
+                    // here: applyBinSnapshot() does clearAll()+addFiles(),
+                    // which assigns FRESH ids to rebuilt items, so an id-key
+                    // captured pre-rebuild can never match anything after.
+                    // The path round-trips through addFiles → syncListView
+                    // (which writes the path back to Qt::UserRole), so
+                    // reparentByKey()'s pathKey-fallback matches it cleanly.
+                    // Without this, undo of an Explorer import (and any
+                    // applyBinSnapshot-based undo) flattens every bin to root.
+                    QString k = child->data(0, Qt::UserRole).toString();
+                    if (k.isEmpty()) k = projectBinItemKey(child);
+                    folder.childKeys.push_back(k.toStdString());
                 }
             }
 
@@ -83,15 +141,23 @@ void ProjectBin::restoreBinFolders(const std::vector<BinFolderState>& folders)
 {
     if (folders.empty()) return;
 
-    // Helper to find and reparent an item by key from top-level items
+    // Helper to find and reparent an item by key from top-level items.
+    // Matches the saved key against the candidate's "@<id>" key (new
+    // per-instance format) OR its legacy path/text key, so both new and
+    // pre-v14 projects reparent correctly.
     auto reparentByKey = [this](QTreeWidgetItem* parent, const QString& qKey) {
         for (int i = 0; i < m_listWidget->topLevelItemCount(); ++i) {
             auto* candidate = m_listWidget->topLevelItem(i);
             if (candidate == parent) continue;
             if (candidate->data(0, Qt::UserRole + 2).toBool()) continue;
-            QString candidateKey = candidate->data(0, Qt::UserRole).toString();
-            if (candidateKey.isEmpty()) candidateKey = candidate->text(0);
-            if (candidateKey == qKey) {
+            const quint64 id = candidate->data(0, kBinItemIdRole).toULongLong();
+            QString idKey = id ? (QStringLiteral("@") + QString::number(id))
+                               : QString();
+            QString pathKey = candidate->data(0, Qt::UserRole).toString();
+            QString textKey = candidate->text(0);
+            if ((!idKey.isEmpty()   && qKey == idKey)   ||
+                (!pathKey.isEmpty() && qKey == pathKey)  ||
+                (pathKey.isEmpty()  && qKey == textKey)) {
                 m_listWidget->takeTopLevelItem(i);
                 parent->addChild(candidate);
                 return;

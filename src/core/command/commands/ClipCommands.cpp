@@ -119,6 +119,34 @@ TrimClipCommand::TrimClipCommand(Track* track, uint64_t clipId,
 {
 }
 
+namespace {
+// Keep transitions anchored to the clip edge they belong to. A transition
+// stores an absolute editPointTick; when the clip is trimmed/split the
+// edge moves, so without this the dissolve stays at the old tick (renders
+// in empty space, or "cut off" instead of moving with the clip).
+void retargetTransitionsForClip(Track* track, uint64_t clipId, const Clip* c)
+{
+    if (!track || !c) return;
+    const int64_t inTick  = c->timelineIn();
+    const int64_t outTick = c->timelineOut();
+    for (size_t i = 0; i < track->transitionCount(); ++i) {
+        const Transition* tp = track->transition(i);
+        if (!tp) continue;
+        Transition t = *tp;
+        bool changed = false;
+        // Clip on the LEFT side of the edit → edit point is its tail.
+        if (t.leftClipId == clipId) {
+            if (t.editPointTick != outTick) { t.editPointTick = outTick; changed = true; }
+        }
+        // Clip on the RIGHT side of the edit → edit point is its head.
+        else if (t.rightClipId == clipId) {
+            if (t.editPointTick != inTick) { t.editPointTick = inTick; changed = true; }
+        }
+        if (changed) track->setTransition(i, t);
+    }
+}
+} // namespace
+
 void TrimClipCommand::execute()
 {
     size_t idx = m_track->findClipIndexById(m_clipId);
@@ -132,6 +160,8 @@ void TrimClipCommand::execute()
     c->setTimelineIn(m_newTimelineIn);
     c->setDuration(m_newDuration);
     c->setSourceIn(m_newSourceIn);
+
+    retargetTransitionsForClip(m_track, m_clipId, c);
 }
 
 void TrimClipCommand::undo()
@@ -143,6 +173,8 @@ void TrimClipCommand::undo()
     c->setTimelineIn(m_oldTimelineIn);
     c->setDuration(m_oldDuration);
     c->setSourceIn(m_oldSourceIn);
+
+    retargetTransitionsForClip(m_track, m_clipId, c);
 }
 
 std::string TrimClipCommand::description() const

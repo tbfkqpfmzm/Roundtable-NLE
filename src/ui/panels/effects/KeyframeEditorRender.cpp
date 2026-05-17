@@ -105,7 +105,109 @@ void KeyframeEditor::paintEvent(QPaintEvent* event)
     if (m_boxSelecting)
         drawBoxSelection(p);
 
+    // Velocity (speed) graph in the bottom pane when expanded.
+    if (m_showVelocityGraph)
+        drawVelocityGraph(p);
+
     --s_paintDepth;
+}
+
+void KeyframeEditor::drawVelocityGraph(QPainter& p)
+{
+    // Background separator between value and velocity panes.
+    const auto& tc = Theme::colors();
+    double valH  = (height() - kMarginTop - kMarginBottom) * 0.5 - 2.0;
+    double sepY  = kMarginTop + valH + 1.0;
+    QColor sep = tc.border; sep.setAlpha(200);
+    p.setPen(QPen(sep, 1));
+    p.drawLine(QPointF(kMarginLeft, sepY),
+               QPointF(width() - kMarginRight, sepY));
+
+    // Zero-velocity guide line.
+    QColor zero = tc.textBright; zero.setAlpha(60);
+    p.setPen(QPen(zero, 1, Qt::DashLine));
+    QPointF z = graphToPixelVelocity(0, 0.0);
+    p.drawLine(QPointF(kMarginLeft, z.y()), QPointF(width() - kMarginRight, z.y()));
+
+    // Sample each visible curve's slope and draw the velocity polyline.
+    // We sample much more finely than 200 points so eases look smooth.
+    for (int ci = 0; ci < static_cast<int>(m_curves.size()); ++ci) {
+        const auto& ce = m_curves[ci];
+        if (!ce.visible || !ce.track) continue;
+        const auto& tk = *ce.track;
+        if (tk.keyframeCount() < 2) continue;
+
+        const int64_t t0 = tk.keyframe(0).time;
+        const int64_t t1 = tk.keyframe(tk.keyframeCount() - 1).time;
+        if (t1 <= t0) continue;
+        constexpr int kSamples = 300;
+        const int64_t dt = std::max<int64_t>(1, (t1 - t0) / kSamples);
+        const double  invDtSec = 1.0 / (static_cast<double>(dt) / static_cast<double>(kTicksPerSecond));
+
+        QColor c = ce.color; c.setAlpha(220);
+        p.setPen(QPen(c, kCurvePenWidth));
+        QPainterPath path;
+        for (int s = 0; s < kSamples; ++s) {
+            int64_t ta = t0 + dt * s;
+            int64_t tb = ta + dt;
+            double va = tk.evaluate(ta);
+            double vb = tk.evaluate(tb);
+            double slope = (vb - va) * invDtSec;
+            QPointF pt = graphToPixelVelocity((ta + tb) / 2, slope);
+            if (s == 0) path.moveTo(pt);
+            else        path.lineTo(pt);
+        }
+        p.drawPath(path);
+
+        // Influence handles: at each keyframe, draw an in-handle (left side)
+        // and an out-handle (right side). Position is determined by the
+        // bezier handle data — dragging adjusts those handles directly.
+        for (size_t ki = 0; ki < tk.keyframeCount(); ++ki) {
+            const auto& kf = tk.keyframe(ki);
+
+            auto drawHandle = [&](double timeAtHandle, double velAtHandle) {
+                QPointF kfPx = graphToPixelVelocity(kf.time, 0.0);
+                QPointF hPx  = graphToPixelVelocity(timeAtHandle, velAtHandle);
+                // Anchor stem from velocity 0 of keyframe time up/down to handle.
+                p.setPen(QPen(c.darker(150), 1));
+                p.drawLine(kfPx, hPx);
+                p.setBrush(c);
+                p.setPen(QPen(tc.textBright, 1));
+                p.drawEllipse(hPx, kTangentRadius, kTangentRadius);
+            };
+
+            // Out-handle for segment ki → ki+1.
+            if (ki + 1 < tk.keyframeCount()) {
+                const auto& kfNext = tk.keyframe(ki + 1);
+                double dtSec = (kfNext.time - kf.time) / static_cast<double>(kTicksPerSecond);
+                double dv    = kfNext.value - kf.value;
+                if (dtSec > 0.0) {
+                    // In normalized [0,1]² segment space, the cubic's slope at
+                    // t=0 is 3·bezierOutY / bezierOutX (assuming non-zero X).
+                    // Map that to real-world dv/dt:
+                    double bx = std::max<double>(kf.bezierOutX, 0.001);
+                    double slope = 3.0 * kf.bezierOutY * (dv / dtSec) / bx;
+                    // Horizontal position: along the segment at influence %.
+                    double tHandle = kf.time + bx * (kfNext.time - kf.time);
+                    drawHandle(tHandle, slope);
+                }
+            }
+
+            // In-handle for segment ki-1 → ki.
+            if (ki > 0) {
+                const auto& kfPrev = tk.keyframe(ki - 1);
+                double dtSec = (kf.time - kfPrev.time) / static_cast<double>(kTicksPerSecond);
+                double dv    = kf.value - kfPrev.value;
+                if (dtSec > 0.0) {
+                    // At t=1 the cubic's slope is 3·(1 - bezierInY) / (1 - bezierInX).
+                    double bx = std::min<double>(std::max<double>(kf.bezierInX, 0.001), 0.999);
+                    double slope = 3.0 * (1.0 - kf.bezierInY) * (dv / dtSec) / (1.0 - bx);
+                    double tHandle = kfPrev.time + bx * (kf.time - kfPrev.time);
+                    drawHandle(tHandle, slope);
+                }
+            }
+        }
+    }
 }
 
 void KeyframeEditor::drawGrid(QPainter& p)
@@ -201,48 +303,39 @@ void KeyframeEditor::drawCurve(QPainter& p, int curveIdx)
         p.setPen(pen);
     }
 
-    // Draw each segment
+    // Draw each segment. Hold/Linear get fast paths; every other mode shares
+    // the cubic-bezier path with handles supplied by the track's effective-
+    // handle math (so the rendered curve always matches evaluate()).
     for (size_t i = 0; i + 1 < count; ++i) {
         const auto& kf0 = track.keyframe(i);
         const auto& kf1 = track.keyframe(i + 1);
 
-        switch (kf0.interp) {
-        case InterpMode::Hold: {
+        if (kf0.interp == InterpMode::Hold) {
             QPointF a = graphToPixel(kf0.time, kf0.value);
             QPointF b = graphToPixel(kf1.time, kf0.value);
             QPointF c = graphToPixel(kf1.time, kf1.value);
             p.drawLine(a, b);
             p.drawLine(b, c);
-            break;
+            continue;
         }
-        case InterpMode::Linear: {
-            QPointF a = graphToPixel(kf0.time, kf0.value);
-            QPointF b = graphToPixel(kf1.time, kf1.value);
-            p.drawLine(a, b);
-            break;
-        }
-        case InterpMode::Bezier: {
-            // Draw subdivided bezier curve
-            QPainterPath path;
-            QPointF first = graphToPixel(kf0.time, kf0.value);
-            path.moveTo(first);
 
-            double dt = static_cast<double>(kf1.time - kf0.time);
-            double dv = static_cast<double>(kf1.value - kf0.value);
-
-            for (int s = 1; s <= kBezierSubdivisions; ++s) {
-                float t = static_cast<float>(s) / kBezierSubdivisions;
-                float bt = solveBezierT(0.0f, kf0.bezierOutX, kf1.bezierInX, 1.0f, t);
-                float progress = evalCubicBezier(0.0f, kf0.bezierOutY, kf1.bezierInY, 1.0f, bt);
-
-                double time  = kf0.time + t * dt;
-                double value = kf0.value + progress * dv;
-                path.lineTo(graphToPixel(time, value));
-            }
+        // Sample the track's evaluator directly — guarantees the drawn curve
+        // exactly matches playback for every interpolation mode.
+        QPainterPath path;
+        path.moveTo(graphToPixel(kf0.time, kf0.value));
+        double segDt = static_cast<double>(kf1.time - kf0.time);
+        if (segDt <= 0.0) {
+            path.lineTo(graphToPixel(kf1.time, kf1.value));
             p.drawPath(path);
-            break;
+            continue;
         }
+        for (int s = 1; s <= kBezierSubdivisions; ++s) {
+            double frac = static_cast<double>(s) / kBezierSubdivisions;
+            int64_t t  = kf0.time + static_cast<int64_t>(frac * segDt);
+            float   v  = track.evaluate(t);
+            path.lineTo(graphToPixel(t, v));
         }
+        p.drawPath(path);
     }
 
     // Draw line after last keyframe (extend right)
@@ -303,7 +396,9 @@ void KeyframeEditor::drawBezierHandles(QPainter& p, int curveIdx)
 
         const auto& kf = track.keyframe(sk.keyIndex);
 
-        if (kf.interp == InterpMode::Bezier && sk.keyIndex + 1 < static_cast<int>(track.keyframeCount())) {
+        const bool kfHasManualHandles =
+            (kf.interp == InterpMode::Bezier || kf.interp == InterpMode::ContinuousBezier);
+        if (kfHasManualHandles && sk.keyIndex + 1 < static_cast<int>(track.keyframeCount())) {
             const auto& kfNext = track.keyframe(sk.keyIndex + 1);
             double dt = static_cast<double>(kfNext.time - kf.time);
             double dv = static_cast<double>(kfNext.value - kf.value);
@@ -319,23 +414,21 @@ void KeyframeEditor::drawBezierHandles(QPainter& p, int curveIdx)
             p.drawEllipse(tanPx, kTangentRadius, kTangentRadius);
         }
 
-        // In tangent from previous keyframe
-        if (sk.keyIndex > 0) {
+        // In tangent of THIS keyframe — controls the segment arriving at it.
+        if (sk.keyIndex > 0 && kfHasManualHandles) {
             const auto& kfPrev = track.keyframe(sk.keyIndex - 1);
-            if (kfPrev.interp == InterpMode::Bezier) {
-                double dt = static_cast<double>(kf.time - kfPrev.time);
-                double dv = static_cast<double>(kf.value - kfPrev.value);
+            double dt = static_cast<double>(kf.time - kfPrev.time);
+            double dv = static_cast<double>(kf.value - kfPrev.value);
 
-                QPointF kfPx  = graphToPixel(kf.time, kf.value);
-                QPointF tanPx = graphToPixel(
-                    kfPrev.time + kfPrev.bezierInX * dt,
-                    kfPrev.value + kfPrev.bezierInY * dv);
+            QPointF kfPx  = graphToPixel(kf.time, kf.value);
+            QPointF tanPx = graphToPixel(
+                kfPrev.time + kf.bezierInX * dt,
+                kfPrev.value + kf.bezierInY * dv);
 
-                p.setPen(handlePen);
-                p.drawLine(kfPx, tanPx);
-                p.setBrush(tc.accent);
-                p.drawEllipse(tanPx, kTangentRadius, kTangentRadius);
-            }
+            p.setPen(handlePen);
+            p.drawLine(kfPx, tanPx);
+            p.setBrush(tc.accent);
+            p.drawEllipse(tanPx, kTangentRadius, kTangentRadius);
         }
     }
 }
@@ -376,10 +469,11 @@ void KeyframeEditor::mousePressEvent(QMouseEvent* event)
 
     bool shift = event->modifiers() & Qt::ShiftModifier;
 
-    if (hit.isTangentIn || hit.isTangentOut) {
-        // Start tangent drag
+    if (hit.isTangentIn || hit.isTangentOut ||
+        hit.isVelocityIn || hit.isVelocityOut) {
         m_draggingTangent = true;
-        m_tangentIsIn     = hit.isTangentIn;
+        m_tangentIsIn     = (hit.isTangentIn || hit.isVelocityIn);
+        m_velocityDrag    = (hit.isVelocityIn || hit.isVelocityOut);
         m_dragCurveIdx    = hit.curveIndex;
         m_dragKeyIdx      = hit.keyIndex;
         m_dragStartPos    = pos;
@@ -453,22 +547,104 @@ void KeyframeEditor::mouseMoveEvent(QMouseEvent* event)
             return;
 
         auto& kf = track->keyframe(m_dragKeyIdx);
+
+        // ── Velocity-pane drag: map (timeAtHandle, slope) back to (bezierX, bezierY)
+        if (m_velocityDrag) {
+            QPointF vp = pixelToGraphVelocity(pos.x(), pos.y());
+            const double newTime  = vp.x();
+            const double newSlope = vp.y();
+            if (m_tangentIsIn) {
+                int prevIdx = m_dragKeyIdx - 1;
+                if (prevIdx >= 0) {
+                    const auto& kfPrev = track->keyframe(prevIdx);
+                    double segDtSec = (kf.time - kfPrev.time) / static_cast<double>(kTicksPerSecond);
+                    double segDv    = kf.value - kfPrev.value;
+                    if (segDtSec > 0.0 && (kf.time - kfPrev.time) > 0) {
+                        double bx = (newTime - kfPrev.time) / static_cast<double>(kf.time - kfPrev.time);
+                        bx = std::clamp(bx, 0.001, 0.999);
+                        // slope = 3·(1 - bezierInY) / (1 - bx) · (segDv / segDtSec)
+                        // → 1 - bezierInY = slope · (1 - bx) · segDtSec / (3 · segDv)
+                        double by = 1.0;
+                        if (segDv != 0.0)
+                            by = 1.0 - (newSlope * (1.0 - bx) * segDtSec) / (3.0 * segDv);
+                        kf.bezierInX = static_cast<float>(bx);
+                        kf.bezierInY = static_cast<float>(by);
+                        if (kf.interp == InterpMode::Linear || kf.interp == InterpMode::AutoBezier)
+                            kf.interp = InterpMode::Bezier;  // promote so handles persist
+                    }
+                }
+            } else {
+                int nextIdx = m_dragKeyIdx + 1;
+                if (nextIdx < static_cast<int>(track->keyframeCount())) {
+                    const auto& kfNext = track->keyframe(nextIdx);
+                    double segDtSec = (kfNext.time - kf.time) / static_cast<double>(kTicksPerSecond);
+                    double segDv    = kfNext.value - kf.value;
+                    if (segDtSec > 0.0 && (kfNext.time - kf.time) > 0) {
+                        double bx = (newTime - kf.time) / static_cast<double>(kfNext.time - kf.time);
+                        bx = std::clamp(bx, 0.001, 0.999);
+                        // slope = 3·bezierOutY / bx · (segDv / segDtSec)
+                        // → bezierOutY = slope · bx · segDtSec / (3 · segDv)
+                        double by = 0.0;
+                        if (segDv != 0.0)
+                            by = (newSlope * bx * segDtSec) / (3.0 * segDv);
+                        kf.bezierOutX = static_cast<float>(bx);
+                        kf.bezierOutY = static_cast<float>(by);
+                        if (kf.interp == InterpMode::Linear || kf.interp == InterpMode::AutoBezier)
+                            kf.interp = InterpMode::Bezier;
+                    }
+                }
+            }
+            emit keyframeChanged();
+            update();
+            event->accept();
+            return;
+        }
+
         QPointF gp = pixelToGraph(pos.x(), pos.y());
+
+        // ContinuousBezier mirror: when one handle moves, the other follows
+        // collinearly so the velocity stays smooth through the keyframe.
+        auto mirrorHandle = [&](bool draggedInSide) {
+            if (kf.interp != InterpMode::ContinuousBezier) return;
+            int prevIdx = m_dragKeyIdx - 1;
+            int nextIdx = m_dragKeyIdx + 1;
+            if (prevIdx < 0 || nextIdx >= static_cast<int>(track->keyframeCount())) return;
+            const auto& kfPrev = track->keyframe(prevIdx);
+            const auto& kfNext = track->keyframe(nextIdx);
+            const double idt = static_cast<double>(kf.time     - kfPrev.time);
+            const double idv = static_cast<double>(kf.value    - kfPrev.value);
+            const double odt = static_cast<double>(kfNext.time - kf.time);
+            const double odv = static_cast<double>(kfNext.value - kf.value);
+            if (std::abs(idt) < 1e-6 || std::abs(idv) < 1e-6 ||
+                std::abs(odt) < 1e-6 || std::abs(odv) < 1e-6) return;
+            if (draggedInSide) {
+                const double inAbsT = kfPrev.time  + kf.bezierInX * idt;
+                const double inAbsV = kfPrev.value + kf.bezierInY * idv;
+                kf.bezierOutX = std::clamp(static_cast<float>((kf.time  - inAbsT) / odt), 0.0f, 1.0f);
+                kf.bezierOutY = static_cast<float>((kf.value - inAbsV) / odv);
+            } else {
+                const double outAbsT = kf.time  + kf.bezierOutX * odt;
+                const double outAbsV = kf.value + kf.bezierOutY * odv;
+                kf.bezierInX = std::clamp(static_cast<float>(1.0 - (outAbsT - kf.time)  / idt), 0.0f, 1.0f);
+                kf.bezierInY = static_cast<float>(1.0 - (outAbsV - kf.value) / idv);
+            }
+        };
 
         if (m_tangentIsIn) {
             // In tangent Ã¢â‚¬â€ relates to next keyframe
-            int nextIdx = m_dragKeyIdx + 1;
-            if (nextIdx < static_cast<int>(track->keyframeCount())) {
-                const auto& kfNext = track->keyframe(nextIdx);
-                double dt = static_cast<double>(kfNext.time - kf.time);
-                double dv = static_cast<double>(kfNext.value - kf.value);
+            int prevIdx = m_dragKeyIdx - 1;
+            if (prevIdx >= 0) {
+                const auto& kfPrev = track->keyframe(prevIdx);
+                double dt = static_cast<double>(kf.time  - kfPrev.time);
+                double dv = static_cast<double>(kf.value - kfPrev.value);
                 if (std::abs(dt) > 1e-6 && std::abs(dv) > 1e-6) {
-                    kf.bezierInX = std::clamp(static_cast<float>((gp.x() - kf.time) / dt), 0.0f, 1.0f);
-                    kf.bezierInY = static_cast<float>((gp.y() - kf.value) / dv);
+                    kf.bezierInX = std::clamp(static_cast<float>((gp.x() - kfPrev.time) / dt), 0.0f, 1.0f);
+                    kf.bezierInY = static_cast<float>((gp.y() - kfPrev.value) / dv);
+                    mirrorHandle(/*draggedInSide=*/true);
                 }
             }
         } else {
-            // Out tangent
+            // Out-handle of this keyframe (segment [kf, kfNext]).
             int nextIdx = m_dragKeyIdx + 1;
             if (nextIdx < static_cast<int>(track->keyframeCount())) {
                 const auto& kfNext = track->keyframe(nextIdx);
@@ -477,6 +653,7 @@ void KeyframeEditor::mouseMoveEvent(QMouseEvent* event)
                 if (std::abs(dt) > 1e-6 && std::abs(dv) > 1e-6) {
                     kf.bezierOutX = std::clamp(static_cast<float>((gp.x() - kf.time) / dt), 0.0f, 1.0f);
                     kf.bezierOutY = static_cast<float>((gp.y() - kf.value) / dv);
+                    mirrorHandle(/*draggedInSide=*/false);
                 }
             }
         }
@@ -557,6 +734,7 @@ void KeyframeEditor::mouseReleaseEvent(QMouseEvent* event)
 
     if (m_draggingTangent) {
         m_draggingTangent = false;
+        m_velocityDrag    = false;
         event->accept();
         return;
     }
@@ -583,13 +761,15 @@ void KeyframeEditor::mouseDoubleClickEvent(QMouseEvent* event)
 
     if (hit.curveIndex >= 0) {
         // Double-click on keyframe Ã¢â‚¬â€ cycle interpolation
+        // Double-click on a keyframe — cycle through Premiere's full set
+        // (Linear → Bezier → Hold → AutoBezier → ContinuousBezier → EaseIn → EaseOut).
         auto* track = m_curves[hit.curveIndex].track;
         if (track && hit.keyIndex >= 0 && hit.keyIndex < static_cast<int>(track->keyframeCount())) {
-            auto& kf = track->keyframe(hit.keyIndex);
-            int next = (static_cast<int>(kf.interp) + 1) % 3;
-            kf.interp = static_cast<InterpMode>(next);
-            emit keyframeChanged();
-            update();
+            // Ensure the clicked keyframe is the selection target.
+            m_selection.clear();
+            m_selection.insert({hit.curveIndex, hit.keyIndex});
+            int next = (static_cast<int>(track->keyframe(hit.keyIndex).interp) + 1) % 7;
+            setInterpolation(next);   // routes through undoable command
         }
     } else {
         // Double-click on empty space Ã¢â‚¬â€ add keyframe to first visible curve
@@ -675,9 +855,14 @@ void KeyframeEditor::contextMenuEvent(QContextMenuEvent* event)
 
     // Enable/disable actions based on state
     m_actDeleteKeyframes->setEnabled(!m_selection.empty());
-    m_actLinear->setEnabled(!m_selection.empty());
-    m_actBezier->setEnabled(!m_selection.empty());
-    m_actHold->setEnabled(!m_selection.empty());
+    const bool hasSel = !m_selection.empty();
+    m_actLinear->setEnabled(hasSel);
+    m_actBezier->setEnabled(hasSel);
+    m_actHold->setEnabled(hasSel);
+    m_actAutoBezier->setEnabled(hasSel);
+    m_actContinuousBezier->setEnabled(hasSel);
+    m_actEaseIn->setEnabled(hasSel);
+    m_actEaseOut->setEnabled(hasSel);
     m_actCopy->setEnabled(!m_selection.empty());
     m_actPaste->setEnabled(!m_clipboard.empty());
 

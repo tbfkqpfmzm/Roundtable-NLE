@@ -20,6 +20,7 @@
 
 #include <QImage>
 #include <QWidget>
+#include <QCursor>
 
 #include <cstdint>
 #include <functional>
@@ -140,6 +141,10 @@ signals:
     /// Values are scale multipliers.
     void transformScaleChanged(float scaleX, float scaleY);
 
+    /// Emitted when the user drag-rotates via the corner rotation zone.
+    /// Value is in degrees.
+    void transformRotationChanged(float rotation);
+
     /// Emitted when the transform drag completes (for undo recording).
     /// Carries old and new values so the receiver can build an undo command.
     void transformDragFinished(float oldPosX, float oldPosY, float oldScX, float oldScY, float oldRot,
@@ -202,7 +207,7 @@ private:
     mutable QPointF    m_cachedCorners[4]{QPointF(0, 0)};
     mutable bool       m_cornerCacheDirty{true};
 
-    enum class DragMode : uint8_t { None, MoveBody, ScaleCorner };
+    enum class DragMode : uint8_t { None, MoveBody, ScaleCorner, RotateCorner };
     DragMode        m_dragMode{DragMode::None};
     int             m_dragHandle{-1};       ///< Corner index 0-3 for scale drag
     QPointF         m_dragStartWidget;      ///< Widget position at drag start
@@ -210,6 +215,15 @@ private:
     float           m_dragStartPosY{0.0f};  ///< posY at drag start
     float           m_dragStartScX{1.0f};   ///< scaleX at drag start
     float           m_dragStartScY{1.0f};   ///< scaleY at drag start
+    float           m_dragStartRot{0.0f};   ///< rotation (deg) at drag start
+    float           m_dragStartAngle{0.0f}; ///< angle center→mouse at drag start
+
+    /// Corner index (0-3) if the point is in the rotation zone just
+    /// OUTSIDE a corner handle (Premiere-style), else -1.
+    [[nodiscard]] int hitTestRotate(const QPointF& widgetPos) const;
+
+    /// Premiere-style curved-arrow rotation cursor.
+    [[nodiscard]] static QCursor rotateCursor();
 };
 
 } // namespace rt

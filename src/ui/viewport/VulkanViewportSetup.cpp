@@ -119,12 +119,21 @@ bool VulkanViewport::initGpu()
     // 3. Embed the native window in this QWidget
     m_windowContainer = QWidget::createWindowContainer(m_nativeWindow, this);
     m_windowContainer->setMinimumSize(160, 90);
+    // Deliver hover (no-button) mouse-move events so the transform
+    // overlay can update the cursor (scale/move/rotate affordance)
+    // without requiring a pressed button.
+    m_windowContainer->setMouseTracking(true);
+    setMouseTracking(true);
 
     // Forward wheel/double-click events from the native QWindow to this
     // widget. createWindowContainer() delivers all input to the QWindow,
     // so the container widget never sees wheel events. Installing the
     // filter on the QWindow itself intercepts them at the right level.
     m_nativeWindow->installEventFilter(this);
+
+    // Subclass the HWND so WM_SETCURSOR can force our transform cursors
+    // (Qt's QWindow::setCursor is ignored for this native surface).
+    installCursorSubclass();
 
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);

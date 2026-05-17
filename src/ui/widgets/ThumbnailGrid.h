@@ -50,6 +50,10 @@ class ThumbnailGenerator;
 /// A single item in the thumbnail grid
 struct ThumbnailItem
 {
+    /// Per-instance identity, independent of filePath. Lets the bin hold
+    /// multiple independent items that reference the same source file
+    /// (Premiere-style "duplicate"). 0 = unassigned (legacy).
+    uint64_t              itemId{0};
     std::filesystem::path filePath;
     QString               displayName;
     MediaType             type{MediaType::Unknown};
@@ -83,6 +87,31 @@ public:
 
     /// Remove an item by path. Returns true if found and removed.
     bool removeItem(const std::filesystem::path& filePath);
+
+    /// Duplicate the item at srcIndex as a new independent item with a
+    /// fresh itemId (same filePath/type/handle/labelColor). Bypasses the
+    /// path-dedup that addItem()/addFiles() apply. Returns the new item's
+    /// index, or -1 on failure.
+    int duplicateItem(int srcIndex);
+
+    /// Remove the item whose itemId matches. Returns true if removed.
+    bool removeItemById(uint64_t id);
+
+    /// Index of the item with the given itemId, or -1 if none.
+    [[nodiscard]] int indexOfItemId(uint64_t id) const;
+
+    /// Add an item with an explicit identity restored from a saved
+    /// project (preserves itemId / displayName / labelColor; allows
+    /// duplicate paths). Returns the new item's index.
+    int addRestoredItem(const std::filesystem::path& filePath,
+                        MediaType type, uint64_t mediaHandle,
+                        uint64_t itemId, const QString& displayName,
+                        uint32_t labelColor);
+
+    /// Ensure freshly-generated itemIds won't collide with restored ones.
+    void ensureItemIdAbove(uint64_t id) noexcept {
+        if (id >= m_nextItemId) m_nextItemId = id + 1;
+    }
 
     /// Check if an item with this path already exists.
     [[nodiscard]] bool hasItem(const std::filesystem::path& filePath) const;
@@ -195,6 +224,7 @@ private:
     // Items
     std::vector<ThumbnailItem> m_items;
     int m_selectedIndex{-1};
+    uint64_t m_nextItemId{1};   ///< Monotonic source of ThumbnailItem::itemId
 
     // Filtering
     QString   m_filter;

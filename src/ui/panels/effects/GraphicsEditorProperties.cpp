@@ -21,6 +21,13 @@ void GraphicsEditorPanel::populateFromLayer()
  if (m_selectedLayer->layerType() == GraphicLayerType::Text) {
  auto* tl = static_cast<TextLayer*>(m_selectedLayer);
 
+ if (m_textContentEdit) {
+ m_textContentEdit->blockSignals(true);
+ QString cur = QString::fromStdString(tl->text());
+ if (m_textContentEdit->toPlainText() != cur)
+ m_textContentEdit->setPlainText(cur);
+ m_textContentEdit->blockSignals(false);
+ }
  if (m_fontCombo) {
  m_fontCombo->blockSignals(true);
  int idx = m_fontCombo->findText(QString::fromStdString(tl->fontFamily()));
@@ -194,6 +201,9 @@ void GraphicsEditorPanel::applyTextProperties()
  if (!m_selectedLayer || m_updating) return;
  if (m_selectedLayer->layerType() != GraphicLayerType::Text) return;
  auto* tl = static_cast<TextLayer*>(m_selectedLayer);
+
+ if (m_textContentEdit)
+ tl->setText(m_textContentEdit->toPlainText().toStdString());
 
  if (m_fontCombo)
  tl->setFontFamily(m_fontCombo->currentText().toStdString());

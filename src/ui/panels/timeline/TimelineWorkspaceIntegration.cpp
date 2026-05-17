@@ -28,8 +28,14 @@
 #include "timeline/Timeline.h"
 #include "timeline/Track.h"
 #include "timeline/Clip.h"
+#include "timeline/VideoClip.h"
+#include "timeline/ImageClip.h"
+#include "timeline/AudioClip.h"
 
+#include <QFileSystemWatcher>
 #include <QTimer>
+
+#include <filesystem>
 
 #include <spdlog/spdlog.h>
 
@@ -127,6 +133,10 @@ void TimelineWorkspace::setTimeline(Timeline* timeline) {
     // doesn't block on decoder initialization + file probing.
     if (timeline)
         preOpenVideoMedia();
+
+    // Arm the live file-swap watcher for the new project's media.
+    if (timeline)
+        rescanMediaWatch();
 }
 
 void TimelineWorkspace::invalidateCompositeCache()
@@ -138,6 +148,98 @@ void TimelineWorkspace::invalidateCompositeCacheRange(int64_t fromTick, int64_t 
 {
     if (m_compositeService)
         m_compositeService->requestCacheInvalidationRange(fromTick, toTick);
+}
+
+void TimelineWorkspace::refreshChangedMedia(const std::filesystem::path& path)
+{
+    if (path.empty()) return;
+
+    // 1. Force MediaPool to forget the old decoder/frames for this file.
+    if (m_mediaPool) m_mediaPool->invalidatePath(path);
+
+    // 2. Drop the compositor's cached path→handle mapping so the next
+    //    composite re-opens the file (getting a fresh handle + decode).
+    if (m_compositeService) m_compositeService->forgetMediaPath(path.string());
+
+    // 3. Flush composited output and refresh the visible monitor so every
+    //    timeline instance shows the new content immediately.
+    invalidateCompositeCache();
+    if (m_timelinePanel) m_timelinePanel->rebuildTracks();
+    if (m_programMonitor) m_programMonitor->requestRefresh();
+
+    // QFileSystemWatcher stops watching a path once the file is replaced
+    // (Explorer's "overwrite" is a delete+create / rename). Re-arm so a
+    // second swap of the same file is still detected.
+    rescanMediaWatch();
+}
+
+void TimelineWorkspace::rescanMediaWatch()
+{
+    if (m_destroying.load(std::memory_order_acquire)) return;
+    if (!m_timeline) return;
+
+    // Lazily create the watcher + its debounce timer on first use.
+    if (!m_mediaWatcher) {
+        m_mediaWatcher = new QFileSystemWatcher(this);
+        m_mediaWatchDebounce = new QTimer(this);
+        m_mediaWatchDebounce->setSingleShot(true);
+        m_mediaWatchDebounce->setInterval(250);  // coalesce write bursts
+
+        connect(m_mediaWatcher, &QFileSystemWatcher::fileChanged, this,
+                [this](const QString& path) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
+            m_mediaWatchPending.insert(path.toStdString());
+            m_mediaWatchDebounce->start();
+        });
+
+        connect(m_mediaWatchDebounce, &QTimer::timeout, this, [this]() {
+            if (m_destroying.load(std::memory_order_acquire)) return;
+            auto pending = std::move(m_mediaWatchPending);
+            m_mediaWatchPending.clear();
+            for (const auto& p : pending) {
+                std::error_code ec;
+                // A still-missing file is mid-rewrite — requeue and wait.
+                if (!std::filesystem::exists(p, ec)) {
+                    m_mediaWatchPending.insert(p);
+                    continue;
+                }
+                refreshChangedMedia(std::filesystem::path(p));
+            }
+            if (!m_mediaWatchPending.empty())
+                m_mediaWatchDebounce->start();
+        });
+    }
+
+    // Collect every distinct media file the timeline currently references.
+    std::set<QString> want;
+    for (size_t ti = 0; ti < m_timeline->trackCount(); ++ti) {
+        auto* track = m_timeline->track(ti);
+        if (!track) continue;
+        for (size_t ci = 0; ci < track->clipCount(); ++ci) {
+            auto* clip = track->clip(ci);
+            if (!clip) continue;
+            std::string mp;
+            if      (auto* v = dynamic_cast<VideoClip*>(clip)) mp = v->mediaPath();
+            else if (auto* i = dynamic_cast<ImageClip*>(clip)) mp = i->mediaPath();
+            else if (auto* a = dynamic_cast<AudioClip*>(clip)) mp = a->mediaPath();
+            if (mp.empty()) continue;
+            std::error_code ec;
+            if (std::filesystem::exists(mp, ec))
+                want.insert(QString::fromStdString(mp));
+        }
+    }
+
+    // Diff against the currently-watched set: drop stale, add new. (Re-adding
+    // an already-watched path is a no-op in QFileSystemWatcher.)
+    const QStringList watched = m_mediaWatcher->files();
+    QStringList toRemove;
+    for (const QString& w : watched)
+        if (want.find(w) == want.end())
+            toRemove << w;
+    if (!toRemove.isEmpty())
+        m_mediaWatcher->removePaths(toRemove);
+    for (const QString& w : want)
+        m_mediaWatcher->addPath(w);
 }
 
 void TimelineWorkspace::refreshAfterUndoRedo()
@@ -199,6 +301,11 @@ void TimelineWorkspace::refreshAfterUndoRedo()
         // not leave the Program Monitor showing stale/corrupted content.
         m_programMonitor->resetViewState();
     }
+
+    // Clips may have been added/removed/relinked — keep the live file-swap
+    // watcher in sync with the timeline's current media set.
+    rescanMediaWatch();
+
     schedulePostEditWork();
 }
 

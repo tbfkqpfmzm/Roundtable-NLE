@@ -83,9 +83,16 @@ void KeyframeEditor::setupUI()
     m_actAddKeyframe    = m_contextMenu->addAction(QStringLiteral("Add Keyframe"));
     m_actDeleteKeyframes = m_contextMenu->addAction(QStringLiteral("Delete Selected"));
     m_contextMenu->addSeparator();
-    m_actLinear         = m_contextMenu->addAction(QStringLiteral("Linear"));
-    m_actBezier         = m_contextMenu->addAction(QStringLiteral("Bezier"));
-    m_actHold           = m_contextMenu->addAction(QStringLiteral("Hold"));
+    // Premiere-style "Temporal Interpolation" submenu
+    QMenu* interpSub = m_contextMenu->addMenu(QStringLiteral("Temporal Interpolation"));
+    m_actLinear           = interpSub->addAction(QStringLiteral("Linear"));
+    m_actBezier           = interpSub->addAction(QStringLiteral("Bezier"));
+    m_actAutoBezier       = interpSub->addAction(QStringLiteral("Auto Bezier"));
+    m_actContinuousBezier = interpSub->addAction(QStringLiteral("Continuous Bezier"));
+    m_actHold             = interpSub->addAction(QStringLiteral("Hold"));
+    interpSub->addSeparator();
+    m_actEaseIn           = interpSub->addAction(QStringLiteral("Ease In"));
+    m_actEaseOut          = interpSub->addAction(QStringLiteral("Ease Out"));
     m_contextMenu->addSeparator();
     m_actCopy           = m_contextMenu->addAction(QStringLiteral("Copy"));
     m_actPaste          = m_contextMenu->addAction(QStringLiteral("Paste"));
@@ -93,6 +100,11 @@ void KeyframeEditor::setupUI()
     m_actFitAll         = m_contextMenu->addAction(QStringLiteral("Fit All"));
     m_actFitSelection   = m_contextMenu->addAction(QStringLiteral("Fit Selection"));
     m_actSelectAll      = m_contextMenu->addAction(QStringLiteral("Select All"));
+    m_contextMenu->addSeparator();
+    m_actShowVelocity   = m_contextMenu->addAction(QStringLiteral("Show Velocity Graph"));
+    m_actShowVelocity->setCheckable(true);
+    m_actShowVelocity->setChecked(m_showVelocityGraph);
+    connect(m_actShowVelocity, &QAction::toggled, this, &KeyframeEditor::setShowVelocityGraph);
 
     // Connect context-menu actions
     connect(m_actAddKeyframe, &QAction::triggered, this, [this]() {
@@ -106,9 +118,13 @@ void KeyframeEditor::setupUI()
         }
     });
     connect(m_actDeleteKeyframes, &QAction::triggered, this, &KeyframeEditor::deleteSelectedKeyframes);
-    connect(m_actLinear, &QAction::triggered, this, [this]() { setInterpolation(0); });
-    connect(m_actBezier, &QAction::triggered, this, [this]() { setInterpolation(1); });
-    connect(m_actHold,   &QAction::triggered, this, [this]() { setInterpolation(2); });
+    connect(m_actLinear,           &QAction::triggered, this, [this]() { setInterpolation(0); });
+    connect(m_actBezier,           &QAction::triggered, this, [this]() { setInterpolation(1); });
+    connect(m_actHold,             &QAction::triggered, this, [this]() { setInterpolation(2); });
+    connect(m_actAutoBezier,       &QAction::triggered, this, [this]() { setInterpolation(3); });
+    connect(m_actContinuousBezier, &QAction::triggered, this, [this]() { setInterpolation(4); });
+    connect(m_actEaseIn,           &QAction::triggered, this, [this]() { setInterpolation(5); });
+    connect(m_actEaseOut,          &QAction::triggered, this, [this]() { setInterpolation(6); });
     connect(m_actCopy,   &QAction::triggered, this, &KeyframeEditor::copySelectedKeyframes);
     connect(m_actPaste,  &QAction::triggered, this, [this]() {
         pasteKeyframes(static_cast<int64_t>(m_contextMenuGraphPos.x()));
@@ -127,8 +143,51 @@ void KeyframeEditor::setClip(Clip* clip)
     m_clip = clip;
     m_selection.clear();
     rebuildCurves();
+    recomputeVelocityRange();
     emit selectionChanged();
     update();
+}
+
+void KeyframeEditor::setShowVelocityGraph(bool on) noexcept
+{
+    if (m_showVelocityGraph == on) return;
+    m_showVelocityGraph = on;
+    if (on) recomputeVelocityRange();
+    if (m_actShowVelocity && m_actShowVelocity->isChecked() != on)
+        m_actShowVelocity->setChecked(on);
+    update();
+}
+
+void KeyframeEditor::recomputeVelocityRange()
+{
+    // Sweep the visible curves and find the largest |slope| we'd plot, so
+    // the velocity pane uses an auto-scaled symmetric range (matches
+    // Premiere's behavior when expanding the speed graph).
+    double maxAbs = 0.0;
+    for (const auto& ce : m_curves) {
+        if (!ce.visible || !ce.track) continue;
+        const auto& tk = *ce.track;
+        if (tk.keyframeCount() < 2) continue;
+        // Sample slope at a few hundred points across the keyframe span.
+        const int64_t t0 = tk.keyframe(0).time;
+        const int64_t t1 = tk.keyframe(tk.keyframeCount() - 1).time;
+        if (t1 <= t0) continue;
+        constexpr int kSamples = 200;
+        const int64_t dt = std::max<int64_t>(1, (t1 - t0) / kSamples);
+        const double  invDtSec = 1.0 / (static_cast<double>(dt) / static_cast<double>(kTicksPerSecond)); // 48000 ticks/sec assumed
+        for (int s = 0; s < kSamples; ++s) {
+            int64_t ta = t0 + dt * s;
+            int64_t tb = ta + dt;
+            double va = tk.evaluate(ta);
+            double vb = tk.evaluate(tb);
+            double slope = (vb - va) * invDtSec;
+            if (std::abs(slope) > maxAbs) maxAbs = std::abs(slope);
+        }
+    }
+    if (maxAbs < 1.0) maxAbs = 100.0;          // sane default when flat
+    maxAbs *= 1.15;                            // 15% headroom
+    m_viewVelocityMin = -maxAbs;
+    m_viewVelocityMax =  maxAbs;
 }
 
 void KeyframeEditor::rebuildCurves()
@@ -273,14 +332,18 @@ void KeyframeEditor::setInterpolation(int interpMode)
 {
     if (m_selection.empty()) return;
 
-    auto mode = static_cast<InterpMode>(std::clamp(interpMode, 0, 2));
+    auto mode = static_cast<InterpMode>(std::clamp(interpMode, 0, 6));
 
     for (auto& sk : m_selection) {
         if (sk.curveIndex < 0 || sk.curveIndex >= static_cast<int>(m_curves.size())) continue;
         auto* track = m_curves[sk.curveIndex].track;
         if (!track || sk.keyIndex < 0 || sk.keyIndex >= static_cast<int>(track->keyframeCount()))
             continue;
-        track->keyframe(sk.keyIndex).interp = mode;
+        const auto t = track->keyframe(sk.keyIndex).time;
+        if (m_commandStack)
+            m_commandStack->execute(std::make_unique<SetKeyframeInterpCommand>(track, t, mode));
+        else
+            track->keyframe(sk.keyIndex).interp = mode;
     }
     emit keyframeChanged();
     update();
@@ -430,10 +493,21 @@ void KeyframeEditor::fitViewToSelection()
 //  Coordinate transforms
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
+// When the velocity graph is shown, the value pane occupies the top half of
+// the plot area; the velocity pane occupies the bottom half (with a 4px gap).
+static constexpr double kVelocityGap = 4.0;
+
+static double valuePaneHeight(double totalPlotH, bool showVelocity) noexcept
+{
+    if (!showVelocity) return totalPlotH;
+    return std::max(20.0, (totalPlotH - kVelocityGap) * 0.5);
+}
+
 QPointF KeyframeEditor::graphToPixel(double time, double value) const
 {
     double plotW = width()  - kMarginLeft - kMarginRight;
-    double plotH = height() - kMarginTop  - kMarginBottom;
+    double totalH = height() - kMarginTop  - kMarginBottom;
+    double plotH = valuePaneHeight(totalH, m_showVelocityGraph);
     if (plotW <= 0) plotW = 1;
     if (plotH <= 0) plotH = 1;
 
@@ -450,7 +524,8 @@ QPointF KeyframeEditor::graphToPixel(double time, double value) const
 QPointF KeyframeEditor::pixelToGraph(double px, double py) const
 {
     double plotW = width()  - kMarginLeft - kMarginRight;
-    double plotH = height() - kMarginTop  - kMarginBottom;
+    double totalH = height() - kMarginTop  - kMarginBottom;
+    double plotH = valuePaneHeight(totalH, m_showVelocityGraph);
     if (plotW <= 0) plotW = 1;
     if (plotH <= 0) plotH = 1;
 
@@ -462,6 +537,42 @@ QPointF KeyframeEditor::pixelToGraph(double px, double py) const
     return {time, value};
 }
 
+QPointF KeyframeEditor::graphToPixelVelocity(double time, double velocity) const
+{
+    double plotW  = width()  - kMarginLeft - kMarginRight;
+    double totalH = height() - kMarginTop  - kMarginBottom;
+    if (plotW <= 0) plotW = 1;
+    double valH = valuePaneHeight(totalH, true);
+    double velTop = kMarginTop + valH + kVelocityGap;
+    double velH = std::max(10.0, totalH - valH - kVelocityGap);
+
+    double timeRange = m_viewTimeMax - m_viewTimeMin;
+    if (timeRange == 0.0) timeRange = 1.0;
+    double velRange = m_viewVelocityMax - m_viewVelocityMin;
+    if (velRange == 0.0) velRange = 1.0;
+
+    double x = kMarginLeft + (time     - m_viewTimeMin)    / timeRange * plotW;
+    double y = velTop + (1.0 - (velocity - m_viewVelocityMin) / velRange) * velH;
+    return {x, y};
+}
+
+QPointF KeyframeEditor::pixelToGraphVelocity(double px, double py) const
+{
+    double plotW  = width()  - kMarginLeft - kMarginRight;
+    double totalH = height() - kMarginTop  - kMarginBottom;
+    if (plotW <= 0) plotW = 1;
+    double valH = valuePaneHeight(totalH, true);
+    double velTop = kMarginTop + valH + kVelocityGap;
+    double velH = std::max(10.0, totalH - valH - kVelocityGap);
+
+    double timeRange = m_viewTimeMax - m_viewTimeMin;
+    double velRange  = m_viewVelocityMax - m_viewVelocityMin;
+
+    double time     = m_viewTimeMin    + (px - kMarginLeft) / plotW * timeRange;
+    double velocity = m_viewVelocityMin + (1.0 - (py - velTop) / velH) * velRange;
+    return {time, velocity};
+}
+
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 //  Hit testing
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -470,6 +581,57 @@ KeyframeEditor::HitResult KeyframeEditor::hitTest(const QPointF& pos) const
 {
     HitResult best;
     double bestDist = kHitRadius;
+
+    // Velocity-pane influence handles take priority when the cursor sits
+    // inside the velocity pane region.
+    if (m_showVelocityGraph) {
+        const double valH  = (height() - kMarginTop - kMarginBottom) * 0.5 - 2.0;
+        const double velTop = kMarginTop + valH + kVelocityGap;
+        if (pos.y() >= velTop) {
+            for (int ci = 0; ci < static_cast<int>(m_curves.size()); ++ci) {
+                if (!m_curves[ci].visible || !m_curves[ci].track) continue;
+                const auto& tk = *m_curves[ci].track;
+                for (int ki = 0; ki < static_cast<int>(tk.keyframeCount()); ++ki) {
+                    const auto& kf = tk.keyframe(static_cast<size_t>(ki));
+                    // Out-handle
+                    if (ki + 1 < static_cast<int>(tk.keyframeCount())) {
+                        const auto& kfNext = tk.keyframe(static_cast<size_t>(ki + 1));
+                        double dtSec = (kfNext.time - kf.time) / static_cast<double>(kTicksPerSecond);
+                        double dv    = kfNext.value - kf.value;
+                        if (dtSec > 0.0) {
+                            double bx = std::max<double>(kf.bezierOutX, 0.001);
+                            double slope = 3.0 * kf.bezierOutY * (dv / dtSec) / bx;
+                            double tHandle = kf.time + bx * (kfNext.time - kf.time);
+                            QPointF hPx = graphToPixelVelocity(tHandle, slope);
+                            double d = QLineF(pos, hPx).length();
+                            if (d < kTangentHitRadius && d < bestDist) {
+                                bestDist = d;
+                                best = {ci, ki, false, false, false, true};
+                            }
+                        }
+                    }
+                    // In-handle
+                    if (ki > 0) {
+                        const auto& kfPrev = tk.keyframe(static_cast<size_t>(ki - 1));
+                        double dtSec = (kf.time - kfPrev.time) / static_cast<double>(kTicksPerSecond);
+                        double dv    = kf.value - kfPrev.value;
+                        if (dtSec > 0.0) {
+                            double bx = std::min<double>(std::max<double>(kf.bezierInX, 0.001), 0.999);
+                            double slope = 3.0 * (1.0 - kf.bezierInY) * (dv / dtSec) / (1.0 - bx);
+                            double tHandle = kfPrev.time + bx * (kf.time - kfPrev.time);
+                            QPointF hPx = graphToPixelVelocity(tHandle, slope);
+                            double d = QLineF(pos, hPx).length();
+                            if (d < kTangentHitRadius && d < bestDist) {
+                                bestDist = d;
+                                best = {ci, ki, false, false, true, false};
+                            }
+                        }
+                    }
+                }
+            }
+            if (best.curveIndex >= 0) return best;
+        }
+    }
 
     for (int ci = 0; ci < static_cast<int>(m_curves.size()); ++ci) {
         if (!m_curves[ci].visible || !m_curves[ci].track) continue;
@@ -484,9 +646,11 @@ KeyframeEditor::HitResult KeyframeEditor::hitTest(const QPointF& pos) const
                 best = {ci, ki, false, false};
             }
 
-            // Check tangent handles (only if selected and bezier)
+            // Check tangent handles (selected + has manually-edited handles)
             SelectedKey sk{ci, ki};
-            if (m_selection.count(sk) && kf.interp == InterpMode::Bezier) {
+            const bool hasManualHandles =
+                (kf.interp == InterpMode::Bezier || kf.interp == InterpMode::ContinuousBezier);
+            if (m_selection.count(sk) && hasManualHandles) {
                 // Out tangent
                 if (ki + 1 < static_cast<int>(track.keyframeCount())) {
                     const auto& kfNext = track.keyframe(ki + 1);
@@ -503,20 +667,20 @@ KeyframeEditor::HitResult KeyframeEditor::hitTest(const QPointF& pos) const
                 }
             }
 
-            // In tangent of previous keyframe (if this kf is selected)
-            if (ki > 0 && m_selection.count(sk)) {
+            // In tangent of THIS keyframe (controls the segment ending at it).
+            // bezierIn{X,Y} are normalized to the incoming segment, so the
+            // handle's absolute position lives between kfPrev and kf.
+            if (ki > 0 && m_selection.count(sk) && hasManualHandles) {
                 const auto& kfPrev = track.keyframe(ki - 1);
-                if (kfPrev.interp == InterpMode::Bezier) {
-                    double dt = static_cast<double>(kf.time - kfPrev.time);
-                    double dv = static_cast<double>(kf.value - kfPrev.value);
-                    QPointF tanPx = graphToPixel(
-                        kfPrev.time + kfPrev.bezierInX * dt,
-                        kfPrev.value + kfPrev.bezierInY * dv);
-                    double td = QLineF(pos, tanPx).length();
-                    if (td < kTangentHitRadius && td < bestDist) {
-                        bestDist = td;
-                        best = {ci, ki - 1, true, false};
-                    }
+                double dt = static_cast<double>(kf.time - kfPrev.time);
+                double dv = static_cast<double>(kf.value - kfPrev.value);
+                QPointF tanPx = graphToPixel(
+                    kfPrev.time + kf.bezierInX * dt,
+                    kfPrev.value + kf.bezierInY * dv);
+                double td = QLineF(pos, tanPx).length();
+                if (td < kTangentHitRadius && td < bestDist) {
+                    bestDist = td;
+                    best = {ci, ki, true, false};
                 }
             }
         }

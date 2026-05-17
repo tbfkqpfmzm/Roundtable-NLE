@@ -23,6 +23,7 @@
 
 #include <QHBoxLayout>
 #include <QVBoxLayout>
+#include <QSettings>
 #include <QStackedLayout>
 #include <QShowEvent>
 #include <QKeyEvent>
@@ -294,7 +295,20 @@ void ProgramMonitor::setupUI()
     m_playbackResCombo->setStyleSheet(comboStyle);
     rt::UiScale::setScaledMinimumWidth(m_playbackResCombo, 70);
     rt::UiScale::setScaledFixedHeight(m_playbackResCombo, 24);
-    m_playbackResCombo->setCurrentIndex(1); // default to 1/2 (matches Half-tier decode)
+    // Restore the last-used playback resolution (Premiere-style: the
+    // dropdown reopens with whatever it was closed at). Defaults to 1/2
+    // (index 1, matches Half-tier decode) on first run. Set the divisor
+    // member directly too — setPlaybackTierCallback() fires once with
+    // m_playbackResDivisor on startup, so the restored tier must be in
+    // place before the combo's currentIndexChanged slot is connected.
+    {
+        int savedIdx = QSettings().value(
+            QStringLiteral("playback/resolutionIndex"), 1).toInt();
+        if (savedIdx < 0 || savedIdx > 3) savedIdx = 1;
+        static constexpr int kDivisors[] = {1, 2, 4, 8};
+        m_playbackResDivisor = kDivisors[savedIdx];
+        m_playbackResCombo->setCurrentIndex(savedIdx);
+    }
     controlLayout->addWidget(m_playbackResCombo, 0, Qt::AlignVCenter);
 
     // Connect playback resolution selection
@@ -302,6 +316,11 @@ void ProgramMonitor::setupUI()
             this, [this](int index) {
         static constexpr int divisors[] = {1, 2, 4, 8};
         m_playbackResDivisor = (index >= 0 && index < 4) ? divisors[index] : 1;
+
+        // Persist so the next launch reopens at this resolution.
+        if (index >= 0 && index < 4)
+            QSettings().setValue(
+                QStringLiteral("playback/resolutionIndex"), index);
 
         if (m_pipeline) {
             m_pipeline->setOutputResolution(m_outputWidth, m_outputHeight,

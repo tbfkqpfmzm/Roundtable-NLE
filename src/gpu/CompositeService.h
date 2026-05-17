@@ -207,6 +207,13 @@ public:
         std::lock_guard lock(m_openMediaHandlesMutex);
         m_openMediaHandles.clear();
     }
+    /// Drop the cached handle for a single path so the next composite
+    /// re-resolves it via MediaPool::open() (picking up a file whose
+    /// contents changed on disk, e.g. an edited Color Matte).
+    void forgetMediaPath(const std::string& path) {
+        std::lock_guard lock(m_openMediaHandlesMutex);
+        m_openMediaHandles.erase(path);
+    }
 
     // ── Video fallback cache ────────────────────────────────────────────
     struct VideoFallbackInfo {

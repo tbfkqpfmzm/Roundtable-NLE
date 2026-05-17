@@ -27,6 +27,7 @@ inline constexpr int kMediaTypeRole     = Qt::UserRole + 22;   // int (MediaType
 inline constexpr int kFrameCountRole    = Qt::UserRole + 23;   // qint64 (total frames)
 inline constexpr int kHoverNormRole     = Qt::UserRole + 24;   // float (hover position 0..1, -1 = not hovering)
 inline constexpr int kMediaHandleRole   = Qt::UserRole + 1;    // uint64_t (media handle)
+inline constexpr int kBinItemIdRole     = Qt::UserRole + 30;   // quint64 (ThumbnailItem::itemId, per-instance identity)
 
 inline const QColor kLabelBin       (204, 153,  51);
 inline const QColor kLabelSequence  ( 64, 186,  96);
@@ -156,9 +157,15 @@ inline QIcon makePremiereBinIcon(const QColor& color, const QString& shape, int 
 
 // ── Bin tree helpers (shared across ProjectBin TUs) ──────────────────────
 
-/// Get the persistent key for a tree widget item (UserRole data, or text fallback).
+/// Get the persistent key for a tree widget item. Media items use their
+/// per-instance "@<itemId>" so two entries that reference the same file
+/// stay distinct across save/reload; bins/sequences fall back to the
+/// path/text key (kept for backward compatibility with old projects).
 inline QString projectBinItemKey(QTreeWidgetItem* item)
 {
+    const quint64 id = item->data(0, kBinItemIdRole).toULongLong();
+    if (id != 0)
+        return QStringLiteral("@") + QString::number(id);
     QString key = item->data(0, Qt::UserRole).toString();
     if (key.isEmpty()) key = item->text(0);
     return key;

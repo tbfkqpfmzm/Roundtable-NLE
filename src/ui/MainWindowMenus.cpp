@@ -12,8 +12,8 @@
 #include "command/CommandStack.h"
 #include "media/AudioEngine.h"
 #include "project/Project.h"
-#include "timeline/KeyframeMode.h"
 #include "dialogs/ProjectSettingsDialog.h"
+#include "panels/effects/EffectControlsPanel.h"
 #include "dialogs/KeyboardShortcutsDialog.h"
 #include "dialogs/AppPreferencesDialog.h"
 #include "dialogs/RelinkMediaDialog.h"
@@ -177,6 +177,10 @@ void MainWindow::buildEditMenu(QMenuBar* menuBar)
                     settings.resolution().height);
                 pm->requestRefresh();
             }
+            if (auto* ec = effectControlsPanel())
+                ec->setSequenceResolution(
+                    settings.resolution().width,
+                    settings.resolution().height);
         }
     });
 
@@ -287,17 +291,6 @@ void MainWindow::buildTimelineMenu(QMenuBar* menuBar)
         });
     }
 
-    menu->addSeparator();
-    auto* autoKfAct = menu->addAction(tr("Auto Keyframe"));
-    autoKfAct->setCheckable(true);
-    autoKfAct->setChecked(KeyframeMode::isAutoEnabled());
-    autoKfAct->setStatusTip(tr("When ON, dragging the transform overlay or editing properties "
-                                "creates new keyframes at the playhead. When OFF (default), only "
-                                "existing keyframes are updated; new ones must be added explicitly."));
-    autoKfAct->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_K));
-    connect(autoKfAct, &QAction::toggled, this, [](bool on) {
-        KeyframeMode::setAutoEnabled(on);
-    });
 }
 
 void MainWindow::buildAudioMenu(QMenuBar* menuBar)

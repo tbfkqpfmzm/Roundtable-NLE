@@ -118,6 +118,12 @@ void ProjectBin::onItemDoubleClicked(int index, const std::filesystem::path& fil
         }
     }
 
+    // Color matte → reopen the colour picker to recolour it (Premiere).
+    if (isColorMatte(filePath)) {
+        editColorMatte(filePath);
+        return;
+    }
+
     // Media item — load in source monitor
     uint64_t handle = 0;
     const auto* item = m_grid->selectedItem();
@@ -150,8 +156,16 @@ void ProjectBin::onListItemDoubleClicked(QTreeWidgetItem* item, int /*column*/)
         return;
     }
 
-    // Media items: load in source monitor
+    // Media items
     std::filesystem::path filePath(item->data(0, Qt::UserRole).toString().toStdString());
+
+    // Color matte → reopen the colour picker to recolour it (Premiere).
+    if (isColorMatte(filePath)) {
+        editColorMatte(filePath);
+        return;
+    }
+
+    // Other media → load in source monitor
     uint64_t handle = item->data(0, Qt::UserRole + 1).toULongLong();
     emit loadInSourceMonitor(filePath, handle);
 }

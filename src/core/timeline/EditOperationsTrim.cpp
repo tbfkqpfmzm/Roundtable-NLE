@@ -15,7 +15,9 @@
 #include "timeline/SpineClip.h"
 #include "command/Command.h"
 #include "command/CompoundCommand.h"
+#include "command/LambdaCommand.h"
 #include "command/commands/ClipCommands.h"
+#include "timeline/Transition.h"
 
 #include <algorithm>
 #include <atomic>
@@ -79,6 +81,24 @@ std::unique_ptr<Command> EditOperations::splitClipInternal(
     if (leftDuration < kMinClipDuration || rightDuration < kMinClipDuration)
         return nullptr;
 
+    // ── Capture tail transitions BEFORE the trim mangles them ───────────
+    // A transition anchored to this clip's END (a cross-dissolve into the
+    // next clip, or a fade-out) conceptually belongs to whatever clip
+    // occupies that tail. After the split that's the NEW right half — not
+    // the left half. TrimClipCommand's retargetTransitionsForClip() would
+    // otherwise drag the dissolve back to the cut point (the left half's
+    // new end), which is exactly the "cross fade jumps to the left clip"
+    // bug. Snapshot the tail transitions' peers here so we can re-anchor
+    // them to the right half once it exists.
+    const int64_t originalOut = clip->timelineOut();
+    std::vector<uint64_t> tailPeers;  // rightClipId of each tail transition
+    for (size_t i = 0; i < track->transitionCount(); ++i) {
+        const Transition* tp = track->transition(i);
+        if (!tp) continue;
+        if (tp->leftClipId == clipId && tp->editPointTick == originalOut)
+            tailPeers.push_back(tp->rightClipId);
+    }
+
     auto compound = std::make_unique<CompoundCommand>("Split clip");
 
     // 1. Trim the original clip to end at splitTime
@@ -114,7 +134,41 @@ std::unique_ptr<Command> EditOperations::splitClipInternal(
         rightClip->setGroupId(newGid);
     }
 
+    const uint64_t rightId = rightClip->id();
     compound->addCommand(std::make_unique<AddClipCommand>(track, std::move(rightClip)));
+
+    // 3. Re-anchor tail transitions to the new right half. Runs AFTER the
+    //    trim+add so the right clip exists. editPointTick is restored to the
+    //    original clip end (== rightClip->timelineOut()); the trim's
+    //    retarget had shoved it to splitTime.
+    if (!tailPeers.empty()) {
+        auto doFix = [track, clipId, rightId, originalOut, tailPeers]() {
+            for (size_t i = 0; i < track->transitionCount(); ++i) {
+                const Transition* tp = track->transition(i);
+                if (!tp || tp->leftClipId != clipId) continue;
+                if (std::find(tailPeers.begin(), tailPeers.end(),
+                              tp->rightClipId) == tailPeers.end()) continue;
+                Transition t = *tp;
+                t.leftClipId   = rightId;
+                t.editPointTick = originalOut;
+                track->setTransition(i, t);
+            }
+        };
+        auto undoFix = [track, clipId, rightId, originalOut, tailPeers]() {
+            for (size_t i = 0; i < track->transitionCount(); ++i) {
+                const Transition* tp = track->transition(i);
+                if (!tp || tp->leftClipId != rightId) continue;
+                if (std::find(tailPeers.begin(), tailPeers.end(),
+                              tp->rightClipId) == tailPeers.end()) continue;
+                Transition t = *tp;
+                t.leftClipId   = clipId;
+                t.editPointTick = originalOut;
+                track->setTransition(i, t);
+            }
+        };
+        compound->addCommand(std::make_unique<LambdaCommand>(
+            "Re-anchor split transition", std::move(doFix), std::move(undoFix)));
+    }
 
     return compound;
 }

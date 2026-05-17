@@ -68,6 +68,9 @@ public:
     /// Add a new empty sequence. Returns the new sequence and its index.
     Timeline* addSequence(const std::string& name = "");
 
+    /// Add a pre-built sequence (takes ownership). Returns the new sequence.
+    Timeline* addSequence(std::unique_ptr<Timeline> seq);
+
     /// Duplicate an existing sequence. Returns the new copy and its index.
     Timeline* duplicateSequence(size_t srcIndex);
 
@@ -111,6 +114,20 @@ public:
     [[nodiscard]] const std::vector<BinFolder>& binFolders() const noexcept { return m_binFolders; }
     void setBinFolders(std::vector<BinFolder> folders) { m_binFolders = std::move(folders); }
 
+    /// Rich per-instance bin entry (format v14+). Carries its own stable
+    /// identity, display name, and label colour so footage can appear
+    /// multiple times in the bin as independent "master clips" that
+    /// survive save/reload (Premiere-style duplicates).
+    struct BinItem {
+        uint64_t              id = 0;
+        std::filesystem::path path;
+        std::string           displayName;
+        uint32_t              labelColor = 0xFF888888;
+    };
+
+    [[nodiscard]] const std::vector<BinItem>& binItems() const noexcept { return m_binItems; }
+    void setBinItems(std::vector<BinItem> items) { m_binItems = std::move(items); }
+
     // ── AudioSync state (opaque blob serialized by the AudioSync panel) ─
     [[nodiscard]] const std::vector<uint8_t>& audioSyncBlob() const noexcept { return m_audioSyncBlob; }
     void setAudioSyncBlob(std::vector<uint8_t> blob) { m_audioSyncBlob = std::move(blob); }
@@ -131,6 +148,7 @@ private:
     std::unique_ptr<CommandStack>  m_commands;
     std::vector<std::filesystem::path> m_binFiles;
     std::vector<BinFolder>         m_binFolders;
+    std::vector<BinItem>           m_binItems;   // v14+ rich bin model
     std::vector<uint8_t>           m_audioSyncBlob;
 };
 

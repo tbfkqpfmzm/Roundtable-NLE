@@ -11,7 +11,7 @@ ROUNDTABLE is a full-featured NLE written in C++20 with Vulkan 1.3 compute shade
 ## Support
 
 If you'd like to support development, you can leave a tip at:
-👉 **https://streamelements.com/exporterrormusic/tip**
+👉 **https://www.paypal.com/ncp/payment/7THEH3LWCTRZU*
 
 All contributions are greatly appreciated!
 

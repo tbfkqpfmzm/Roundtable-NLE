@@ -173,6 +173,8 @@ void EffectControlsPanel::buildPropertyTree()
                 this, &EffectControlsPanel::onGoToPrevKeyframe);
         connect(row, &PropertyRow::goToNextKeyframe,
                 this, &EffectControlsPanel::onGoToNextKeyframe);
+        connect(row, &PropertyRow::resetRequested,
+                this, [this, row]() { resetPropertyRow(row); });
         connect(row, &PropertyRow::keyframingToggled,
                 this, [this](KeyframeTrack<float>* trk, bool enabled) {
             if (!trk || !m_clip) return;
@@ -777,13 +779,25 @@ void EffectControlsPanel::populateFromClip()
 
     int64_t t = clipRelativeTick();
 
-    // Position
-    if (m_posXSpin)   m_posXSpin->setValue(m_clip->positionX().evaluate(t));
-    if (m_posYSpin)   m_posYSpin->setValue(m_clip->positionY().evaluate(t));
+    // Position — internally REF-1920 px; show in sequence pixels
+    // (Premiere-style Motion).  Stored value is unchanged; this is purely
+    // a display-layer conversion, so the saved file format stays stable.
+    const double posFx = static_cast<double>(m_seqW) / 1920.0;
+    const double posFy = static_cast<double>(m_seqH) / 1080.0;
+    if (m_posXSpin)   m_posXSpin->setValue(m_clip->positionX().evaluate(t) * posFx);
+    if (m_posYSpin)   m_posYSpin->setValue(m_clip->positionY().evaluate(t) * posFy);
 
-    // Scale (Premiere shows as percentage: 1.0 = 100%)
-    if (m_scaleSpin)  m_scaleSpin->setValue(m_clip->scaleX().evaluate(t) * 100.0);
-    if (m_scaleWSpin) m_scaleWSpin->setValue(m_clip->scaleY().evaluate(t) * 100.0);
+    // Scale — Premiere-style native-pixel percentage.  Stored values are
+    // cover-fit multipliers (1.0 = fill frame), but we want the displayed
+    // number to read 100% only when the source is rendered 1:1 (sharp).
+    // Multiply by coverFit so: 1080p source in 1080p seq → 100% (native),
+    // 4K source in 1080p → 50% (downscaled), 500-px source → 384% (upscaled
+    // and the user can see at a glance that it'll be soft).  For clip kinds
+    // without a meaningful native-pixel size (characters / spine / title /
+    // graphic) coverFitForCurrentClip() returns 1.0 — unchanged display.
+    const double sf = coverFitForCurrentClip();
+    if (m_scaleSpin)  m_scaleSpin->setValue(m_clip->scaleX().evaluate(t) * sf * 100.0);
+    if (m_scaleWSpin) m_scaleWSpin->setValue(m_clip->scaleY().evaluate(t) * sf * 100.0);
 
     // Rotation (degrees)
     if (m_rotationSpin) m_rotationSpin->setValue(m_clip->rotation().evaluate(t));

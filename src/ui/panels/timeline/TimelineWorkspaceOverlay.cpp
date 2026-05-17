@@ -17,6 +17,7 @@
 #include "timeline/ImageClip.h"
 #include "timeline/SpineClip.h"
 #include "timeline/GraphicClip.h"
+#include "timeline/Position2D.h"
 #include "timeline/GraphicLayer.h"
 #include "media/MediaPool.h"
 #include "media/PlaybackController.h"
@@ -522,15 +523,23 @@ void TimelineWorkspace::updateTransformOverlay()
             }
 
             // Clip-level (outer) transform — applied by compositor on top of layer transform.
-            info.clipPosX     = m_selectedClip->positionX().evaluate(relTick);
-            info.clipPosY     = m_selectedClip->positionY().evaluate(relTick);
+            {
+                auto p2 = evaluatePosition2D(m_selectedClip->positionX(),
+                                             m_selectedClip->positionY(), relTick);
+                info.clipPosX = p2.first;
+                info.clipPosY = p2.second;
+            }
             info.clipScaleX   = m_selectedClip->scaleX().evaluate(relTick);
             info.clipScaleY   = m_selectedClip->scaleY().evaluate(relTick);
             info.clipRotation = m_selectedClip->rotation().evaluate(relTick);
         }
     } else {
-        info.posX     = m_selectedClip->positionX().evaluate(relTick);
-        info.posY     = m_selectedClip->positionY().evaluate(relTick);
+        {
+            auto p2 = evaluatePosition2D(m_selectedClip->positionX(),
+                                         m_selectedClip->positionY(), relTick);
+            info.posX = p2.first;
+            info.posY = p2.second;
+        }
         info.scaleX   = m_selectedClip->scaleX().evaluate(relTick);
         info.scaleY   = m_selectedClip->scaleY().evaluate(relTick);
         info.rotation = m_selectedClip->rotation().evaluate(relTick);
@@ -642,10 +651,11 @@ void TimelineWorkspace::updateTransformOverlay()
         }
     }
 
-    vp->setTransformOverlay(info);
-
     // Packed-alpha: visible area is top half (same as compositor).
-    // Characters use cover-fit like normal videos — no containFit override.
+    // Apply this BEFORE pushing to either overlay so both the software
+    // viewport and the GPU TransformOverlayWidget receive the same srcH —
+    // previously the software path got the un-adjusted (full packed)
+    // height, producing a 2×-tall bounding box for packed-alpha clips.
     if (info.srcW > 0 && info.srcH > 0 && !info.directSize && !info.useContentRect) {
         if (auto* vc = dynamic_cast<VideoClip*>(m_selectedClip)) {
             if (m_mediaPool) {
@@ -660,6 +670,29 @@ void TimelineWorkspace::updateTransformOverlay()
         }
     }
 
+    // Characters (SpineClip and VideoClip flagged as character) are
+    // composited with CONTAIN-fit, not cover-fit (see
+    // CompositeServiceLayerBuild.cpp where layer.containFit = true is
+    // set for isVideoCharClip || isPreRenderedSpine).  The overlay must
+    // match that fit mode or the bounding box is grossly oversized
+    // (cover-fit overflows for portrait sources, ~2× too big visually).
+    {
+        bool isCharacter = false;
+#ifdef ROUNDTABLE_HAS_SPINE
+        if (dynamic_cast<SpineClip*>(m_selectedClip))
+            isCharacter = true;
+#endif
+        if (!isCharacter) {
+            if (auto* vc = dynamic_cast<VideoClip*>(m_selectedClip))
+                if (vc->isVideoCharacter())
+                    isCharacter = true;
+        }
+        if (isCharacter)
+            info.containFit = true;
+    }
+
+    vp->setTransformOverlay(info);
+
     // Also update the GPU overlay widget (TransformOverlayWidget)
     if (auto* overlay = m_programMonitor->transformOverlay()) {
         overlay->setTransformOverlay(info);
@@ -669,6 +702,29 @@ void TimelineWorkspace::updateTransformOverlay()
             overlay->setMasks(&m_selectedClip->masks());
         else
             overlay->setMasks(nullptr);
+
+        // Pass Position tracks so the overlay can draw the motion path and
+        // expose the right-click "Spatial Interpolation" menu on waypoints.
+        if (m_selectedClip
+            && m_selectedClip->positionX().keyframeCount() >= 2
+            && m_selectedClip->positionY().keyframeCount() >= 2)
+        {
+            overlay->setMotionPathTracks(&m_selectedClip->positionX(),
+                                         &m_selectedClip->positionY(),
+                                         m_commandStack);
+        } else {
+            overlay->clearMotionPath();
+        }
+
+        // Tell the overlay the sequence resolution so REF-1920 keyframe
+        // values map to widget pixels correctly.
+        if (m_programMonitor) {
+            uint32_t w = m_programMonitor->outputWidth();
+            uint32_t h = m_programMonitor->outputHeight();
+            if (w == 0) w = 1920;
+            if (h == 0) h = 1080;
+            overlay->setSequenceResolution(w, h);
+        }
     }
 }
 

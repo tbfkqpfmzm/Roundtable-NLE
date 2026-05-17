@@ -19,7 +19,10 @@
 #include "media/MediaPool.h"
 
 #include <QColorDialog>
+#include <QDesktopServices>
+#include <QDir>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QKeyEvent>
@@ -27,10 +30,12 @@
 #include <QMenu>
 #include <QPainter>
 #include <QPainterPath>
+#include <QProcess>
 #include <QScrollArea>
 #include <QStyle>
 #include <QStyledItemDelegate>
 #include <QTreeWidgetItem>
+#include <QUrl>
 #include <QVBoxLayout>
 
 #include <spdlog/spdlog.h>
@@ -308,14 +313,29 @@ void ProjectBin::setupUI()
         if (item->data(0, Qt::UserRole + 2).toBool())
             return;
 
-        // Media item rename � update displayName in ThumbnailGrid
+        // Media item rename — update displayName on the matching grid
+        // item. Match by per-instance itemId so renaming one duplicate
+        // doesn't rename its siblings that share the same source file.
         QString filePath = item->data(0, Qt::UserRole).toString();
+        const uint64_t itemId = item->data(0, kBinItemIdRole).toULongLong();
         if (!filePath.isEmpty()) {
             auto& items = m_grid->mutableItems();
-            for (auto& gi : items) {
-                if (QString::fromStdString(gi.filePath.string()) == filePath) {
-                    gi.displayName = newName;
-                    break;
+            bool done = false;
+            if (itemId) {
+                for (auto& gi : items) {
+                    if (gi.itemId == itemId) {
+                        gi.displayName = newName;
+                        done = true;
+                        break;
+                    }
+                }
+            }
+            if (!done) {
+                for (auto& gi : items) {
+                    if (QString::fromStdString(gi.filePath.string()) == filePath) {
+                        gi.displayName = newName;
+                        break;
+                    }
                 }
             }
         }
@@ -353,6 +373,12 @@ void ProjectBin::setupUI()
             QObject::connect(act, &QAction::triggered, this, [this]() {
                 createColorMatte();
             });
+        }
+        // Paste — available whenever the bin clipboard holds anything
+        // (sequence, footage, or color matte).
+        if (hasClipboard()) {
+            menu.addSeparator();
+            menu.addAction("Paste", this, [this]() { pasteClipboard(); });
         }
         auto* selected = m_listWidget->itemAt(pos);
         if (selected) {
@@ -431,6 +457,14 @@ void ProjectBin::setupUI()
                         emit sequenceSettingsChanged();
                     }
                 });
+                menu.addAction("Copy", this, [this, seqIdx]() {
+                    if (!m_project) return;
+                    if (auto* seq = m_project->sequence(seqIdx)) {
+                        m_clipboardSequence = seq->clone();
+                        m_clipboardItems.clear();
+                        spdlog::info("ProjectBin: copied sequence '{}' to clipboard (context menu)", seq->name());
+                    }
+                });
                 menu.addAction("Duplicate Sequence", this, [this, seqIdx]() {
                     if (!m_project) return;
                     if (m_commandStack) {
@@ -505,10 +539,49 @@ void ProjectBin::setupUI()
                         syncListView();
                     });
                 } else {
+                    menu.addAction("Copy", this, [this, selected]() {
+                        m_listWidget->setCurrentItem(selected);
+                        copySelection();
+                    });
+                    menu.addAction("Duplicate", this, [this, selected]() {
+                        m_listWidget->setCurrentItem(selected);
+                        duplicateSelection();
+                    });
+                    menu.addSeparator();
+                    menu.addAction("Reveal in Explorer", this, [selected]() {
+                        const QString fp =
+                            selected->data(0, Qt::UserRole).toString();
+                        if (fp.isEmpty()) return;
+                        QFileInfo info(QFileInfo(fp).absoluteFilePath());
+                        if (info.exists()) {
+                            // explorer.exe has non-standard argument parsing;
+                            // the Qt arg-list overload quotes each token and
+                            // breaks "/select,". Pass the exact native command
+                            // line instead so the file is highlighted.
+                            const QString native = QDir::toNativeSeparators(
+                                info.canonicalFilePath());
+                            QProcess proc;
+                            proc.setProgram(QStringLiteral("explorer.exe"));
+                            proc.setNativeArguments(
+                                QStringLiteral("/select,\"") + native +
+                                QStringLiteral("\""));
+                            proc.startDetached();
+                        } else {
+                            // File gone — open its containing folder if we can.
+                            const QString dir = info.absolutePath();
+                            if (QFileInfo::exists(dir))
+                                QDesktopServices::openUrl(
+                                    QUrl::fromLocalFile(dir));
+                        }
+                    });
                     menu.addAction("Remove", this, [this, selected]() {
-                        std::filesystem::path p(selected->data(0, Qt::UserRole).toString().toStdString());
-                        removeFile(p);
-                        syncListView();
+                        // Route through the unified delete path so it is
+                        // undoable and, for color mattes, also removes the
+                        // file from disk (and restores it on undo).
+                        m_listWidget->setCurrentItem(selected);
+                        QKeyEvent ev(QEvent::KeyPress, Qt::Key_Delete,
+                                     Qt::NoModifier);
+                        eventFilter(m_listWidget, &ev);
                     });
 
                     // -- Label Color submenu -----------------------------
@@ -527,6 +600,8 @@ void ProjectBin::setupUI()
                         {"Custom...",   0x00000000},
                     };
                     QString filePath = selected->data(0, Qt::UserRole).toString();
+                    const uint64_t labelItemId =
+                        selected->data(0, kBinItemIdRole).toULongLong();
                     for (const auto& lc : kLabelColors) {
                         QAction* a = colorMenu->addAction(lc.name);
                         if (lc.rgba != 0x00000000) {
@@ -535,21 +610,32 @@ void ProjectBin::setupUI()
                             a->setIcon(QIcon(px));
                         }
                         uint32_t rgba = lc.rgba;
-                        connect(a, &QAction::triggered, this, [this, filePath, rgba]() {
+                        connect(a, &QAction::triggered, this,
+                                [this, filePath, labelItemId, rgba]() {
                             uint32_t finalColor = rgba;
                             if (rgba == 0x00000000) {
                                 QColor picked = QColorDialog::getColor(Qt::white, this, "Label Color");
                                 if (!picked.isValid()) return;
                                 finalColor = picked.rgba();
                             }
-                            // Apply to grid item
+                            // Apply to the matching grid item — by per-instance
+                            // itemId so duplicates colour independently.
                             auto& items = m_grid->mutableItems();
-                            for (size_t i = 0; i < items.size(); ++i) {
-                                if (QString::fromStdString(items[i].filePath.string()) == filePath) {
-                                    m_grid->setItemLabelColor(static_cast<int>(i), finalColor);
-                                    break;
-                                }
+                            int target = -1;
+                            if (labelItemId) {
+                                for (size_t i = 0; i < items.size(); ++i)
+                                    if (items[i].itemId == labelItemId) {
+                                        target = static_cast<int>(i); break;
+                                    }
                             }
+                            if (target < 0) {
+                                for (size_t i = 0; i < items.size(); ++i)
+                                    if (QString::fromStdString(items[i].filePath.string()) == filePath) {
+                                        target = static_cast<int>(i); break;
+                                    }
+                            }
+                            if (target >= 0)
+                                m_grid->setItemLabelColor(target, finalColor);
                             syncListView();
                         });
                     }

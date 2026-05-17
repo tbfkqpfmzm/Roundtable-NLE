@@ -14,15 +14,24 @@
 
 namespace rt {
 
-/// Interpolation mode between keyframes
+/// Interpolation mode of a keyframe, matching Premiere Pro's Temporal
+/// Interpolation menu. The mode lives on the keyframe itself; the shape of a
+/// segment kf[i] → kf[i+1] is determined by combining kf[i]'s outgoing side
+/// with kf[i+1]'s incoming side (see KeyframeTrack::evaluate). Numeric values
+/// are stable for binary serialization (0/1/2 match the original enum).
 enum class InterpMode : uint8_t
 {
-    Linear,   // Straight line between values
-    Bezier,   // Cubic bezier curve (smooth ease in/out)
-    Hold      // Step function — hold previous value until next keyframe
+    Linear           = 0,  // Straight line between values
+    Bezier           = 1,  // Manual cubic-bezier handles (in/out independent)
+    Hold             = 2,  // Step — hold this keyframe's value until next
+    AutoBezier       = 3,  // Smooth, auto-tangent from neighbors; flattens at extrema
+    ContinuousBezier = 4,  // Manual handles but locked collinear (smooth velocity)
+    EaseIn           = 5,  // Bezier ease on the incoming side (decelerate into kf)
+    EaseOut          = 6   // Bezier ease on the outgoing side (accelerate out of kf)
 };
 
-/// A single keyframe: time + value + interpolation parameters
+/// A single keyframe: time + value + temporal interpolation + spatial-path
+/// interpolation (used only on 2D position keyframes — see evaluatePosition2D).
 template <typename T>
 struct Keyframe
 {
@@ -30,11 +39,23 @@ struct Keyframe
     T          value{};            // Value at this keyframe
     InterpMode interp{InterpMode::Linear};
 
-    // Bezier tangent handles (normalized 0–1 within segment)
-    float bezierOutX{0.33f};       // Right handle X (this keyframe's out tangent)
-    float bezierOutY{0.0f};        // Right handle Y
-    float bezierInX{0.67f};        // Left handle X (next keyframe's in tangent)
-    float bezierInY{1.0f};         // Left handle Y
+    // Temporal bezier handles (normalized 0–1 within the temporal segment).
+    float bezierOutX{0.33f};       // out-tangent X (this keyframe → next)
+    float bezierOutY{0.0f};        // out-tangent Y
+    float bezierInX{0.67f};        // in-tangent X (prev keyframe → this)
+    float bezierInY{1.0f};         // in-tangent Y
+
+    // ── Spatial (motion path) — meaningful for Position keyframes ───────
+    // spatialInterp drives the SHAPE of the 2D path between Position
+    // keyframes (Premiere's "Spatial Interpolation" menu). The handles are
+    // offsets from the keyframe's (x,y) position in the same units as the
+    // position value (REF-1920 px). Default = Linear (straight-line motion),
+    // matching Premiere's out-of-the-box behavior.
+    InterpMode spatialInterp{InterpMode::Linear};
+    float      spatialOutX{0.0f};
+    float      spatialOutY{0.0f};
+    float      spatialInX{0.0f};
+    float      spatialInY{0.0f};
 
     bool operator<(const Keyframe& other) const noexcept
     {

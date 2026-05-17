@@ -4,6 +4,7 @@
  */
 
 #include "timeline/Timeline.h"
+#include "timeline/Clip.h"
 
 #include <algorithm>
 #include <spdlog/spdlog.h>
@@ -267,6 +268,56 @@ void Timeline::notifyStructureChanged()
 {
     for (auto* obs : m_observers)
         obs->onTimelineStructureChanged();
+}
+
+// ── Deep clone ──────────────────────────────────────────────────────────────
+
+std::unique_ptr<Timeline> Timeline::clone() const
+{
+    auto dup = std::make_unique<Timeline>();
+    dup->setName(m_name);
+
+    // Copy all tracks and their clips
+    for (size_t ti = 0; ti < m_tracks.size(); ++ti) {
+        const Track* srcTrack = m_tracks[ti].get();
+        Track* dstTrack = nullptr;
+        if (srcTrack->type() == TrackType::Video)
+            dstTrack = dup->addVideoTrack(srcTrack->name());
+        else
+            dstTrack = dup->addAudioTrack(srcTrack->name());
+
+        dstTrack->setLocked(srcTrack->isLocked());
+        dstTrack->setMuted(srcTrack->isMuted());
+        dstTrack->setSoloed(srcTrack->isSoloed());
+        dstTrack->setTargeted(srcTrack->isTargeted());
+        dstTrack->setCollapsed(srcTrack->isCollapsed());
+        dstTrack->setSyncLocked(srcTrack->isSyncLocked());
+        dstTrack->setHeight(srcTrack->height());
+        dstTrack->setColor(srcTrack->color());
+        dstTrack->setVolume(srcTrack->volume());
+        dstTrack->setPan(srcTrack->pan());
+
+        for (size_t ci = 0; ci < srcTrack->clipCount(); ++ci) {
+            dstTrack->addClip(srcTrack->clip(ci)->clone());
+        }
+
+        // Copy transitions
+        for (size_t tri = 0; tri < srcTrack->transitionCount(); ++tri) {
+            dstTrack->addTransition(*srcTrack->transition(tri));
+        }
+    }
+
+    // Copy markers
+    for (const auto& marker : m_markers) {
+        dup->addMarker(marker.time, marker.label, marker.color);
+    }
+
+    // Copy playback state
+    dup->setPlayheadPosition(m_playhead);
+    dup->setInPoint(m_inPoint);
+    dup->setOutPoint(m_outPoint);
+
+    return dup;
 }
 
 } // namespace rt

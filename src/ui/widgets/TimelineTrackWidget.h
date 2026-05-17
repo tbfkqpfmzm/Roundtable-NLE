@@ -57,6 +57,11 @@ public:
     /// Set hover edge highlight. edgeTick = the tick position of the hovered edge, -1 to clear.
     void setHoverEdgeTick(int64_t tick);
 
+    /// Set / clear the Premiere-style "between clips" edit-point selection.
+    /// Pass -1 to clear. The widget draws facing brackets at the cut so the
+    /// user can see they've selected the seam (not a single clip).
+    void setEditPointTick(int64_t tick);
+
     /// Set razor position tick (-1 to hide). Draws a vertical red line through the clip.
     void setRazorTick(int64_t tick);
 
@@ -125,6 +130,7 @@ private:
     int64_t                     m_snapIndicatorTick{-1};
     int64_t                     m_hoverEdgeTick{-1};
     int64_t                     m_razorTick{-1};
+    int64_t                     m_editPointTick{-1};  ///< "between clips" selection (-1 = none)
     const std::unordered_map<uint64_t, std::vector<float>>* m_waveformCache{nullptr};
     const std::unordered_map<uint64_t, QPixmap>* m_thumbnailCache{nullptr};
     const AnimationVideoCache*  m_animVideoCache{nullptr};

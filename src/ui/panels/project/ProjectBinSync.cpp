@@ -133,6 +133,8 @@ void ProjectBin::syncListView()
         treeItem->setText(0, name);
         treeItem->setData(0, Qt::UserRole, QString::fromStdString(item.filePath.string()));
         treeItem->setData(0, Qt::UserRole + 1, QVariant::fromValue(item.mediaHandle));
+        treeItem->setData(0, kBinItemIdRole,
+                          QVariant::fromValue(static_cast<qulonglong>(item.itemId)));
         // Media items are draggable but NOT drop targets
         treeItem->setFlags((treeItem->flags() & ~Qt::ItemIsDropEnabled) | Qt::ItemIsEditable);
 

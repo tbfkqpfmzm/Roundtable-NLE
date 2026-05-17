@@ -310,6 +310,12 @@ static LONG WINAPI lastChanceVectoredHandler(EXCEPTION_POINTERS* exInfo)
         return EXCEPTION_CONTINUE_SEARCH;
     if (code == EXCEPTION_BREAKPOINT || code == EXCEPTION_SINGLE_STEP)
         return EXCEPTION_CONTINUE_SEARCH;
+    // OutputDebugString raises these benign "exceptions" continuously while
+    // a debugger or DebugView is attached. They are NOT crashes — logging
+    // them floods crash_log.txt and buries real faults (e.g. heap
+    // corruption). DBG_PRINTEXCEPTION_C / DBG_PRINTEXCEPTION_WIDE_C.
+    if (code == 0x40010006 || code == 0x4001000A)
+        return EXCEPTION_CONTINUE_SEARCH;
     if (code == EXCEPTION_GUARD_PAGE)
         return EXCEPTION_CONTINUE_EXECUTION;  // OS must retry after expanding stack
     if (code == 0x406D1388)  // Thread name exception (SetThreadDescription)

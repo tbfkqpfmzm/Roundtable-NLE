@@ -68,7 +68,7 @@ public:
 
     // ── Format info ─────────────────────────────────────────────────────
     static constexpr uint8_t  MAGIC[8] = {'R','N','D','T','B','L','v','2'};
-    static constexpr uint32_t FORMAT_VERSION = 13;
+    static constexpr uint32_t FORMAT_VERSION = 15;  // v15 = spatial keyframe handles (motion path)
 
     /// Section types
     enum SectionType : uint32_t

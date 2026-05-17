@@ -14,6 +14,8 @@
 #pragma once
 
 #include <QWidget>
+#include <QColor>
+#include <QFont>
 #include <QPointF>
 #include <QRectF>
 
@@ -27,6 +29,8 @@
 namespace rt {
 
 class VulkanViewport;
+class CommandStack;
+template <typename T> class KeyframeTrack;
 
 /// Transparent overlay widget for transform gizmo + middle-mouse pan.
 class TransformOverlayWidget : public QWidget
@@ -35,7 +39,7 @@ class TransformOverlayWidget : public QWidget
 
 public:
     explicit TransformOverlayWidget(VulkanViewport* viewport, QWidget* parent = nullptr);
-    ~TransformOverlayWidget() override = default;
+    ~TransformOverlayWidget() override;
 
     /// Show / update the transform overlay.
     void setTransformOverlay(const TransformOverlayInfo& info);
@@ -51,6 +55,24 @@ public:
 
     /// Set the active editing tool (so overlay knows when Text tool is active).
     void setEditTool(uint8_t tool) noexcept;
+
+    /// Begin in-place text editing: shows an editable box over the selected
+    /// layer's bounding rect, prefilled with `initial`, styled with the
+    /// layer's actual font/color so the user sees what the rendered text
+    /// will look like (Premiere-style WYSIWYG). `fontSizeRef` is the layer's
+    /// font size in 1920×1080 reference pixels — the overlay scales it to
+    /// the on-screen content rect so the editor's text matches the rendered
+    /// text size exactly. Commit (Enter / focus out) emits
+    /// inlineTextCommitted(); Esc cancels.
+    void beginInlineTextEdit(const QString& initial,
+                             const QString& fontFamily,
+                             float fontSizeRef,
+                             int fontWeight,
+                             bool italic,
+                             const QColor& textColor);
+
+    /// True while the in-place text editor is shown.
+    [[nodiscard]] bool isInlineTextEditing() const noexcept;
 
     /// Set the offset from the overlay's top-left to the viewport's top-left.
     /// When the overlay is clipped to the panel bounds, this offset lets
@@ -81,6 +103,24 @@ public:
     /// Get current overlay info.
     [[nodiscard]] const TransformOverlayInfo& transformOverlay() const noexcept { return m_overlay; }
 
+    // ── Motion path (Premiere-style 2D Position keyframes) ────────────
+    /// Attach the selected clip's Position X/Y tracks for motion-path
+    /// drawing + spatial-interpolation editing. Pass nullptr to hide the
+    /// path. The CommandStack is used when the user changes spatial
+    /// interpolation from the right-click menu (so undo works).
+    void setMotionPathTracks(KeyframeTrack<float>* trackX,
+                             KeyframeTrack<float>* trackY,
+                             CommandStack* commandStack) noexcept;
+    void clearMotionPath() noexcept;
+
+    /// Frame dimensions (sequence resolution) — needed to map REF-1920
+    /// keyframe values to frame-space for motion-path drawing.
+    void setSequenceResolution(uint32_t w, uint32_t h) noexcept {
+        m_seqW = (w > 0 ? w : m_seqW);
+        m_seqH = (h > 0 ? h : m_seqH);
+        update();
+    }
+
 signals:
     /// Emitted when the user drags the body to change position (ref-space).
     void transformPositionChanged(float posX, float posY);
@@ -101,9 +141,22 @@ signals:
     /// Emitted during mask drag to trigger live composite refresh.
     void maskLiveUpdate();
 
+    /// Emitted during a motion-path spatial-handle drag so the workspace can
+    /// invalidate the composite cache and request a Program Monitor refresh.
+    void motionPathLiveUpdate();
+
     /// Emitted when the user clicks on empty area (no handle/body hit).
     /// Coordinates are in frame-space (0..outputWidth, 0..outputHeight).
     void emptyAreaClicked(float frameX, float frameY);
+
+    /// Emitted on a double-click in the monitor — used to enter text-edit
+    /// mode on the text layer under the cursor (Premiere Pro behavior).
+    /// Coordinates are in frame-space (0..outputWidth, 0..outputHeight).
+    void textEditRequested(float frameX, float frameY);
+
+    /// Emitted when in-place text editing is committed (Enter / focus out)
+    /// with the new text. The workspace writes it back to the text layer.
+    void inlineTextCommitted(const QString& text);
 
     /// Emitted when the eyedropper tool picks a color at frame-space coords.
     void colorPicked(float frameX, float frameY);
@@ -114,10 +167,16 @@ protected:
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
+    void mouseDoubleClickEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
+    /// Drop the application override cursor if we installed one.  Safe to
+    /// call repeatedly; keeps the override stack balanced.
+    void clearCursorOverride();
+    bool m_haveCursorOverride{false};
+
     /// Compute the frame draw-rect (where the frame appears in widget space).
     QRectF computeFrameRect() const;
 
@@ -179,7 +238,15 @@ private:
 
     TransformOverlayInfo m_overlay;
 
-    enum class DragMode : uint8_t { None, MoveBody, ScaleCorner, RotateCorner, Pan, DragMaskPoint };
+    enum class DragMode : uint8_t {
+        None,
+        MoveBody,
+        ScaleCorner,
+        RotateCorner,
+        Pan,
+        DragMaskPoint,
+        DragMotionHandle,   ///< spatial bezier handle on a Position keyframe
+    };
     DragMode m_dragMode{DragMode::None};
     int      m_dragHandle{-1};
     QPointF  m_dragStartWidget;
@@ -204,6 +271,11 @@ private:
     // Active editing tool (uses uint8_t to avoid EditTool dependency)
     uint8_t  m_editTool{0};  // 0 = Selection, 6 = Text
 
+    // In-place text editor (lazily created child widget shown over the
+    // selected text layer's bounding box). Owned via Qt parent.
+    class QLineEdit* m_inlineTextEdit{nullptr};
+    bool             m_committingInlineText{false};
+
     // Mask overlay data (non-owning pointer to clip's masks vector)
     std::vector<OpacityMask>* m_masks{nullptr};
 
@@ -221,6 +293,37 @@ private:
 
     // Offset from overlay origin to viewport origin (overlay is clipped to panel)
     QPoint m_vpOffset{0, 0};
+
+    // ── Motion path state ────────────────────────────────────────────
+    KeyframeTrack<float>* m_motionX{nullptr};
+    KeyframeTrack<float>* m_motionY{nullptr};
+    CommandStack*         m_motionCmdStack{nullptr};
+    uint32_t              m_seqW{1920};
+    uint32_t              m_seqH{1080};
+
+    /// Convert a Position keyframe value pair (REF-1920 px) to widget pixels.
+    QPointF refToWidget(float refX, float refY, const QRectF& frameRect) const;
+    /// Inverse of refToWidget — widget pixel coords back to REF-1920 px.
+    QPointF widgetToRef(const QPointF& widgetPos, const QRectF& frameRect) const;
+
+    /// Draw the motion path curve + waypoint markers (and spatial handles
+    /// for keyframes whose spatial mode is Bezier/ContinuousBezier).
+    void drawMotionPath(class QPainter& painter);
+
+    /// Hit-test motion-path waypoints. Returns the keyframe index or -1.
+    int hitTestMotionWaypoint(const QPointF& widgetPos) const;
+
+    /// Hit-test spatial bezier handles. Returns true and fills outKfIdx and
+    /// outIsIn (true = incoming handle of the keyframe) when hit.
+    bool hitTestMotionHandle(const QPointF& widgetPos, int& outKfIdx, bool& outIsIn) const;
+
+    // ── Spatial-handle drag state ────────────────────────────────────
+    int   m_dragMotionKfIdx{-1};
+    bool  m_dragMotionIsIn{false};
+    // Snapshots at drag start (used by the undo command pushed on release).
+    float m_dragOrigInX{0.0f},  m_dragOrigInY{0.0f};
+    float m_dragOrigOutX{0.0f}, m_dragOrigOutY{0.0f};
+    int64_t m_dragKfTime{0};
 };
 
 } // namespace rt

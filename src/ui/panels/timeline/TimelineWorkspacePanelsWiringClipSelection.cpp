@@ -354,6 +354,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
                 m_selectedClip->positionX().writeValue(relTick, posX);
                 m_selectedClip->positionY().writeValue(relTick, posY);
             }
+            if (m_effectControlsPanel) m_effectControlsPanel->syncValuesFromClip();
             invalidateCompositeCache();
             if (m_programMonitor) m_programMonitor->requestRefresh();
         });
@@ -395,6 +396,27 @@ void TimelineWorkspace::wireClipSelectionSignals() {
                     m_selectedClip->scaleY().setDefaultValue(scY);
                 }
             }
+            if (m_effectControlsPanel) m_effectControlsPanel->syncValuesFromClip();
+            invalidateCompositeCache();
+            if (m_programMonitor) m_programMonitor->requestRefresh();
+        });
+        connect(vp, &Viewport::transformRotationChanged,
+                this, [this](float rot) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
+            if (!m_selectedClip) return;
+            const int64_t relTick = m_playbackController
+                ? std::max<int64_t>(0, m_playbackController->currentTick() - m_selectedClip->timelineIn())
+                : 0;
+            if (m_selectedClip->clipType() == ClipType::Graphic && m_selectedGraphicLayerIdx >= 0) {
+                auto* gc = static_cast<GraphicClip*>(m_selectedClip);
+                if (m_selectedGraphicLayerIdx < static_cast<int>(gc->layerCount())) {
+                    auto* layer = gc->layer(static_cast<size_t>(m_selectedGraphicLayerIdx));
+                    layer->transform().rotation.writeValue(relTick, rot);
+                }
+            } else {
+                m_selectedClip->rotation().writeValue(relTick, rot);
+            }
+            if (m_effectControlsPanel) m_effectControlsPanel->syncValuesFromClip();
             invalidateCompositeCache();
             if (m_programMonitor) m_programMonitor->requestRefresh();
         });
@@ -582,6 +604,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
                 m_selectedClip->positionX().writeValue(relTick, posX);
                 m_selectedClip->positionY().writeValue(relTick, posY);
             }
+            if (m_effectControlsPanel) m_effectControlsPanel->syncValuesFromClip();
             invalidateCompositeCache();
             if (m_programMonitor) m_programMonitor->requestRefresh();
         });
@@ -623,6 +646,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
                     m_selectedClip->scaleY().setDefaultValue(scY);
                 }
             }
+            if (m_effectControlsPanel) m_effectControlsPanel->syncValuesFromClip();
             invalidateCompositeCache();
             if (m_programMonitor) m_programMonitor->requestRefresh();
         });
@@ -642,6 +666,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
             } else {
                 m_selectedClip->rotation().writeValue(relTick, rot);
             }
+            if (m_effectControlsPanel) m_effectControlsPanel->syncValuesFromClip();
             invalidateCompositeCache();
             if (m_programMonitor) m_programMonitor->requestRefresh();
         });
@@ -809,6 +834,14 @@ void TimelineWorkspace::wireClipSelectionSignals() {
 
         // -- Mask live update: refresh composite during drag --
         connect(ov, &TransformOverlayWidget::maskLiveUpdate,
+                this, [this]() {
+            if (m_destroying.load(std::memory_order_acquire)) return;
+            invalidateCompositeCache();
+            if (m_programMonitor) m_programMonitor->requestRefresh();
+        });
+
+        // -- Motion-path handle drag: refresh composite + monitor while dragging --
+        connect(ov, &TransformOverlayWidget::motionPathLiveUpdate,
                 this, [this]() {
             if (m_destroying.load(std::memory_order_acquire)) return;
             invalidateCompositeCache();
@@ -1052,10 +1085,24 @@ void TimelineWorkspace::wireClipSelectionSignals() {
             tl->transform().posX = KeyframeTrack<float>(frameX * (1920.0f / static_cast<float>(m_programMonitor->outputWidth())) - 960.0f);
             tl->transform().posY = KeyframeTrack<float>(frameY * (1080.0f / static_cast<float>(m_programMonitor->outputHeight())) - 540.0f);
 
-            auto* ptr = targetTrack->addClip(std::move(gc));
+            // Route through the command stack so Ctrl+Z undoes the new
+            // text layer (previously addClip() was called directly, leaving
+            // nothing on the undo stack).
+            const uint64_t newClipId = gc->id();
+            if (m_commandStack) {
+                m_commandStack->execute(
+                    std::make_unique<AddClipCommand>(targetTrack, std::move(gc)));
+            } else {
+                targetTrack->addClip(std::move(gc));
+            }
 
-            // Select the new clip
-            size_t clipIdx = targetTrack->findClipIndexById(ptr->id());
+            // Re-fetch the clip from the track — AddClipCommand owns the
+            // unique_ptr until execute(), so the raw pointer must come from
+            // the track to stay valid across undo/redo.
+            size_t clipIdx = targetTrack->findClipIndexById(newClipId);
+            if (clipIdx >= targetTrack->clipCount()) return;
+            Clip* ptr = targetTrack->clip(clipIdx);
+            if (!ptr) return;
             m_selectedClip = ptr;
             m_selectedTrackIdx = targetTrackIdx;
             m_selectedClipIdx = clipIdx;
@@ -1092,6 +1139,105 @@ void TimelineWorkspace::wireClipSelectionSignals() {
         connect(m_timelinePanel, &TimelinePanel::toolChanged,
                 this, [ov2](EditTool tool) {
             ov2->setEditTool(static_cast<uint8_t>(tool));
+        });
+
+        // Double-click a text layer in the Program Monitor → drop an
+        // editable text box right on the layer (Premiere Pro). The single
+        // click that precedes the double-click already selected the layer
+        // and bound it to the panels; the Essential Graphics panel's
+        // selectedLayer() is the authoritative source for which layer
+        // we're editing.
+        auto currentTextLayer = [this]() -> TextLayer* {
+            if (!m_GraphicsEditorPanel) return nullptr;
+            GraphicLayer* gl = m_GraphicsEditorPanel->selectedLayer();
+            if (!gl || gl->layerType() != GraphicLayerType::Text) return nullptr;
+            return static_cast<TextLayer*>(gl);
+        };
+
+        connect(ov2, &TransformOverlayWidget::textEditRequested,
+                this, [this, ov2, currentTextLayer](float, float) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
+            TextLayer* tl = currentTextLayer();
+            if (!tl) return;
+
+            // Pick the first fill colour for the editor text colour.
+            QColor textColor(Qt::white);
+            const auto& fills = tl->appearance().fills;
+            if (!fills.empty())
+                textColor = QColor::fromRgba(fills.front().color);
+
+            // Snapshot the current text and clear the layer's text so the
+            // rendered text doesn't show through behind the editor box
+            // while typing (Premiere Pro). Restored or replaced on commit.
+            m_preEditOriginalText = tl->text();
+            m_inlineTextEditActive = true;
+            tl->setText(std::string{});
+            invalidateCompositeCache();
+            if (m_programMonitor) m_programMonitor->requestRefresh();
+            scheduleOverlayRefresh();
+
+            // Pass the layer's font in REFERENCE units; the overlay scales
+            // it to its on-screen content rect so the editor's text matches
+            // the rendered text size exactly.
+            ov2->beginInlineTextEdit(
+                QString::fromStdString(m_preEditOriginalText),
+                QString::fromStdString(tl->fontFamily()),
+                tl->fontSize(),
+                tl->fontWeight(),
+                tl->isItalic(),
+                textColor);
+        });
+
+        connect(ov2, &TransformOverlayWidget::inlineTextCommitted,
+                this, [this, currentTextLayer](const QString& newText) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
+            TextLayer* tl = currentTextLayer();
+            if (!tl) {
+                m_inlineTextEditActive = false;
+                return;
+            }
+            const std::string newVal = newText.toStdString();
+            const std::string oldVal = m_preEditOriginalText;
+            const bool wasActive = m_inlineTextEditActive;
+            m_inlineTextEditActive = false;
+            m_preEditOriginalText.clear();
+
+            auto refresh = [this]() {
+                if (m_GraphicsEditorPanel) m_GraphicsEditorPanel->refresh();
+                invalidateCompositeCache();
+                if (m_programMonitor) m_programMonitor->requestRefresh();
+                scheduleOverlayRefresh();
+            };
+
+            // If nothing changed (e.g. cancel/commit unchanged), restore
+            // the original text without making an undo entry.
+            if (newVal == oldVal) {
+                if (wasActive) {
+                    tl->setText(oldVal);
+                    refresh();
+                }
+                return;
+            }
+
+            // Route through the command stack so Ctrl+Z reverts to the
+            // pre-edit text. The layer is currently "" (cleared on begin),
+            // so execute() sets it to newVal and undo restores oldVal.
+            if (m_commandStack) {
+                TextLayer* target = tl;
+                m_commandStack->execute(std::make_unique<LambdaCommand>(
+                    "Edit Text",
+                    [target, newVal, refresh]() {
+                        target->setText(newVal);
+                        refresh();
+                    },
+                    [target, oldVal, refresh]() {
+                        target->setText(oldVal);
+                        refresh();
+                    }));
+            } else {
+                tl->setText(newVal);
+                refresh();
+            }
         });
     }
 
@@ -1234,17 +1380,28 @@ void TimelineWorkspace::wireClipSelectionSignals() {
         });
     }
 
-    // Effect Controls seek (mini-timeline scrub and keyframe navigation)
+    // Effect Controls seek (mini-timeline scrub and keyframe navigation).
+    // Mirrors the main timeline-ruler scrub path so the Program Monitor
+    // actually renders the new frame instead of staying on the old one.
     if (m_effectControlsPanel && m_playbackController) {
         connect(m_effectControlsPanel, &EffectControlsPanel::seekRequested,
                 this, [this](int64_t tick) {
             if (m_destroying.load(std::memory_order_acquire)) return;
+            if (m_playbackController->isPlaying())
+                m_playbackController->pause();
             m_playbackController->seekTo(tick);
+            ensureAudioSourcesLoaded();
             if (m_audioEngine && !m_playbackController->isPlaying()) {
                 const uint32_t sr = m_audioEngine->sampleRate();
                 const int64_t frame = static_cast<int64_t>(
                     static_cast<double>(tick) / 48000.0 * sr);
                 m_audioEngine->scrub(frame);
+            }
+            // Force the Program Monitor to repaint with the frame at the new
+            // playhead — without this it stays on whatever was last rendered.
+            if (m_programMonitor) {
+                m_programMonitor->notifyScrub();
+                m_programMonitor->requestRefresh();
             }
         });
     }
@@ -1316,6 +1473,9 @@ void TimelineWorkspace::wireClipSelectionSignals() {
             m_selectedGraphicLayerIdx = layerIdx;
             scheduleOverlayRefresh();
         });
+        // (Double-clicking a layer row in Essential Graphics now focuses
+        // the in-panel text box directly — handled inside the panel — so
+        // it no longer swaps to the Properties panel.)
     }
 
     // -- Wire ColorGradingPanel property changes to refresh the monitor ----

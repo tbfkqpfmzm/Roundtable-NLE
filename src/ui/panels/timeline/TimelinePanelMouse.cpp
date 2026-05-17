@@ -17,6 +17,7 @@
 #include "command/CommandStack.h"
 #include "command/CompoundCommand.h"
 #include "command/commands/ClipCommands.h"
+#include "command/commands/TrackCommands.h"
 #include "command/commands/TransitionCmds.h"
 
 #include <QMouseEvent>
@@ -50,6 +51,10 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
             tw->setHoverEdgeTick(-1);
     }
     m_dragMode = DragMode::None;
+
+    // Wipe any prior "between clips" edit-point selection at the start of
+    // every press; specific branches below re-set it when appropriate.
+    clearEditPointSelection();
 
     if (!m_timeline || event->button() != Qt::LeftButton)
     {
@@ -134,31 +139,50 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
         }
 
         // â”€â”€ Check for transition body click (select transition) â”€â”€â”€â”€â”€â”€â”€â”€
+        // Skip when the click is within edge-trim distance of a clip head
+        // or tail on the same track: otherwise putting a cross-dissolve on
+        // a clip stole the trim handle so the user could never drag the
+        // clip's edge underneath the transition.
         {
             double px = pos.x() - headerWidth();
             size_t ti = hitTestTrack(pos.y());
             if (ti < m_timeline->trackCount()) {
                 Track* track = m_timeline->track(ti);
-                for (size_t trI = 0; trI < track->transitionCount(); ++trI) {
-                    const Transition* trans = track->transition(trI);
-                    if (!trans) continue;
-                    int64_t tStart, tEnd;
-                    trans->getRange(tStart, tEnd);
-                    double pxStart = m_layoutEngine.timeToPixelX(tStart);
-                    double pxEnd   = m_layoutEngine.timeToPixelX(tEnd);
-                    if (px >= pxStart && px <= pxEnd) {
-                        m_selection.clear();
-                        m_selectedTransitionTrack = ti;
-                        m_selectedTransitionIndex = trI;
-                        // Update track widgets
-                        for (size_t w = 0; w < m_trackWidgets.size(); ++w) {
-                            m_trackWidgets[w]->setSelectedClips({});
-                            m_trackWidgets[w]->setSelectedTransition(w == ti ? trI : SIZE_MAX);
+                constexpr double kEdgePassThrough = 6.0;
+                bool nearClipEdge = false;
+                for (size_t ci = 0; ci < track->clipCount(); ++ci) {
+                    const Clip* c = track->clip(ci);
+                    if (!c) continue;
+                    double clipL = m_layoutEngine.timeToPixelX(c->timelineIn());
+                    double clipR = m_layoutEngine.timeToPixelX(c->timelineOut());
+                    if (std::abs(px - clipL) < kEdgePassThrough ||
+                        std::abs(px - clipR) < kEdgePassThrough) {
+                        nearClipEdge = true;
+                        break;
+                    }
+                }
+                if (!nearClipEdge) {
+                    for (size_t trI = 0; trI < track->transitionCount(); ++trI) {
+                        const Transition* trans = track->transition(trI);
+                        if (!trans) continue;
+                        int64_t tStart, tEnd;
+                        trans->getRange(tStart, tEnd);
+                        double pxStart = m_layoutEngine.timeToPixelX(tStart);
+                        double pxEnd   = m_layoutEngine.timeToPixelX(tEnd);
+                        if (px >= pxStart && px <= pxEnd) {
+                            m_selection.clear();
+                            m_selectedTransitionTrack = ti;
+                            m_selectedTransitionIndex = trI;
+                            // Update track widgets
+                            for (size_t w = 0; w < m_trackWidgets.size(); ++w) {
+                                m_trackWidgets[w]->setSelectedClips({});
+                                m_trackWidgets[w]->setSelectedTransition(w == ti ? trI : SIZE_MAX);
+                            }
+                            emit selectionChanged();
+                            emit transitionSelected(ti, trI);
+                            event->accept();
+                            return;
                         }
-                        emit selectionChanged();
-                        emit transitionSelected(ti, trI);
-                        event->accept();
-                        return;
                     }
                 }
             }
@@ -172,6 +196,94 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
                 m_gapSelection.active = false;
                 for (size_t w = 0; w < m_trackWidgets.size(); ++w)
                     m_trackWidgets[w]->setGapHighlight(-1, -1);
+            }
+
+            // ── Connected-seam (edit-point) click? ──────────────────────
+            // Premiere selects the EDIT POINT (no clip highlight, just
+            // facing brackets at the cut) when you click between two
+            // butt-joined clips. Detect that FIRST, before the
+            // alreadySelected early-return would otherwise eat the click.
+            // Works from either side of the seam:
+            //   * hitTestClip → right clip,  cursor near its head, a left
+            //     neighbour ends at that head → trim the LEFT clip's tail
+            //   * hitTestClip → left clip,   cursor near its tail, a right
+            //     neighbour starts at that tail → trim the RIGHT clip's head
+            {
+                Track* hitTrack = m_timeline->track(hitRef->trackIndex);
+                size_t hitIdx   = hitTrack ? hitTrack->findClipIndexById(hitRef->clipId)
+                                           : SIZE_MAX;
+                if (hitTrack && hitIdx < hitTrack->clipCount())
+                {
+                    const Clip* hitClip = hitTrack->clip(hitIdx);
+                    const double pxLocal  = pos.x() - headerWidth();
+                    const double clipL    = m_layoutEngine.timeToPixelX(hitClip->timelineIn());
+                    const double clipR    = m_layoutEngine.timeToPixelX(hitClip->timelineOut());
+                    const double seamZone = edgeGrabPx(clipR - clipL);
+
+                    const Clip* leftNb  = nullptr;
+                    const Clip* rightNb = nullptr;
+                    int64_t     seamTick = 0;
+
+                    if (std::abs(pxLocal - clipL) < seamZone) {
+                        for (size_t ci = 0; ci < hitTrack->clipCount(); ++ci) {
+                            const Clip* n = hitTrack->clip(ci);
+                            if (n->id() != hitClip->id() &&
+                                n->timelineOut() == hitClip->timelineIn()) {
+                                leftNb   = n;
+                                seamTick = hitClip->timelineIn();
+                                break;
+                            }
+                        }
+                    }
+                    if (!leftNb && std::abs(pxLocal - clipR) < seamZone) {
+                        for (size_t ci = 0; ci < hitTrack->clipCount(); ++ci) {
+                            const Clip* n = hitTrack->clip(ci);
+                            if (n->id() != hitClip->id() &&
+                                n->timelineIn() == hitClip->timelineOut()) {
+                                rightNb  = n;
+                                seamTick = hitClip->timelineOut();
+                                break;
+                            }
+                        }
+                    }
+
+                    if (leftNb || rightNb) {
+                        // Edit-point selection: clear clip selection so
+                        // the only highlight is the facing brackets at
+                        // the cut, then prime a trim drag.
+                        m_selection.clear();
+                        emit selectionChanged();
+                        setEditPointSelection(hitRef->trackIndex, seamTick);
+
+                        const Clip* trimClip = leftNb ? leftNb : hitClip;
+                        ClipEdge    trimEdge = leftNb ? ClipEdge::Tail : ClipEdge::Head;
+                        if (rightNb) trimClip = hitClip;   // right side: trim hit clip tail-? no, head of right
+                        // From the LEFT side of the seam: trim the left
+                        // clip's TAIL. From the RIGHT side: trim the right
+                        // clip's HEAD.
+                        if (rightNb) {
+                            trimClip = rightNb;
+                            trimEdge = ClipEdge::Head;
+                        }
+
+                        m_dragClipRef          = { hitRef->trackIndex, trimClip->id() };
+                        m_dragOriginalIn       = trimClip->timelineIn();
+                        m_dragOriginalSourceIn = trimClip->sourceIn();
+                        m_dragOriginalDuration = trimClip->duration();
+                        m_dragOriginalTrack    = hitRef->trackIndex;
+                        m_dragMode = (trimEdge == ClipEdge::Tail)
+                                       ? DragMode::ClipTrimTail
+                                       : DragMode::ClipTrimHead;
+                        m_lastClickedEdge = { m_dragClipRef, trimEdge, true };
+
+                        m_snapEngine.setPixelsPerSecond(m_layoutEngine.pixelsPerSecond());
+                        std::vector<uint64_t> excludeIds{ trimClip->id() };
+                        m_snapEngine.buildTargets(*m_timeline, m_playheadTick, 0.0, excludeIds);
+
+                        event->accept();
+                        return;
+                    }
+                }
             }
 
             // Check if we're near an edge for trim
@@ -232,7 +344,12 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
                 double clipLeft = m_layoutEngine.timeToPixelX(clip->timelineIn());
                 double clipRight = m_layoutEngine.timeToPixelX(clip->timelineOut());
 
-                constexpr double kEdgeThreshold = 6.0;
+                const double kEdgeThreshold = edgeGrabPx(clipRight - clipLeft);
+
+                // (Connected-seam clicks were already intercepted by the
+                // hoisted "edit point" branch above; here clipLeft/clipRight
+                // are non-seam edges (track end, gap-facing edge) and the
+                // grab zone just triggers a plain head/tail trim.)
                 if (std::abs(px - clipLeft) < kEdgeThreshold) {
                     m_dragMode = DragMode::ClipTrimHead;
                     m_lastClickedEdge = { *hitRef, ClipEdge::Head, true };
@@ -476,9 +593,10 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
                 m_dragOriginalDuration = clip->duration();
 
                 double px = pos.x() - headerWidth();
+                double clipLeft  = m_layoutEngine.timeToPixelX(clip->timelineIn());
                 double clipRight = m_layoutEngine.timeToPixelX(clip->timelineOut());
 
-                constexpr double kEdgeThreshold = 6.0;
+                const double kEdgeThreshold = edgeGrabPx(clipRight - clipLeft);
                 if (std::abs(px - clipRight) < kEdgeThreshold)
                     m_dragMode = DragMode::ClipTrimTail;
                 else
@@ -505,42 +623,74 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
     }
     case EditTool::Text:
     {
-        // Click on empty area = create a new GraphicClip with a default TextLayer
-        size_t ti = hitTestTrack(pos.y());
-        if (ti < m_timeline->trackCount())
+        if (m_timeline && pos.x() >= headerWidth())
         {
             double px = pos.x() - headerWidth();
             int64_t tick = m_layoutEngine.pixelXToTime(px);
             if (tick < 0) tick = 0;
 
-            // Only create if no clip exists at that position
-            Track* track = m_timeline->track(ti);
-            bool occupied = false;
-            for (size_t ci = 0; ci < track->clipCount(); ++ci) {
-                const Clip* c = track->clip(ci);
-                if (tick >= c->timelineIn() && tick < c->timelineOut()) {
-                    occupied = true;
-                    break;
-                }
-            }
-
-            if (!occupied) {
-                // Create a 5-second GraphicClip with a default empty TextLayer
-                int64_t duration = kTicksPerSecond * 5;
+            // Builds a 5-second text GraphicClip at `tick`.
+            auto makeTextClip = [tick]() {
                 auto gc = std::make_unique<GraphicClip>();
                 gc->setTimelineIn(tick);
-                gc->setDuration(duration);
+                gc->setDuration(kTicksPerSecond * 5);
                 gc->setSourceIn(0);
                 gc->setLabel("Text");
                 gc->addTextLayer("Text Layer 1");
+                return gc;
+            };
 
-                if (m_commandStack) {
-                    m_commandStack->execute(
-                        std::make_unique<AddClipCommand>(track, std::move(gc)));
-                } else {
-                    track->addClip(std::move(gc));
+            size_t ti = hitTestTrack(pos.y());
+            if (ti < m_timeline->trackCount())
+            {
+                // Clicked on an existing track row — add to it if free.
+                Track* track = m_timeline->track(ti);
+                bool occupied = false;
+                for (size_t ci = 0; ci < track->clipCount(); ++ci) {
+                    const Clip* c = track->clip(ci);
+                    if (tick >= c->timelineIn() && tick < c->timelineOut()) {
+                        occupied = true;
+                        break;
+                    }
                 }
 
+                if (!occupied) {
+                    if (m_commandStack) {
+                        m_commandStack->execute(
+                            std::make_unique<AddClipCommand>(track, makeTextClip()));
+                    } else {
+                        track->addClip(makeTextClip());
+                    }
+                    refreshTrackContents();
+                    emit clipCreated();
+                }
+            }
+            else
+            {
+                // Clicked empty space (e.g. above the top track) — create a
+                // new video track and drop the text clip on it, as a single
+                // undo step (Premiere Pro behavior).
+                if (m_commandStack) {
+                    auto compound =
+                        std::make_unique<CompoundCommand>("Add Text Layer");
+
+                    auto trackCmd = std::make_unique<AddTrackCommand>(
+                        m_timeline, TrackType::Video);
+                    trackCmd->execute();
+                    Track* newTrack = trackCmd->track();
+                    compound->addExecuted(std::move(trackCmd));
+
+                    if (newTrack) {
+                        auto clipCmd = std::make_unique<AddClipCommand>(
+                            newTrack, makeTextClip());
+                        clipCmd->execute();
+                        compound->addExecuted(std::move(clipCmd));
+                    }
+                    m_commandStack->pushWithoutExecute(std::move(compound));
+                } else {
+                    Track* newTrack = m_timeline->addVideoTrack();
+                    if (newTrack) newTrack->addClip(makeTextClip());
+                }
                 refreshTrackContents();
                 emit clipCreated();
             }

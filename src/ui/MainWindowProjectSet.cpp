@@ -17,6 +17,7 @@
 #include "panels/timeline/TimelinePanel.h"
 #include "panels/monitors/ProgramMonitor.h"
 #include "panels/monitors/SourceMonitor.h"
+#include "panels/effects/EffectControlsPanel.h"
 
 #include "command/CommandStack.h"
 #include "media/AudioEngine.h"
@@ -178,25 +179,33 @@ void MainWindow::setCurrentProject(std::unique_ptr<Project> project)
                 // from the new project regardless of current view mode.
                 bin->refreshAllViews();
 
-                if (!savedFiles.empty())
-                    bin->addFiles(savedFiles);
-
-                // Always restore bin folder structure (even when 0 files)
+                // Build folder state once (shared by both restore paths).
                 const auto& projFolders = m_currentProject->binFolders();
-                if (!projFolders.empty()) {
-                    std::vector<BinFolderState> uiFolders;
-                    uiFolders.reserve(projFolders.size());
-                    for (const auto& pf : projFolders) {
-                        BinFolderState bf;
-                        bf.name      = pf.name;
-                        bf.expanded  = pf.expanded;
-                        bf.childKeys = pf.childKeys;
-                        uiFolders.push_back(std::move(bf));
-                    }
-                    bin->restoreBinFolders(uiFolders);
+                std::vector<BinFolderState> uiFolders;
+                uiFolders.reserve(projFolders.size());
+                for (const auto& pf : projFolders) {
+                    BinFolderState bf;
+                    bf.name      = pf.name;
+                    bf.expanded  = pf.expanded;
+                    bf.childKeys = pf.childKeys;
+                    uiFolders.push_back(std::move(bf));
                 }
-                spdlog::info("setCurrentProject: restored {} bin files, {} folders",
-                             savedFiles.size(), projFolders.size());
+
+                const auto& projItems = m_currentProject->binItems();
+                if (!projItems.empty()) {
+                    // v14+: rich per-instance restore (footage
+                    // reference-duplicates + folder membership survive).
+                    bin->restoreBinModel(projItems, uiFolders);
+                } else {
+                    // Legacy (pre-v14) projects: flat path list.
+                    if (!savedFiles.empty())
+                        bin->addFiles(savedFiles);
+                    if (!uiFolders.empty())
+                        bin->restoreBinFolders(uiFolders);
+                }
+                spdlog::info("setCurrentProject: restored {} items / {} files, {} folders",
+                             projItems.size(), savedFiles.size(),
+                             projFolders.size());
             }
 
             // Wire project to TimelineWorkspace for sequence tabs
@@ -218,6 +227,13 @@ void MainWindow::setCurrentProject(std::unique_ptr<Project> project)
                     m_timelineWorkspace->timelinePanel()->setFrameRate(fps);
 
                 spdlog::info("setCurrentProject: applied project framerate {:.1f} fps", fps);
+            }
+
+            // Push sequence resolution to Effect Controls so the Position
+            // display converts internal REF-1920 px ↔ sequence pixels.
+            if (auto* ec = effectControlsPanel()) {
+                const auto& res = m_currentProject->settings().resolution();
+                ec->setSequenceResolution(res.width, res.height);
             }
 
             // ── Migrate stale normalized positions from old exports ─────

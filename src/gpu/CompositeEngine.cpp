@@ -1018,7 +1018,25 @@ std::shared_ptr<CachedFrame> CompositeEngine::compositeViaRenderGraph(
                         srcA = TransitionSourceInfo{};
                         srcA.textureInfo = transitionRenderer->blackDescriptorInfo();
                     } else if (layer.wipeType == TransitionType::CrossDissolve) {
-                        srcB.textureInfo = transitionRenderer->transparentDescriptorInfo();
+                        // Single-clip dissolve. Honor direction the same way
+                        // FadeFrom*/FadeTo* do, so the boundary frame is
+                        // correct:
+                        //   incoming (fade-in at clip head, leftClipId==0):
+                        //     mix(transparent, clip, p) — p=0 → transparent,
+                        //     p=1 → clip. Without the swap, p=0 rendered
+                        //     mix(clip, transparent, 0)=clip, i.e. a 1-frame
+                        //     fully-opaque flash before the fade-in.
+                        //   outgoing (fade-out at clip tail): mix(clip,
+                        //     transparent, p) — p=0 → clip, p=1 → transparent.
+                        if (!layer.isWipeOutgoing) {
+                            srcB = srcA;
+                            srcA = TransitionSourceInfo{};
+                            srcA.textureInfo =
+                                transitionRenderer->transparentDescriptorInfo();
+                        } else {
+                            srcB.textureInfo =
+                                transitionRenderer->transparentDescriptorInfo();
+                        }
                     } else {
                         srcB.textureInfo = transitionRenderer->transparentDescriptorInfo();
                     }

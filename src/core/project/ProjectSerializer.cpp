@@ -13,6 +13,7 @@
 #include "project/AssetDatabase.h"
 #include "timeline/Timeline.h"
 #include "timeline/Track.h"
+#include "timeline/Clip.h"
 #include "timeline/Marker.h"
 #include "timeline/Transition.h"
 
@@ -236,13 +237,34 @@ std::vector<uint8_t> ProjectSerializer::serialize(const Project& project) const
         ++sectionCount;
     }
 
-    // ── Section: Bin state (media file paths + folder structure) ────────
+    // ── Section: Bin state (v14+: rich per-instance items + folders) ────
     {
         BinaryWriter sec;
-        const auto& binFiles = project.binFiles();
-        sec.writeU32(static_cast<uint32_t>(binFiles.size()));
-        for (const auto& f : binFiles)
-            sec.writePath(f);
+
+        // Rich bin items: each is an independent bin entry (footage can
+        // appear multiple times as separate "master clips"). Falls back
+        // to deriving from binFiles() for projects that never populated
+        // the rich model.
+        const auto& binItems = project.binItems();
+        if (!binItems.empty()) {
+            sec.writeU32(static_cast<uint32_t>(binItems.size()));
+            for (const auto& it : binItems) {
+                sec.writeU64(it.id);
+                sec.writePath(it.path);
+                sec.writeString(it.displayName);
+                sec.writeU32(it.labelColor);
+            }
+        } else {
+            const auto& binFiles = project.binFiles();
+            sec.writeU32(static_cast<uint32_t>(binFiles.size()));
+            uint64_t synthId = 1;
+            for (const auto& f : binFiles) {
+                sec.writeU64(synthId++);
+                sec.writePath(f);
+                sec.writeString(std::string{});      // no custom name
+                sec.writeU32(0xFF888888u);           // default label
+            }
+        }
 
         const auto& binFolders = project.binFolders();
         sec.writeU32(static_cast<uint32_t>(binFolders.size()));
@@ -600,13 +622,30 @@ std::unique_ptr<Project> ProjectSerializer::deserialize(const std::vector<uint8_
         }
 
         case Section_BinState: {
-            // Bin media file paths
             uint32_t fileCount = sr.readU32();
             std::vector<std::filesystem::path> binFiles;
             binFiles.reserve(fileCount);
-            for (uint32_t i = 0; i < fileCount; ++i)
-                binFiles.push_back(sr.readPath());
-            project->setBinFiles(std::move(binFiles));
+            if (version >= 14) {
+                // Rich per-instance bin items.
+                std::vector<Project::BinItem> items;
+                items.reserve(fileCount);
+                for (uint32_t i = 0; i < fileCount; ++i) {
+                    Project::BinItem bi;
+                    bi.id          = sr.readU64();
+                    bi.path        = sr.readPath();
+                    bi.displayName = sr.readString();
+                    bi.labelColor  = sr.readU32();
+                    binFiles.push_back(bi.path);
+                    items.push_back(std::move(bi));
+                }
+                project->setBinItems(std::move(items));
+                project->setBinFiles(std::move(binFiles));
+            } else {
+                // Legacy: flat path list (no per-item identity).
+                for (uint32_t i = 0; i < fileCount; ++i)
+                    binFiles.push_back(sr.readPath());
+                project->setBinFiles(std::move(binFiles));
+            }
 
             // Bin folder structure
             uint32_t folderCount = sr.readU32();

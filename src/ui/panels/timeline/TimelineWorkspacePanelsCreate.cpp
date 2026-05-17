@@ -8,6 +8,7 @@
 
 #include "panels/timeline/TimelineWorkspace.h"
 #include "panels/timeline/DockLayoutManager.h"
+#include "Constants.h"
 #include "CompositeService.h"
 #include "spine/AnimationVideoCache.h"
 #include "panels/timeline/ClipRenderers.h"
@@ -231,6 +232,57 @@ void TimelineWorkspace::createPanelWidgets()
             m_sourceMonitor->loadClip(handle, m_mediaPool);
     });
 
+    // Spine character animation dropped from the Library: parse the URI
+    // ("spine:CharName|outfit|stanceInt|animName"), prefer a cached video
+    // (animVideoCache → loadClip) so it plays exactly like the timeline
+    // shows it, and fall back to live spine rendering via loadSpineClip().
+    connect(m_sourceMonitor, &SourceMonitor::spineDropReceived,
+            this, [this](const QString& uri) {
+        if (m_destroying.load(std::memory_order_acquire)) return;
+        if (!m_sourceMonitor) return;
+        // Strip "spine:" prefix
+        QString payload = uri.startsWith(QStringLiteral("spine:"))
+                             ? uri.mid(6) : uri;
+        QStringList parts = payload.split('|');
+        if (parts.size() < 4) return;
+        const std::string charName  = parts[0].toStdString();
+        const std::string outfit    = parts[1].toStdString();
+        const int         stanceInt = parts[2].toInt();
+        const std::string animName  = parts[3].toStdString();
+
+#ifdef ROUNDTABLE_HAS_SPINE
+        // Try the pre-rendered animation video first — same path the
+        // double-click-on-timeline-clip handler uses, so the user sees an
+        // identical preview from either entry point.
+        if (m_compositeService && m_compositeService->animVideoCache()) {
+            uint64_t handle = m_compositeService->animVideoCache()->getMediaHandle(
+                charName, outfit, animName);
+            if (handle != 0 && m_mediaPool) {
+                m_sourceMonitor->loadClip(handle, m_mediaPool);
+                return;
+            }
+        }
+        // No cached video — build a transient SpineClip and let
+        // CompositeService render it live for preview.
+        auto sc = std::make_unique<SpineClip>(charName, outfit);
+        CharacterStance stance = CharacterStance::Default;
+        if (stanceInt == 1) stance = CharacterStance::Aim;
+        else if (stanceInt == 2) stance = CharacterStance::Cover;
+        sc->setStance(stance);
+        sc->setAnimationName(animName);
+        sc->setLooping(true);
+        sc->setLabel(charName + " - " + animName);
+        if (m_compositeService) {
+            // loadSpineClip renders ONE preview frame inline and does
+            // not retain the pointer, so a local unique_ptr is fine.
+            m_sourceMonitor->loadSpineClip(sc.get(),
+                                           m_compositeService.get());
+        }
+#else
+        (void)charName; (void)outfit; (void)stanceInt; (void)animName;
+#endif
+    });
+
     connect(m_sourceMonitor, &SourceMonitor::sequenceDropReceived,
             this, [this](size_t seqIdx) {
         if (m_destroying.load(std::memory_order_acquire)) return;
@@ -242,6 +294,10 @@ void TimelineWorkspace::createPanelWidgets()
 
         QString name = QString::fromStdString(seq->name());
         int64_t dur  = seq->duration();
+        // Empty sequence: still give the source monitor a usable timeline
+        // length so the user can scrub a black preview (Premiere does this
+        // — an empty sequence still has its nominal length).
+        if (dur <= 0) dur = kTicksPerSecond * 60;
         double  fps  = 24.0;
 
         SourceMonitor::SequenceFrameProvider provider =
@@ -252,13 +308,45 @@ void TimelineWorkspace::createPanelWidgets()
             if (!m_project || seqIdx >= m_project->sequenceCount())
                 return nullptr;
             auto* innerTimeline = m_project->sequence(seqIdx);
-            if (!innerTimeline || innerTimeline == m_timeline)
-                return nullptr;
+            if (!innerTimeline) return nullptr;
+            if (!m_compositeService) return nullptr;
 
-            Timeline* outerTimeline = m_timeline;
-            m_timeline = innerTimeline;
-            auto frame = compositeFrame(tick, w, h, scrub);
-            m_timeline = outerTimeline;
+            // Composite at the PROJECT resolution, not the (small) source
+            // monitor viewport size. Compositing into a tiny canvas made
+            // characters look low-res no matter the decode tier — the
+            // whole frame was just small. The source viewport downscales
+            // the full-res frame for display, preserving detail. Capped at
+            // 1920×1080 so the preview composite stays cheap.
+            (void)w; (void)h;
+            uint32_t outW = 1920, outH = 1080;
+            if (m_project) {
+                auto res = m_project->settings().resolution();
+                if (res.width  > 0) outW = static_cast<uint32_t>(res.width);
+                if (res.height > 0) outH = static_cast<uint32_t>(res.height);
+                if (outW > 1920) { outH = outH * 1920 / outW; outW = 1920; }
+                if (outH > 1080) { outW = outW * 1080 / outH; outH = 1080; }
+            }
+            if (outW == 0) outW = 640;
+            if (outH == 0) outH = 360;
+
+            // Bind the composite service to the inner sequence for this
+            // frame, composite, then restore. Force CPU display mode so
+            // compositeFrame does the GPU→CPU readback INLINE while the
+            // composite mutex is still held — otherwise the lazyReadback
+            // path races with the FrameProducer's next composite (which
+            // can resize/recycle the readback staging buffer and the
+            // deferred map returns false, leaving the source monitor black).
+            //
+            // KNOWN LIMITATION: shares the program monitor's CompositeService,
+            // so m_lastGoodComposite is briefly overwritten. Clean per-
+            // monitor compositing is a bigger refactor.
+            const bool wasGpuMode = m_compositeService->gpuDisplayMode();
+            m_compositeService->setGpuDisplayMode(false);
+            m_compositeService->setTimeline(innerTimeline);
+            auto frame = compositeFrame(tick, outW, outH, scrub);
+            m_compositeService->setTimeline(m_timeline);
+            m_compositeService->setGpuDisplayMode(wasGpuMode);
+            if (frame) frame->ensurePixels();  // belt + suspenders
             return frame;
         };
 

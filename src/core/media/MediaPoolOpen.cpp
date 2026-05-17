@@ -317,6 +317,60 @@ void MediaPool::closeAll()
     m_scrubDecoders.clear();
 }
 
+void MediaPool::invalidatePath(const std::filesystem::path& filePath)
+{
+    // Canonicalize identically to open() so we hit the same map key.
+    std::error_code ec;
+    auto canonical = std::filesystem::canonical(filePath, ec);
+    std::string key = ec ? filePath.string() : canonical.string();
+
+    // Flush queued prefetch work for the (about to be closed) handle.
+    MediaHandle handle = InvalidMedia;
+    {
+        std::lock_guard lock(m_mutex);
+        m_failedPaths.erase(key);  // allow a fresh open attempt
+        auto pathIt = m_pathToHandle.find(key);
+        if (pathIt == m_pathToHandle.end())
+            return;                 // not open — next open() reads fresh
+        handle = pathIt->second;
+    }
+
+    {
+        std::lock_guard pfLock(m_prefetchMutex);
+        m_prefetchQueue.erase(
+            std::remove_if(m_prefetchQueue.begin(), m_prefetchQueue.end(),
+                [handle](const PrefetchTask& t) { return t.handle == handle; }),
+            m_prefetchQueue.end());
+    }
+    m_scheduler.cancel(handle);
+
+    std::lock_guard lock(m_mutex);
+    auto it = m_entries.find(handle);
+    if (it == m_entries.end())
+        return;
+
+    spdlog::info("MediaPool: invalidating handle {} '{}' (file changed)",
+                 handle, it->second.path.filename().string());
+
+    m_pathToHandle.erase(key);
+    m_cache->evictMedia(handle);
+
+#ifdef ROUNDTABLE_HAS_FFMPEG
+    if (it->second.swsCtx)
+        sws_freeContext(static_cast<SwsContext*>(it->second.swsCtx));
+#endif
+    m_entries.erase(it);
+
+    auto scrubIt = m_scrubDecoders.find(handle);
+    if (scrubIt != m_scrubDecoders.end()) {
+#ifdef ROUNDTABLE_HAS_FFMPEG
+        if (scrubIt->second.swsCtx)
+            sws_freeContext(static_cast<SwsContext*>(scrubIt->second.swsCtx));
+#endif
+        m_scrubDecoders.erase(scrubIt);
+    }
+}
+
 // ─── Async open worker ─────────────────────────────────────────────────────
 
 bool MediaPool::isPathOpen(const std::filesystem::path& filePath) const

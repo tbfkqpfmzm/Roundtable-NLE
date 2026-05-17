@@ -21,6 +21,7 @@
 
 #include <QWidget>
 #include <QWindow>
+#include <QCursor>
 #include <QImage>
 #include <QRectF>
 #include <QWheelEvent>
@@ -114,6 +115,16 @@ public:
     /// Access the underlying QWindow (for event filter installation).
     [[nodiscard]] QWindow* nativeWindow() const noexcept { return m_nativeWindow; }
 
+    /// Apply a cursor to the embedded Vulkan surface.  Setting it only on
+    /// the wrapped QWindow is unreliable for a createWindowContainer'd
+    /// native surface, so this also sets it on the container widget and
+    /// this widget — whichever the platform actually honors wins.
+    void setViewportCursor(const QCursor& cursor);
+
+    /// Accessors used by the Win32 WM_SETCURSOR subclass procedure.
+    [[nodiscard]] void* origWndProc() const noexcept { return m_origWndProc; }
+    [[nodiscard]] void* winCursor()   const noexcept { return m_winCursor; }
+
     /// Actual native surface size (HWND client rect).  May differ from
     /// QWidget::size() due to createWindowContainer / DPI quirks.
     /// Falls back to QWidget::size() on non-Windows.
@@ -164,6 +175,18 @@ private:
     QWindow*          m_nativeWindow{nullptr};
     QWidget*          m_windowContainer{nullptr};
     VkSurfaceKHR      m_surface{VK_NULL_HANDLE};
+
+    // ── Cursor subclassing (Windows) ────────────────────────────────────
+    // Qt's QWindow::setCursor is not honored for a createWindowContainer'd
+    // raw Vulkan surface, so we intercept WM_SETCURSOR on the HWND and
+    // force the cursor via the Win32 API.  m_desiredCursor is kept alive
+    // so its HCURSOR handle stays valid.
+    QCursor           m_desiredCursor;
+    void*             m_origWndProc{nullptr};   // original WNDPROC (WNDPROC)
+    void*             m_winCursor{nullptr};     // HCURSOR shown via WM_SETCURSOR
+    bool              m_winCursorOwned{false};  // true ⇒ DestroyIcon on replace
+    void              installCursorSubclass();
+    void              removeCursorSubclass();
 
     // ── Swapchain ───────────────────────────────────────────────────────
     std::unique_ptr<Swapchain> m_swapchain;

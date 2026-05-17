@@ -19,6 +19,7 @@
 
 #include <QPainter>
 #include <QVBoxLayout>
+#include <QCursor>
 
 #include <spdlog/spdlog.h>
 
@@ -29,6 +30,7 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <unordered_map>
 #include <vector>
 
 #ifdef _WIN32
@@ -118,6 +120,7 @@ VulkanViewport::VulkanViewport(QWidget* parent)
 
 VulkanViewport::~VulkanViewport()
 {
+    removeCursorSubclass();  // restore original WNDPROC before teardown
     shutdownGpu();
 }
 
@@ -932,6 +935,157 @@ void VulkanViewport::paintEvent(QPaintEvent* event)
     painter.drawImage(drawRect, m_cpuImage);
 
     --s_paintDepth;
+}
+
+#ifdef _WIN32
+namespace {
+// HWND → owning VulkanViewport, so the subclass WndProc can find the
+// desired cursor.  Only ever touched on the UI thread.
+std::unordered_map<HWND, VulkanViewport*> g_cursorSubclassMap;
+
+// Build a Win32 HCURSOR for a QCursor.
+//   - Custom (pixmap) cursors  → CreateIconIndirect from the bitmap
+//                                (owned = caller must DestroyIcon).
+//   - Standard shape cursors   → shared system cursor via LoadCursorW
+//                                (owned = false, never destroy).
+HCURSOR buildHCursor(const QCursor& c, bool& owned)
+{
+    owned = false;
+    const QPixmap pm = c.pixmap();
+    if (!pm.isNull()) {
+        QImage img = pm.toImage().convertToFormat(QImage::Format_ARGB32);
+        const int w = img.width();
+        const int h = img.height();
+
+        BITMAPV5HEADER bi{};
+        bi.bV5Size        = sizeof(BITMAPV5HEADER);
+        bi.bV5Width       = w;
+        bi.bV5Height      = -h;          // top-down
+        bi.bV5Planes      = 1;
+        bi.bV5BitCount    = 32;
+        bi.bV5Compression = BI_BITFIELDS;
+        bi.bV5RedMask     = 0x00FF0000;
+        bi.bV5GreenMask   = 0x0000FF00;
+        bi.bV5BlueMask    = 0x000000FF;
+        bi.bV5AlphaMask   = 0xFF000000;
+
+        HDC hdc = GetDC(nullptr);
+        void* bits = nullptr;
+        HBITMAP color = CreateDIBSection(hdc, reinterpret_cast<BITMAPINFO*>(&bi),
+                                         DIB_RGB_COLORS, &bits, nullptr, 0);
+        ReleaseDC(nullptr, hdc);
+        if (color && bits) {
+            // QImage ARGB32 little-endian byte order is B,G,R,A — matches
+            // the 32bpp BGRA DIB above, so a straight copy is correct.
+            for (int y = 0; y < h; ++y)
+                std::memcpy(static_cast<uint8_t*>(bits) + y * w * 4,
+                            img.scanLine(y), static_cast<size_t>(w) * 4);
+
+            HBITMAP mask = CreateBitmap(w, h, 1, 1, nullptr);
+            ICONINFO ii{};
+            ii.fIcon    = FALSE;          // FALSE ⇒ cursor (uses hotspot)
+            ii.xHotspot = static_cast<DWORD>(c.hotSpot().x());
+            ii.yHotspot = static_cast<DWORD>(c.hotSpot().y());
+            ii.hbmMask  = mask;
+            ii.hbmColor = color;
+            HCURSOR hc = reinterpret_cast<HCURSOR>(CreateIconIndirect(&ii));
+            if (mask)  DeleteObject(mask);
+            if (color) DeleteObject(color);
+            if (hc) { owned = true; return hc; }
+        }
+        if (color) DeleteObject(color);
+        // fall through to a shape fallback if bitmap path failed
+    }
+
+    const wchar_t* id = IDC_ARROW;
+    switch (c.shape()) {
+        case Qt::SizeFDiagCursor: id = IDC_SIZENWSE; break;
+        case Qt::SizeBDiagCursor: id = IDC_SIZENESW; break;
+        case Qt::SizeHorCursor:   id = IDC_SIZEWE;   break;
+        case Qt::SizeVerCursor:   id = IDC_SIZENS;   break;
+        case Qt::SizeAllCursor:   id = IDC_SIZEALL;  break;
+        case Qt::OpenHandCursor:
+        case Qt::ClosedHandCursor:
+        case Qt::PointingHandCursor: id = IDC_HAND;  break;
+        case Qt::CrossCursor:     id = IDC_CROSS;    break;
+        default:                  id = IDC_ARROW;    break;
+    }
+    return LoadCursorW(nullptr, id);   // shared — owned stays false
+}
+
+LRESULT CALLBACK cursorSubclassProc(HWND hwnd, UINT msg,
+                                    WPARAM wParam, LPARAM lParam)
+{
+    auto it = g_cursorSubclassMap.find(hwnd);
+    VulkanViewport* self = (it != g_cursorSubclassMap.end()) ? it->second : nullptr;
+    WNDPROC orig = self ? reinterpret_cast<WNDPROC>(self->origWndProc()) : nullptr;
+
+    if (self && msg == WM_SETCURSOR && LOWORD(lParam) == HTCLIENT) {
+        if (auto hc = reinterpret_cast<HCURSOR>(self->winCursor())) {
+            ::SetCursor(hc);
+            return TRUE;   // handled — stop Windows resetting to arrow
+        }
+    }
+    if (orig)
+        return CallWindowProcW(orig, hwnd, msg, wParam, lParam);
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+} // namespace
+
+void VulkanViewport::installCursorSubclass()
+{
+    if (!m_nativeWindow || m_origWndProc) return;
+    HWND hwnd = reinterpret_cast<HWND>(m_nativeWindow->winId());
+    if (!hwnd) return;
+    g_cursorSubclassMap[hwnd] = this;
+    m_origWndProc = reinterpret_cast<void*>(SetWindowLongPtrW(
+        hwnd, GWLP_WNDPROC,
+        reinterpret_cast<LONG_PTR>(&cursorSubclassProc)));
+}
+
+void VulkanViewport::removeCursorSubclass()
+{
+    if (!m_nativeWindow || !m_origWndProc) return;
+    HWND hwnd = reinterpret_cast<HWND>(m_nativeWindow->winId());
+    if (hwnd) {
+        SetWindowLongPtrW(hwnd, GWLP_WNDPROC,
+                          reinterpret_cast<LONG_PTR>(
+                              reinterpret_cast<WNDPROC>(m_origWndProc)));
+        g_cursorSubclassMap.erase(hwnd);
+    }
+    m_origWndProc = nullptr;
+    if (m_winCursor && m_winCursorOwned)
+        DestroyIcon(reinterpret_cast<HICON>(m_winCursor));
+    m_winCursor = nullptr;
+    m_winCursorOwned = false;
+}
+#else
+void VulkanViewport::installCursorSubclass() {}
+void VulkanViewport::removeCursorSubclass() {}
+#endif
+
+void VulkanViewport::setViewportCursor(const QCursor& cursor)
+{
+    m_desiredCursor = cursor;
+
+    // Qt-level set (covers non-Windows + keeps the widget tree consistent).
+    if (m_nativeWindow)    m_nativeWindow->setCursor(cursor);
+    if (m_windowContainer) m_windowContainer->setCursor(cursor);
+    setCursor(cursor);
+
+#ifdef _WIN32
+    // Build the native HCURSOR the WM_SETCURSOR subclass will force onto
+    // the surface.  Replace (and free, if we own it) the previous one.
+    if (m_winCursor && m_winCursorOwned)
+        DestroyIcon(reinterpret_cast<HICON>(m_winCursor));
+    bool owned = false;
+    m_winCursor = reinterpret_cast<void*>(buildHCursor(cursor, owned));
+    m_winCursorOwned = owned;
+
+    // Apply immediately so it changes without waiting for the next move.
+    if (m_winCursor)
+        ::SetCursor(reinterpret_cast<HCURSOR>(m_winCursor));
+#endif
 }
 
 QSize VulkanViewport::nativeSurfaceSize() const

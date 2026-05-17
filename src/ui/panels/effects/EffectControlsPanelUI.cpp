@@ -23,6 +23,9 @@
 #include <QKeyEvent>
 #include <QScrollBar>
 #include <QSplitter>
+#include <QApplication>
+#include <QMenu>
+#include <QAction>
 #include <algorithm>
 #include <cmath>
 #include <unordered_map>
@@ -174,6 +177,22 @@ void PropertyRow::buildUI()
     connect(m_nextKfBtn, &QToolButton::clicked, this, [this]() {
         emit goToNextKeyframe(m_track);
     });
+
+    // Per-attribute reset (↺) — Premiere Pro-style: restores this property
+    // to its factory default and clears its keyframes (undoable). Sits just
+    // left of the keyframe-nav arrows so every row exposes it consistently.
+    m_resetBtn = new QToolButton(this);
+    m_resetBtn->setText(QStringLiteral("↺")); // ↺
+    m_resetBtn->setFixedSize(16, 22);
+    m_resetBtn->setToolTip(tr("Reset %1 to default").arg(m_name));
+    m_resetBtn->setStyleSheet(QStringLiteral(
+        "QToolButton { background: transparent; color: %1; border: none; font-size: 12px; padding: 0; }"
+        "QToolButton:hover { color: %2; }")
+        .arg(Theme::hex(tc.textSecondary), Theme::hex(tc.warning)));
+    connect(m_resetBtn, &QToolButton::clicked, this, [this]() {
+        emit resetRequested();
+    });
+    layout->addWidget(m_resetBtn);
 
     layout->addWidget(m_prevKfBtn);
     layout->addWidget(m_addKfBtn);
@@ -457,20 +476,41 @@ void KeyframeTimeline::drawKeyframeDiamonds(QPainter& p)
         if (y < kRulerHeight || y > height()) continue;
 
         for (size_t i = 0; i < track->keyframeCount(); ++i) {
-            int64_t t = track->keyframe(i).time;
+            const auto& kf = track->keyframe(i);
+            int64_t t = kf.time;
             int x = tickToX(t);
-
-            // Diamond shape
             constexpr int d = kDiamondRadius;
-            QPolygonF diamond;
-            diamond << QPointF(x, y - d)
-                    << QPointF(x + d, y)
-                    << QPointF(x, y + d)
-                    << QPointF(x - d, y);
 
             bool selected = m_selectedKeys.count({const_cast<KeyframeTrack<float>*>(track), t}) > 0;
             p.setBrush(selected ? tc.textPrimary : tc.accent);
-            p.drawPolygon(diamond);
+
+            // Premiere-style per-mode keyframe icon:
+            //   Linear            → diamond
+            //   Hold              → square (step)
+            //   Bezier / Auto /   → circle
+            //   Continuous / Ease
+            switch (kf.interp) {
+            case InterpMode::Linear: {
+                QPolygonF diamond;
+                diamond << QPointF(x, y - d) << QPointF(x + d, y)
+                        << QPointF(x, y + d) << QPointF(x - d, y);
+                p.drawPolygon(diamond);
+                break;
+            }
+            case InterpMode::Hold: {
+                p.drawRect(QRectF(x - d + 0.5, y - d + 0.5, 2.0 * d - 1.0, 2.0 * d - 1.0));
+                break;
+            }
+            case InterpMode::Bezier:
+            case InterpMode::AutoBezier:
+            case InterpMode::ContinuousBezier:
+            case InterpMode::EaseIn:
+            case InterpMode::EaseOut:
+            default: {
+                p.drawEllipse(QPointF(x, y), static_cast<double>(d), static_cast<double>(d));
+                break;
+            }
+            }
         }
     }
 
@@ -512,6 +552,75 @@ void KeyframeTimeline::drawPlayhead(QPainter& p)
 
 void KeyframeTimeline::mousePressEvent(QMouseEvent* event)
 {
+    if (event->button() == Qt::RightButton) {
+        // Premiere-style right-click menu on a keyframe diamond.
+        auto hit = hitTestKeyframe(event->pos());
+        if (!hit.track) return;
+        const int64_t kfTime = hit.track->keyframe(hit.index).time;
+
+        // Selection: right-click on an un-selected diamond replaces selection
+        // with just that one; right-click on a selected one keeps multi-select
+        // so the action applies to the whole group (matches Premiere).
+        SelKey clickedKey{hit.track, kfTime};
+        if (m_selectedKeys.count(clickedKey) == 0) {
+            m_selectedKeys.clear();
+            m_selectedKeys.insert(clickedKey);
+            update();
+        }
+
+        // Snapshot the current selection now — the menu's nested event loop
+        // can fire focus events that drop m_selectedKeys before the chosen
+        // action runs, so the lambdas need their own copy to act on.
+        const auto keysSnap = m_selectedKeys;
+
+        QMenu menu(this);
+        QMenu* interpSub = menu.addMenu(QStringLiteral("Temporal Interpolation"));
+        auto addInterpAction = [&](const QString& label, InterpMode mode) {
+            QAction* a = interpSub->addAction(label);
+            connect(a, &QAction::triggered, this, [this, mode, keysSnap]() {
+                for (const auto& sk : keysSnap) {
+                    if (!sk.track) continue;
+                    if (m_commandStack)
+                        m_commandStack->execute(
+                            std::make_unique<SetKeyframeInterpCommand>(sk.track, sk.time, mode));
+                    else {
+                        for (size_t i = 0; i < sk.track->keyframeCount(); ++i)
+                            if (sk.track->keyframe(i).time == sk.time)
+                                sk.track->keyframe(i).interp = mode;
+                    }
+                }
+                emit keyframeChanged();
+                update();
+            });
+        };
+        addInterpAction(QStringLiteral("Linear"),            InterpMode::Linear);
+        addInterpAction(QStringLiteral("Bezier"),            InterpMode::Bezier);
+        addInterpAction(QStringLiteral("Auto Bezier"),       InterpMode::AutoBezier);
+        addInterpAction(QStringLiteral("Continuous Bezier"), InterpMode::ContinuousBezier);
+        addInterpAction(QStringLiteral("Hold"),              InterpMode::Hold);
+        interpSub->addSeparator();
+        addInterpAction(QStringLiteral("Ease In"),           InterpMode::EaseIn);
+        addInterpAction(QStringLiteral("Ease Out"),          InterpMode::EaseOut);
+
+        menu.addSeparator();
+        QAction* del = menu.addAction(QStringLiteral("Delete"));
+        connect(del, &QAction::triggered, this, [this, keysSnap]() {
+            for (const auto& sk : keysSnap) {
+                if (!sk.track) continue;
+                if (m_commandStack)
+                    m_commandStack->execute(
+                        std::make_unique<RemoveKeyframeCommand>(sk.track, sk.time));
+                else
+                    sk.track->removeKeyframeAtTime(sk.time);
+            }
+            m_selectedKeys.clear();
+            emit keyframeChanged();
+            update();
+        });
+
+        menu.exec(event->globalPosition().toPoint());
+        return;
+    }
     if (event->button() == Qt::LeftButton) {
         // Ruler / clip-bar area → scrub
         if (event->pos().y() < kRulerHeight + kClipBarHeight) {
@@ -709,7 +818,32 @@ void KeyframeTimeline::mouseReleaseEvent(QMouseEvent* /*event*/)
     m_scrubbing = false;
     m_draggingSelection = false;
     m_dragEntries.clear();
+    const bool wasMarquee = m_marqueeActive;
     m_marqueeActive = false;
+    if (wasMarquee) {
+        // Repaint to erase the marquee rubber-band; otherwise it stays on
+        // screen until something else triggers a repaint.
+        update();
+    }
+}
+
+void KeyframeTimeline::focusOutEvent(QFocusEvent* event)
+{
+    // Premiere-style: clicking anywhere else in the Effect Controls panel
+    // (a spinbox, a section header, the property tree background, etc.)
+    // moves keyboard focus away from the mini-timeline, which is when we
+    // drop any keyframe selection. Skip clearing on popup activations (the
+    // right-click context menu) and on window deactivation so a returning
+    // user isn't surprised by losing selection when they re-focus the app.
+    const bool popupActive = (QApplication::activePopupWidget() != nullptr);
+    if (event->reason() != Qt::PopupFocusReason &&
+        event->reason() != Qt::ActiveWindowFocusReason &&
+        !popupActive &&
+        !m_selectedKeys.empty()) {
+        m_selectedKeys.clear();
+        update();
+    }
+    QWidget::focusOutEvent(event);
 }
 
 void KeyframeTimeline::keyPressEvent(QKeyEvent* event)

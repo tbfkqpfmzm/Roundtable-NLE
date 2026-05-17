@@ -96,6 +96,11 @@ public:
     /// Get the currently bound clip.
     [[nodiscard]] Clip* clip() const noexcept { return m_clip; }
 
+    /// Focus and select the graphic "Text:" field so the user can
+    /// immediately type to change a text layer's content (used by the
+    /// double-click-to-edit-text flow). No-op if the field is hidden.
+    void focusGraphicTextField();
+
     /// Get the track containing the clip (for command creation).
     [[nodiscard]] Track* track() const noexcept { return m_track; }
 

@@ -293,16 +293,6 @@ void TimelineRuler::mouseReleaseEvent(QMouseEvent* event)
     }
 }
 
-void TimelineRuler::mouseDoubleClickEvent(QMouseEvent* event)
-{
-    if (!m_engine) return;
-    if (event->button() == Qt::LeftButton)
-    {
-        int64_t tick = m_engine->pixelXToTime(static_cast<double>(event->pos().x()));
-        emit markerRequested(tick);
-    }
-}
-
 void TimelineRuler::scrubToPosition(int x)
 {
     if (!m_engine) return;

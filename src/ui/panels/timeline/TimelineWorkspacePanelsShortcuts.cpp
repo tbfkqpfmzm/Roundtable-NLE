@@ -97,6 +97,12 @@ void TimelineWorkspace::registerKeyboardShortcuts()
     // Ctrl+V: paste at playhead (or paste layer if Essential Graphics focused)
     addShortcut(Qt::CTRL | Qt::Key_V, [this]() {
         auto* fw = QApplication::focusWidget();
+        // Project Bin focused → paste the clipboard as an independent
+        // duplicate (sequence, footage, or color matte).
+        if (m_projectBin && m_projectBin->isAncestorOf(fw)) {
+            m_projectBin->pasteClipboard();
+            return;
+        }
         bool egFocused = m_GraphicsEditorPanel && m_GraphicsEditorPanel->isAncestorOf(fw);
         bool pmFocused = m_programMonitor && m_programMonitor->isAncestorOf(fw);
         if (m_GraphicsEditorPanel && (egFocused || (pmFocused && m_selectedGraphicLayerIdx >= 0))) {
@@ -140,6 +146,12 @@ void TimelineWorkspace::registerKeyboardShortcuts()
     // Ctrl+C: copy (or copy layer if Essential Graphics focused)
     addShortcut(Qt::CTRL | Qt::Key_C, [this]() {
         auto* fw = QApplication::focusWidget();
+        // Project Bin focused → copy the current selection (sequence,
+        // footage, or color matte) to the bin clipboard.
+        if (m_projectBin && m_projectBin->isAncestorOf(fw)) {
+            m_projectBin->copySelection();
+            return;
+        }
         bool egFocused = m_GraphicsEditorPanel && m_GraphicsEditorPanel->isAncestorOf(fw);
         bool pmFocused = m_programMonitor && m_programMonitor->isAncestorOf(fw);
         if (m_GraphicsEditorPanel && (egFocused || (pmFocused && m_selectedGraphicLayerIdx >= 0))) {

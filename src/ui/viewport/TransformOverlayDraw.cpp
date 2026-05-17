@@ -5,6 +5,9 @@
 #include "viewport/TransformOverlayWidget.h"
 #include "viewport/VulkanViewport.h"
 #include "timeline/OpacityMask.h"
+#include "timeline/KeyframeTrack.h"
+#include "timeline/Keyframe.h"
+#include "timeline/Position2D.h"
 #include "Theme.h"
 
 #include <QPainter>
@@ -45,6 +48,110 @@ void TransformOverlayWidget::paintEvent(QPaintEvent* /*event*/)
     // Draw transform overlay (bounding box + handles)
     if (m_overlay.visible)
         drawTransformOverlay(painter);
+
+    // Draw the motion path (Premiere-style curve through Position keyframes)
+    // — visible whenever a selected clip has 2+ Position keyframes.
+    if (m_motionX && m_motionY)
+        drawMotionPath(painter);
+}
+
+void TransformOverlayWidget::drawMotionPath(QPainter& painter)
+{
+    if (!m_motionX || !m_motionY) return;
+    const size_t n = m_motionX->keyframeCount();
+    if (n < 2 || m_motionY->keyframeCount() != n) return;
+
+    QRectF fr = computeFrameRect();
+    if (fr.isEmpty()) return;
+
+    const auto& tc = Theme::colors();
+
+    // ── The path itself (sampled cubic-Bezier per segment) ───────────
+    // We use evaluatePosition2D directly because the spatial-interpolation
+    // rules (Linear / Auto / Continuous / Manual) live there and we want
+    // the drawn path to be exactly what the compositor will render.
+    QPainterPath path;
+    bool started = false;
+    for (size_t i = 0; i + 1 < n; ++i) {
+        const auto& kx0 = m_motionX->keyframe(i);
+        const auto& ky0 = m_motionY->keyframe(i);
+        const auto& kx1 = m_motionX->keyframe(i + 1);
+        const auto& ky1 = m_motionY->keyframe(i + 1);
+        if (kx0.time != ky0.time || kx1.time != ky1.time) continue;
+
+        if (!started) {
+            path.moveTo(refToWidget(kx0.value, ky0.value, fr));
+            started = true;
+        }
+
+        // Sample 24 points along the segment via the joint evaluator so the
+        // drawn path always matches what the renderer produces.
+        constexpr int kSamples = 24;
+        const int64_t dt = kx1.time - kx0.time;
+        for (int s = 1; s <= kSamples; ++s) {
+            const int64_t t = kx0.time + (dt * s) / kSamples;
+            auto p = evaluatePosition2D(*m_motionX, *m_motionY, t);
+            path.lineTo(refToWidget(p.first, p.second, fr));
+        }
+    }
+
+    QColor pathColor = tc.warning; pathColor.setAlpha(220);
+    painter.setPen(QPen(pathColor, 1.5));
+    painter.setBrush(Qt::NoBrush);
+    painter.drawPath(path);
+
+    // ── Waypoint markers (small filled squares at each Position keyframe) ─
+    constexpr double kMarker = 4.0;
+    QColor mkBorder = tc.textBright; mkBorder.setAlpha(220);
+    QColor mkFill   = tc.warning;    mkFill.setAlpha(220);
+    painter.setPen(QPen(mkBorder, 1));
+    painter.setBrush(mkFill);
+    for (size_t i = 0; i < n; ++i) {
+        const auto& kx = m_motionX->keyframe(i);
+        const auto& ky = m_motionY->keyframe(i);
+        if (kx.time != ky.time) continue;
+        QPointF pt = refToWidget(kx.value, ky.value, fr);
+        painter.drawRect(QRectF(pt.x() - kMarker, pt.y() - kMarker,
+                                kMarker * 2.0, kMarker * 2.0));
+    }
+
+    // ── Spatial Bezier handles for Bezier / ContinuousBezier waypoints ───
+    constexpr double kHandleR = 4.5;
+    QColor hStem  = tc.textBright; hStem.setAlpha(180);
+    QColor hFill  = tc.accent;     hFill.setAlpha(220);
+    QColor hBord  = tc.textBright; hBord.setAlpha(230);
+    for (size_t i = 0; i < n; ++i) {
+        const auto& kx = m_motionX->keyframe(i);
+        const auto& ky = m_motionY->keyframe(i);
+        if (kx.time != ky.time) continue;
+        const bool hasManual =
+            kx.spatialInterp == InterpMode::Bezier ||
+            kx.spatialInterp == InterpMode::ContinuousBezier;
+        if (!hasManual) continue;
+
+        QPointF wpPx = refToWidget(kx.value, ky.value, fr);
+
+        // Out handle (only meaningful when a segment leaves this keyframe).
+        if (i + 1 < n) {
+            QPointF outPx = refToWidget(kx.value + kx.spatialOutX,
+                                        ky.value + ky.spatialOutY, fr);
+            painter.setPen(QPen(hStem, 1));
+            painter.drawLine(wpPx, outPx);
+            painter.setBrush(hFill);
+            painter.setPen(QPen(hBord, 1));
+            painter.drawEllipse(outPx, kHandleR, kHandleR);
+        }
+        // In handle (only meaningful when a segment arrives at this keyframe).
+        if (i > 0) {
+            QPointF inPx = refToWidget(kx.value + kx.spatialInX,
+                                       ky.value + ky.spatialInY, fr);
+            painter.setPen(QPen(hStem, 1));
+            painter.drawLine(wpPx, inPx);
+            painter.setBrush(hFill);
+            painter.setPen(QPen(hBord, 1));
+            painter.drawEllipse(inPx, kHandleR, kHandleR);
+        }
+    }
 }
 
 void TransformOverlayWidget::drawTransformOverlay(QPainter& painter)

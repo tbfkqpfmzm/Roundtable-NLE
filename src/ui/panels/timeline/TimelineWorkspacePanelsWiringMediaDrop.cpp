@@ -276,7 +276,12 @@ void TimelineWorkspace::wireMediaDropSignals()
             int64_t dur = secondsToTicks(5.0);
             double sourceFps = 0.0;
             bool mediaHasAudio = false;
-            if (m_mediaPool) {
+            uint32_t srcW = 0, srcH = 0;
+            // Spine animation drops use a virtual "spine:" URI scheme.
+            // Never feed that to MediaPool::open — it tries to decode it as
+            // a video file, fails, logs an error, and caches the URI as a
+            // failed media handle.  SpineClip uses its own pipeline.
+            if (m_mediaPool && !isSpineAnimDrop) {
                 auto handle = m_mediaPool->open(path);
                 if (handle != InvalidMedia) {
                     const auto* info = m_mediaPool->getInfo(handle);
@@ -286,6 +291,8 @@ void TimelineWorkspace::wireMediaDropSignals()
                                      path, info->duration, info->frameCount, info->fps,
                                      info->hasAudio, info->videoStreamIndex, info->audioStreamIndex);
                         sourceFps = info->fps;
+                        srcW = info->width;
+                        srcH = info->height;
                     }
                     // Keep the 5-second default for character animation clips so
                     // the animation loops for a full 5 seconds (Premiere Pro behavior).
@@ -391,6 +398,7 @@ void TimelineWorkspace::wireMediaDropSignals()
                     "Add Media to Timeline",
                     /* execute / redo */
                     [this, isAudio, isSpineAnimDrop, mediaHasAudio, path, label, atTick, dur, sourceFps,
+                     srcW, srcH,
                      needsNewTrack, needsNewAudioTrack, forceGhostVideoTrack, forceGhostAudioTrack,
                      clipId, createdTk, tkIdx, overlapCmd,
                      audioClipId, audioCreatedTk, audioTkIdx, audioOverlapCmd,
@@ -450,6 +458,10 @@ void TimelineWorkspace::wireMediaDropSignals()
                             // Still images have no real source duration — treat as unbounded.
                             vc->setSourceDuration(isStillImagePath(path) ? 0 : dur);
                             vc->setSourceFps(sourceFps);
+                            // Record native source resolution so Effect Controls
+                            // can show Premiere-style native-pixel Scale %.
+                            if (srcW > 0 && srcH > 0)
+                                vc->setSourceResolution(srcW, srcH);
                             vc->setLabel(label);
                             if (!vcCharName.empty()) {
                                 vc->setCharacterName(vcCharName);
@@ -605,6 +617,8 @@ void TimelineWorkspace::wireMediaDropSignals()
                     // Still images have no real source duration — treat as unbounded.
                     vc->setSourceDuration(isStillImagePath(path) ? 0 : dur);
                     vc->setSourceFps(sourceFps);
+                    if (srcW > 0 && srcH > 0)
+                        vc->setSourceResolution(srcW, srcH);
                     vc->setLabel(label);
                     if (!vcCharName.empty()) {
                         vc->setCharacterName(vcCharName);

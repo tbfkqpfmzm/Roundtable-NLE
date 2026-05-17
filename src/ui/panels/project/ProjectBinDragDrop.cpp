@@ -174,7 +174,21 @@ bool ProjectBin::handleDropEvent(QEvent* ev)
                 m_dropHighlightItem->data(0, Qt::UserRole + 2).toBool()) {
                 targetBin = m_dropHighlightItem;
             }
+
+            // Snapshot before/after so a Windows Explorer drop is undoable
+            // with Ctrl+Z, exactly like the internal "Move Bin Items" path.
+            // addFilesToBin() is synchronous (it populates m_grid and the
+            // tree inline), so the "after" snapshot is complete here.
+            auto before = std::make_shared<BinSnapshot>(captureBinSnapshot());
             addFilesToBin(paths, targetBin);
+            if (m_commandStack) {
+                auto after = std::make_shared<BinSnapshot>(captureBinSnapshot());
+                m_commandStack->pushWithoutExecute(std::make_unique<LambdaCommand>(
+                    "Import Media",
+                    [this, after]()  { if (m_destroying.load(std::memory_order_acquire)) return; applyBinSnapshot(*after); },
+                    [this, before]() { if (m_destroying.load(std::memory_order_acquire)) return; applyBinSnapshot(*before); }));
+            }
+
             de->acceptProposedAction();
             m_dropHighlightItem = nullptr;
             m_listWidget->viewport()->update();

@@ -45,6 +45,7 @@ void computeOverlayCorners(
         float clipRadians = overlay.clipRotation * 3.14159265358979f / 180.0f;
         float clipCosR = std::cos(clipRadians);
         float clipSinR = std::sin(clipRadians);
+        // Clip-level position is in REF-1920 px; scale into canvas space.
         float clipPxX = overlay.clipPosX * (canvasW / REF_W);
         float clipPxY = overlay.clipPosY * (canvasH / REF_H);
 
@@ -83,7 +84,7 @@ void computeOverlayCorners(
         return;
     }
 
-    // Scale positions from reference to output
+    // Scale positions from reference (1920×1080) to output.
     float posXPx = overlay.posX * (outW / REF_W);
     float posYPx = overlay.posY * (outH / REF_H);
 
@@ -137,13 +138,29 @@ void computeOverlayCorners(
 
 int hitTestHandle(const QPointF& widgetPos, const QPointF corners[4])
 {
-    constexpr double HANDLE_RADIUS = 8.0;
+    // Generous corner grab zone so the scale cursor is easy to hit.
+    // The rotation zone starts exactly where this ends (see hitTestRotate
+    // INNER_RADIUS) so the two never overlap.
+    constexpr double HANDLE_RADIUS = 18.0;
+
+    // Centroid — for small items the 4 handle circles overlap the body's
+    // centre; require the cursor to be radially beyond the corner so the
+    // centre/body never matches a handle (otherwise body-drag has a dead
+    // zone in the middle).
+    const QPointF center(
+        (corners[0].x() + corners[1].x() + corners[2].x() + corners[3].x()) * 0.25,
+        (corners[0].y() + corners[1].y() + corners[2].y() + corners[3].y()) * 0.25);
 
     for (int i = 0; i < 4; ++i) {
         double dx = widgetPos.x() - corners[i].x();
         double dy = widgetPos.y() - corners[i].y();
-        if (dx * dx + dy * dy <= HANDLE_RADIUS * HANDLE_RADIUS)
-            return i;
+        if (dx * dx + dy * dy > HANDLE_RADIUS * HANDLE_RADIUS) continue;
+        const double pcDx = widgetPos.x() - center.x();
+        const double pcDy = widgetPos.y() - center.y();
+        const double kcDx = corners[i].x() - center.x();
+        const double kcDy = corners[i].y() - center.y();
+        if ((pcDx * pcDx + pcDy * pcDy) < (kcDx * kcDx + kcDy * kcDy)) continue;
+        return i;
     }
     return -1;
 }

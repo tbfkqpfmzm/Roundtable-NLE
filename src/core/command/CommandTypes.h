@@ -30,6 +30,7 @@ enum class CommandTypeId : int
     AddKeyframe       = 300,
     RemoveKeyframe    = 301,
     MoveKeyframe      = 302,
+    SetKeyframeInterp = 303,
     AddTransition     = 400,
     RemoveTransition  = 401,
 };

@@ -44,7 +44,18 @@ std::unique_ptr<Clip> Track::removeClip(size_t index)
 {
     if (index >= m_clips.size()) return nullptr;
     auto clip = std::move(m_clips[index]);
+    const uint64_t removedId = clip->id();
     m_clips.erase(m_clips.begin() + static_cast<ptrdiff_t>(index));
+
+    // Drop any transitions that referenced the removed clip — otherwise
+    // the dissolve keeps rendering at the (now stale) edit-point tick,
+    // showing the old fade through empty space after a cut+delete.
+    for (size_t i = m_transitions.size(); i-- > 0; ) {
+        const auto& t = m_transitions[i];
+        if (t.leftClipId == removedId || t.rightClipId == removedId) {
+            m_transitions.erase(m_transitions.begin() + static_cast<ptrdiff_t>(i));
+        }
+    }
     return clip;
 }
 

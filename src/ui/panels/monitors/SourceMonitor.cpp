@@ -34,6 +34,7 @@
 #include <QDrag>
 #include <QMimeData>
 #include <QMouseEvent>
+#include <QSettings>
 #include <QPainter>
 #include <QPointer>
 #include <QResizeEvent>
@@ -120,9 +121,15 @@ void SourceMonitor::loadClip(uint64_t mediaHandle, MediaPool* pool)
         updateTimecodeDisplay();
     }
 
-    // Leave source audio fully lazy. Only audio-only clips need waveform data
-    // on open because the waveform view is immediately visible.
+    // Eagerly kick off async audio decode for video clips that have an
+    // audio stream, so audio is ready when the user presses play. The
+    // previous fully-lazy approach meant the FIRST play silently exited
+    // (audio not loaded yet) and the user had to press play TWICE to hear
+    // anything — and on the first press startSourceAudio bailed without
+    // actually playing.
     m_audioSamples.reset();
+    if (m_audioEngine && !m_audioOnly && info && info->audioStreamIndex >= 0)
+        requestSourceAudioLoadAsync();
     m_audioChannels = 0;
     m_audioLoadFailed = false;
     m_audioLoadInFlight = false;
@@ -161,6 +168,15 @@ void SourceMonitor::loadSequence(size_t sequenceIndex, const QString& name,
     m_controller->seekTo(0);
     m_viewStack->setCurrentIndex(0); // video viewport
     updateFrameDisplay();
+
+    // The first compositeFrame for the inner sequence usually returns an
+    // empty frame because no clips are decoded yet. Kick the poll timer
+    // with a long settle so prefetch can land and a real frame arrives
+    // without the user having to scrub first. (Same mechanism the scrub
+    // path uses; longer counter here = ~1.6s of retries at 16ms.)
+    m_scrubSettleCounter = 100;
+    if (!m_pollTimer->isActive())
+        m_pollTimer->start();
 }
 
 #ifdef ROUNDTABLE_HAS_SPINE
@@ -219,7 +235,12 @@ void SourceMonitor::clearClip()
     if (m_hasClip && m_controller)
         m_controller->stop();
 
-    m_pool         = nullptr;
+    // NOTE: do NOT null m_pool here. It is a long-lived, non-owning pointer
+    // to the app-wide MediaPool injected via setMediaPool() at startup (the
+    // same lifetime model as ProgramMonitor, which never clears it). Nulling
+    // it on clearClip() silently broke path-based drops: dragging an asset
+    // from the Library (items carry handle 0 → loadFromPath()) did nothing,
+    // while bin drags survived only via the dropReceived() handle fallback.
     m_mediaHandle  = 0;
     m_hasClip      = false;
     m_audioOnly    = false;
@@ -439,10 +460,23 @@ void SourceMonitor::updateFrameDisplay()
         frameNum = std::clamp(frameNum, int64_t(0), std::max(int64_t(0), m_frameCount - 1));
 
         const bool playing = m_controller->isPlaying();
-        // When scrubbing/paused, decode at Half tier — the source-monitor
-        // viewport is usually <= ~720px wide, so Full-tier 1080p+ decode
-        // is wasted work that turns each precise seek into a 100-300 ms
-        // stall.  Playback path (tryGetFrame) already uses Half.
+        // Honor the user's playback-resolution setting (the dropdown in the
+        // program monitor, persisted in QSettings) instead of always
+        // forcing Half tier. Without this, character/source preview was
+        // stuck at Half even when the user picked Full, which made
+        // characters look blurry in the source monitor.
+        ResolutionTier tier = ResolutionTier::Half;
+        {
+            int idx = QSettings().value(
+                QStringLiteral("playback/resolutionIndex"), 1).toInt();
+            switch (idx) {
+                case 0: tier = ResolutionTier::Full;    break;
+                case 1: tier = ResolutionTier::Half;    break;
+                case 2: tier = ResolutionTier::Quarter; break;
+                case 3: tier = ResolutionTier::Quarter; break;  // 1/8 falls back to 1/4 (no Eighth tier)
+                default: tier = ResolutionTier::Half;   break;
+            }
+        }
         std::shared_ptr<CachedFrame> frame;
         if (m_mediaSources) {
             auto result = m_mediaSources->requestFrame({
@@ -450,13 +484,13 @@ void SourceMonitor::updateFrameDisplay()
                 RenderRequestType::SourceMonitor,
                 RenderQuality::Auto,
                 playing ? RenderExactness::BestEffortAllowed : RenderExactness::ExactRequired,
-                ResolutionTier::Half
+                tier
             });
             frame = result.frame;
         } else if (m_pool) {
             frame = playing
-                ? m_pool->tryGetFrame(m_mediaHandle, frameNum, ResolutionTier::Half)
-                : m_pool->getFrame(m_mediaHandle, frameNum, ResolutionTier::Half, /*scrubMode=*/true);
+                ? m_pool->tryGetFrame(m_mediaHandle, frameNum, tier)
+                : m_pool->getFrame(m_mediaHandle, frameNum, tier, /*scrubMode=*/true);
         }
         if (frame) {
             frame->ensurePixels();
@@ -662,38 +696,109 @@ bool SourceMonitor::eventFilter(QObject* watched, QEvent* event)
     return QWidget::eventFilter(watched, event);
 }
 
+// Accept any drag that carries either our custom MIME, a tree-widget
+// source, or a file URL. The URL clause is what makes NikkeBKG (whose
+// BackgroundGridWidget is a QListWidget and only sets URLs +
+// application/x-roundtable-asset) actually deliver a drop event; before
+// this, dragEnterEvent silently rejected it and the user saw nothing.
+// Also covers spine character drags (spine:URI), which the dropEvent
+// dispatches to the spine-load path below.
+static bool sourceMonitorAcceptsDrag(QDropEvent* e)
+{
+    const auto* md = e->mimeData();
+    return md->hasFormat("application/x-roundtable-media") ||
+           md->hasFormat("application/x-roundtable-sequence") ||
+           md->hasFormat("application/x-roundtable-asset")   ||
+           md->hasUrls()                                      ||
+           qobject_cast<QTreeWidget*>(e->source());
+}
+
 void SourceMonitor::dragEnterEvent(QDragEnterEvent* event)
 {
-    if (event->mimeData()->hasFormat("application/x-roundtable-media") ||
-        event->mimeData()->hasFormat("application/x-roundtable-sequence") ||
-        qobject_cast<QTreeWidget*>(event->source()))
+    if (sourceMonitorAcceptsDrag(event))
         event->acceptProposedAction();
 }
 
 void SourceMonitor::dragMoveEvent(QDragMoveEvent* event)
 {
-    if (event->mimeData()->hasFormat("application/x-roundtable-media") ||
-        event->mimeData()->hasFormat("application/x-roundtable-sequence") ||
-        qobject_cast<QTreeWidget*>(event->source()))
+    if (sourceMonitorAcceptsDrag(event))
         event->acceptProposedAction();
 }
 
 void SourceMonitor::dropEvent(QDropEvent* event)
 {
+    // Opens a file path in the pool and loads it (Color Mattes are
+    // generated PNGs that may not yet have a pool handle, so a drag only
+    // carries their file URL). Returns true on success.
+    auto loadFromPath = [this](const QString& path) -> bool {
+        if (path.isEmpty() || !m_pool) return false;
+        // Drop sources sometimes carry a relative path (NikkeBKG stored
+        // "assets/NikkeBKG/foo.png"). Both MediaSourceService and
+        // MediaPool canonicalise inputs and silently fail when the
+        // resolved file doesn't exist relative to the process CWD. Make
+        // the path absolute up-front so the drop works regardless of
+        // where the app was launched from.
+        std::filesystem::path p(path.toStdWString());
+        if (p.is_relative()) {
+            std::error_code ec;
+            auto abs = std::filesystem::absolute(p, ec);
+            if (!ec) p = std::move(abs);
+        }
+        // Prefer MediaSourceService — its handle is what updateFrameDisplay's
+        // primary requestFrame() path keys off. A handle opened only via the
+        // raw MediaPool isn't recognised by m_mediaSources, so the first
+        // frame request after drop comes back empty and the viewport stays
+        // blank until the user presses play (the bug the user described
+        // for Characters / NikkeBKG / "sometimes Backgrounds").
+        uint64_t h = 0;
+        if (m_mediaSources) {
+            auto res = m_mediaSources->openSource({p, RenderRequestType::Still, false});
+            h = res.handle;
+        }
+        if (h == 0)
+            h = m_pool->open(p);
+        if (h == 0) return false;
+        loadClip(h, m_pool);
+        // Stills can miss the cache on the very first synchronous request.
+        // A deferred second paint guarantees the frame lands once decoded.
+        QTimer::singleShot(0, this, [this]() {
+            if (!m_destroying.load(std::memory_order_acquire))
+                updateFrameDisplay();
+        });
+        return true;
+    };
+    auto firstLocalFile = [](const QDropEvent* e) -> QString {
+        for (const QUrl& u : e->mimeData()->urls())
+            if (u.isLocalFile()) return u.toLocalFile();
+        return {};
+    };
+
     // Try custom mime type first (from ThumbnailGrid / BinTreeWidget)
     if (event->mimeData()->hasFormat("application/x-roundtable-media")) {
         bool ok = false;
         uint64_t handle = event->mimeData()->data("application/x-roundtable-media")
                               .toULongLong(&ok);
-        if (!ok || handle == 0) return;
 
-        if (m_pool)
-            loadClip(handle, m_pool);
-        else
-            emit dropReceived(handle);
+        if (ok && handle != 0) {
+            if (m_pool)
+                loadClip(handle, m_pool);
+            else
+                emit dropReceived(handle);
+            event->acceptProposedAction();
+            return;
+        }
 
-        event->acceptProposedAction();
-        return;
+        // No valid pool handle (Library item / Color Matte). Try the file
+        // URL the drag carries. If that doesn't load (e.g. the multi-select
+        // drag packed a comma handle list and no usable URL, or a
+        // Videos/Audio item whose URL round-trip differs), DON'T dead-end —
+        // fall through to the QTreeWidget-source and bare-URL fallbacks
+        // below, which read the dragged item's path directly.
+        if (loadFromPath(firstLocalFile(event))) {
+            event->acceptProposedAction();
+            return;
+        }
+        // fall through (no return)
     }
 
     // Sequence via custom MIME (drag from another source)
@@ -725,7 +830,22 @@ void SourceMonitor::dropEvent(QDropEvent* event)
         }
 
         uint64_t handle = item->data(0, Qt::UserRole + 1).toULongLong();
-        if (handle == 0) return;
+        if (handle == 0) {
+            const QString role = item->data(0, Qt::UserRole).toString();
+            // Spine character animation drag (CharactersPanel). The payload
+            // isn't a real file path — route to TimelineWorkspace which
+            // owns the CompositeService needed for live spine rendering.
+            if (role.startsWith(QStringLiteral("spine:"))) {
+                emit spineDropReceived(role);
+                event->acceptProposedAction();
+                return;
+            }
+            // Color Matte / generated asset with no pool handle yet —
+            // open it from its stored path.
+            if (loadFromPath(role))
+                event->acceptProposedAction();
+            return;
+        }
 
         if (m_pool)
             loadClip(handle, m_pool);
@@ -733,7 +853,12 @@ void SourceMonitor::dropEvent(QDropEvent* event)
             emit dropReceived(handle);
 
         event->acceptProposedAction();
+        return;
     }
+
+    // Last resort: a plain file-URL drop (Color Matte PNG, external file).
+    if (event->mimeData()->hasUrls() && loadFromPath(firstLocalFile(event)))
+        event->acceptProposedAction();
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

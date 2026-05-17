@@ -9,6 +9,7 @@
 #include "timeline/SequenceClip.h"
 #include "timeline/SpineClip.h"
 #include "timeline/Timeline.h"
+#include "timeline/Position2D.h"
 #include "timeline/TitleClip.h"
 #include "timeline/Track.h"
 #include "timeline/Transition.h"
@@ -154,8 +155,11 @@ void populateSource(RenderNode& node, const Clip& clip)
     node.stackOrder = stackOrder;
     node.blendMode = clip.blendMode();
     node.opacity = clip.opacity().evaluate(localTick);
-    node.positionX = clip.positionX().evaluate(localTick);
-    node.positionY = clip.positionY().evaluate(localTick);
+    {
+        auto p2 = evaluatePosition2D(clip.positionX(), clip.positionY(), localTick);
+        node.positionX = p2.first;
+        node.positionY = p2.second;
+    }
     node.scaleX = clip.scaleX().evaluate(localTick);
     node.scaleY = clip.scaleY().evaluate(localTick);
     node.rotation = clip.rotation().evaluate(localTick);

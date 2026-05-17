@@ -90,12 +90,15 @@ void TimelineTrackWidget::setMediaDragPreview(int64_t tick, int64_t duration, bo
     m_dragPreviewTick = tick;
     m_dragPreviewDuration = duration;
     m_dragPreviewIsAudio = isAudio;
+    spdlog::debug("GHOST-CLIP: setMediaDragPreview track={} tick={} dur={} audio={} engine={}",
+                  m_trackIndex, tick, duration, isAudio, (m_engine ? "yes" : "NULL"));
     update();
 }
 
 void TimelineTrackWidget::clearMediaDragPreview()
 {
     if (m_dragPreviewTick < 0) return;
+    spdlog::debug("GHOST-CLIP: clearMediaDragPreview track={}", m_trackIndex);
     m_dragPreviewTick = -1;
     m_dragPreviewDuration = 0;
     m_dragPreviewIsAudio = false;
@@ -136,6 +139,13 @@ void TimelineTrackWidget::setSnapIndicatorTick(int64_t tick)
 void TimelineTrackWidget::setHoverEdgeTick(int64_t tick)
 {
     m_hoverEdgeTick = tick;
+    update();
+}
+
+void TimelineTrackWidget::setEditPointTick(int64_t tick)
+{
+    if (m_editPointTick == tick) return;
+    m_editPointTick = tick;
     update();
 }
 
@@ -345,6 +355,20 @@ void TimelineTrackWidget::paintEvent(QPaintEvent* event)
             0.0f, static_cast<float>(height()));
         QRectF ghostRect(lr.x, lr.y, lr.width, lr.height);
 
+        // Rate-limited diagnostic (every 300ms)
+        {
+            static thread_local auto s_lastGhostLog = std::chrono::steady_clock::now();
+            auto now = std::chrono::steady_clock::now();
+            if (now - s_lastGhostLog > std::chrono::milliseconds(300)) {
+                s_lastGhostLog = now;
+                spdlog::debug("GHOST-CLIP: paint track={} tick={} dur={} ghostRect=({:.0f},{:.0f},{:.0f},{:.0f}) "
+                              "widgetW={} visible={}",
+                              m_trackIndex, m_dragPreviewTick, m_dragPreviewDuration,
+                              ghostRect.x(), ghostRect.y(), ghostRect.width(), ghostRect.height(),
+                              width(), (ghostRect.right() >= 0 && ghostRect.left() <= width()));
+            }
+        }
+
         if (ghostRect.right() >= 0 && ghostRect.left() <= width()) {
             painter.save();
             painter.setOpacity(0.45);
@@ -472,6 +496,43 @@ void TimelineTrackWidget::paintEvent(QPaintEvent* event)
             painter.setPen(QPen(edgeCol, 2.5));
             painter.drawLine(QPointF(edgeX, 0),
                              QPointF(edgeX, height()));
+        }
+    }
+
+    // ── "Between clips" edit-point selection (Premiere-style facing
+    //    brackets at a connected cut) ─────────────────────────────────────
+    if (m_editPointTick >= 0)
+    {
+        double cutX = m_engine->timeToPixelX(m_editPointTick);
+        if (cutX >= -16 && cutX <= width() + 16)
+        {
+            const double topY = 2.0;
+            const double botY = height() - 2.0;
+            const double armW = 6.0;          // horizontal arm of each bracket
+            const double pen  = 2.0;
+
+            QColor col = tc.clipSelected;
+            col.setAlpha(240);
+            painter.setPen(QPen(col, pen));
+            painter.setBrush(Qt::NoBrush);
+
+            // Left bracket (belongs to the LEFT clip's tail) — opens →
+            painter.drawLine(QPointF(cutX - armW, topY),
+                             QPointF(cutX,        topY));
+            painter.drawLine(QPointF(cutX,        topY),
+                             QPointF(cutX,        botY));
+            painter.drawLine(QPointF(cutX - armW, botY),
+                             QPointF(cutX,        botY));
+            // Right bracket (belongs to the RIGHT clip's head) — opens ←
+            painter.drawLine(QPointF(cutX,        topY),
+                             QPointF(cutX + armW, topY));
+            painter.drawLine(QPointF(cutX,        botY),
+                             QPointF(cutX + armW, botY));
+
+            // Thin highlight line right at the seam for clarity
+            QColor seam = col; seam.setAlpha(140);
+            painter.setPen(QPen(seam, 1.0));
+            painter.drawLine(QPointF(cutX, topY), QPointF(cutX, botY));
         }
     }
 

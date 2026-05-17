@@ -140,6 +140,17 @@ void GraphicsEditorPanel::setupUI()
  Theme::hex(tc.textPrimary), Theme::hex(tc.controlBgHover)));
  connect(m_layerList, &QListWidget::currentRowChanged,
  this, &GraphicsEditorPanel::selectLayer);
+ // Double-click a layer row → jump straight into editing its text
+ // right here in Essential Graphics (Premiere Pro). currentRow already
+ // changed on the first click, so the layer is selected and the text
+ // box is populated; just focus + select it.
+ connect(m_layerList, &QListWidget::itemDoubleClicked,
+ this, [this](QListWidgetItem*) {
+ if (m_textContentEdit && m_textContentEdit->isVisible()) {
+ m_textContentEdit->setFocus(Qt::OtherFocusReason);
+ m_textContentEdit->selectAll();
+ }
+ });
  m_layerList->setContextMenuPolicy(Qt::CustomContextMenu);
  connect(m_layerList, &QWidget::customContextMenuRequested,
  this, [this](const QPoint& pos) {

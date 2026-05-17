@@ -33,7 +33,15 @@ void AddTrackCommand::execute()
         else
             m_trackPtr = m_timeline->addAudioTrack(m_name);
 
+        // Record the ACTUAL index of the new track. addVideoTrack() inserts
+        // video tracks BEFORE the first audio track, so the new track is
+        // NOT necessarily at trackCount()-1. Using the wrong index made
+        // undo() take a different (e.g. audio) track, shifting every track
+        // and corrupting layer order.
         m_index = m_timeline->trackCount() - 1;
+        for (size_t i = 0; i < m_timeline->trackCount(); ++i) {
+            if (m_timeline->track(i) == m_trackPtr) { m_index = i; break; }
+        }
     }
 }
 

@@ -73,6 +73,10 @@ signals:
  /// Emitted when the user selects a different layer in the layer list.
  void layerSelected(GraphicLayer* layer, int layerIndex);
 
+ /// Emitted when the user double-clicks a layer row — request to jump
+ /// into editing that layer's text (Premiere Pro behavior).
+ void textEditRequested();
+
 private:
  void setupUI();
  void rebuildLayerList();
@@ -112,6 +116,7 @@ private:
 
  // Ã¢â€â‚¬Ã¢â€â‚¬ Text section Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
  QWidget* m_textSection{nullptr};
+ QPlainTextEdit* m_textContentEdit{nullptr};  // editable text-string box
  QComboBox* m_fontCombo{nullptr};
  QComboBox* m_weightCombo{nullptr};
  QToolButton* m_boldBtn{nullptr};

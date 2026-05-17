@@ -544,8 +544,28 @@ private:
     std::optional<ClipRef> hitTestClip(const QPointF& pos) const;
     size_t hitTestTrack(double y) const;
     ClipEdge hitTestClipEdge(const QPointF& pos, const ClipRef& ref) const;
+
+    /// Premiere-style adaptive trim-handle grab width, in pixels.
+    /// Bigger than the old fixed 6px so edges are easy to grab, but
+    /// clamped to a fraction of the clip's on-screen width so the two
+    /// edge zones never swallow a short/zoomed-out clip's move region.
+    /// @param clipPixelWidth  on-screen width of the clip in pixels.
+    [[nodiscard]] static double edgeGrabPx(double clipPixelWidth) noexcept
+    {
+        constexpr double kBase = 11.0;   // comfortable default handle
+        constexpr double kMin  = 4.0;    // floor for very thin clips
+        const double cap = clipPixelWidth * 0.35;  // keep a central move zone
+        double v = kBase < cap ? kBase : cap;
+        return v < kMin ? kMin : v;
+    }
     void updateCursorForTool();
     void wireShortcuts();
+
+    /// Premiere-style "between clips" edit-point selection. Setting on a
+    /// specific track paints facing brackets at the seam; clearing wipes
+    /// the visual from every track. Cheap: just updates per-track ticks.
+    void setEditPointSelection(size_t trackIndex, int64_t tick);
+    void clearEditPointSelection();
 
     /// Update snap indicator line across all track widgets and ruler.
     void setSnapIndicator(int64_t tick);

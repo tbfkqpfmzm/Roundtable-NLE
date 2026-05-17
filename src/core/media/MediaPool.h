@@ -187,6 +187,15 @@ public:
     /// Close all media. Clears the frame cache.
     void closeAll();
 
+    /// Force a single media file to be re-read from disk: closes its
+    /// decoder, evicts its cached frames, cancels pending prefetch, and
+    /// drops the path→handle mapping regardless of refcount. The next
+    /// open()/getFrame() for this path re-decodes the (now-changed)
+    /// file. Any existing handle for this path becomes invalid, so
+    /// callers that cached one must re-resolve by path. Used when a
+    /// generated asset (e.g. a Color Matte) is edited in place.
+    void invalidatePath(const std::filesystem::path& filePath);
+
     // ── Frame access ────────────────────────────────────────────────────
 
     /// Get a decoded frame from cache, or decode on demand.

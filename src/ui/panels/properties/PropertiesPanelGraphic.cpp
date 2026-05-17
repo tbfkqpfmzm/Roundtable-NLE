@@ -26,6 +26,8 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QColorDialog>
+#include <QPointer>
+#include <QTimer>
 
 #include <cmath>
 
@@ -37,6 +39,21 @@ static TextLayer* firstTextLayer(GraphicClip* gc)
         if (gc->layer(i)->layerType() == GraphicLayerType::Text)
             return static_cast<TextLayer*>(gc->layer(i));
     return nullptr;
+}
+
+void PropertiesPanel::focusGraphicTextField()
+{
+    if (!m_gfxTextEdit) return;
+    if (!m_clip || m_clip->clipType() != ClipType::Graphic) return;
+    // Defer to the next event-loop tick: the caller typically just made
+    // the Properties dock visible, and setFocus() is ignored on a widget
+    // that is not yet shown. By then the dock is realized.
+    QPointer<QLineEdit> edit(m_gfxTextEdit);
+    QTimer::singleShot(0, edit, [edit]() {
+        if (!edit) return;
+        edit->setFocus(Qt::OtherFocusReason);
+        edit->selectAll();
+    });
 }
 
 void PropertiesPanel::applyGfxText()

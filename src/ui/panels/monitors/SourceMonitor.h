@@ -190,6 +190,13 @@ signals:
     /// Emitted when a sequence is dropped and should be loaded for preview.
     void sequenceDropReceived(size_t sequenceIndex);
 
+    /// Emitted when a spine character animation is dropped from the
+    /// CharactersPanel. The URI is the raw tree-item payload, e.g.
+    /// "spine:CharName|outfit|stanceInt|animName". TimelineWorkspace
+    /// parses it, builds a temp SpineClip, and routes to loadSpineClip()
+    /// (the source monitor itself doesn't own a CompositeService).
+    void spineDropReceived(const QString& spineUri);
+
     /// Emitted when source audio playback starts (for mutual exclusion with timeline).
     void playbackStarted();
 

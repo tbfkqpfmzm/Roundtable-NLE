@@ -23,6 +23,7 @@
 #include "timeline/Transition.h"
 #include "timeline/VideoClip.h"
 #include "timeline/OpacityMask.h"
+#include "timeline/Position2D.h"
 
 #include "project/Project.h"
 
@@ -106,15 +107,15 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
             bool fromNestedSequence = false;
 
             // Evaluate common transform properties.
-            // Clip positions are stored as pixel offsets from center at the
-            // REFERENCE resolution (1920ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â1080).  Scale them proportionally
-            // to the actual output resolution so compositing looks correct
-            // at any viewport size.
+            // REFERENCE resolution (1920ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â1080).
+            // Scale them proportionally to the actual output resolution so
+            // compositing looks correct at any viewport size.  (Effect
+            // Controls converts the stored value to/from sequence pixels
+            // for display only — see EffectControlsPanelTree.)
             constexpr float REF_W = 1920.0f;
             constexpr float REF_H = 1080.0f;
             const float scaleToOutX = static_cast<float>(outW) / REF_W;
             const float scaleToOutY = static_cast<float>(outH) / REF_H;
-
             const int64_t localTick = tick - clip->timelineIn();
 
             // Guard: if the clip's internal state is invalid (e.g. timeline
@@ -128,8 +129,11 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
             float sx = 1.0f, sy = 1.0f, rot = 0.0f;
             try {
                 opac = clip->opacity().evaluate(localTick);
-                px   = clip->positionX().evaluate(localTick) * scaleToOutX;
-                py   = clip->positionY().evaluate(localTick) * scaleToOutY;
+                {
+                    auto p2 = evaluatePosition2D(clip->positionX(), clip->positionY(), localTick);
+                    px = p2.first  * scaleToOutX;
+                    py = p2.second * scaleToOutY;
+                }
                 sx   = clip->scaleX().evaluate(localTick);
                 sy   = clip->scaleY().evaluate(localTick);
                 rot  = clip->rotation().evaluate(localTick);
@@ -204,9 +208,13 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
                     // The GPU Dissolve shader does mix(A, B, p) directly,
                     // producing full coverage.
                     //
-                    // For single-clip dissolves (peer == 0) the GPU path
-                    // uses a transparent placeholder, producing a proper
-                    // alpha fade that reveals lower tracks cleanly.
+                    // For single-clip dissolves (peer == 0) the GPU mix
+                    // path is WRONG: mix(transparentBlack, clip, p) yields a
+                    // PREMULTIPLIED result (p*rgb, p*a) that the compositor
+                    // reads as straight alpha, so the clip emerges "from
+                    // black". Premiere's single-clip Cross Dissolve is just
+                    // a straight-alpha opacity fade — so modulate opacity
+                    // directly and skip the transition pass entirely.
                     if (trans->leftClipId == clipId && trans->rightClipId != 0) {
                         // Two-clip: this is the outgoing side (drives merge).
                         activeWipeType = TransitionType::CrossDissolve;
@@ -222,25 +230,17 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
                         activeWipePeer = trans->leftClipId;
                         activeWipeOutgoing = false;
                     } else if (trans->leftClipId == clipId) {
-                        // Single-clip outgoing fade (no right peer).
-                        activeWipeType = TransitionType::CrossDissolve;
-                        activeWipeProgress = prog;
-                        activeWipeSoftness = trans->param1;
-                        activeWipePeer = 0;
-                        activeWipeOutgoing = true;
+                        // Single-clip outgoing dissolve (no right peer):
+                        // straight-alpha opacity fade-out. RGB stays intact
+                        // so it reveals lower tracks (or black if none)
+                        // cleanly, never fading "through black".
+                        opac *= (1.0f - prog);
                     } else if (trans->rightClipId == clipId) {
-                        // Single-clip incoming fade (no left peer).  Mark as
-                        // "outgoing" so the GPU transition scan picks it up;
-                        // the placeholder-swap logic handles direction.
-                        activeWipeType = TransitionType::CrossDissolve;
-                        activeWipeProgress = prog;
-                        activeWipeSoftness = trans->param1;
-                        activeWipePeer = 0;
-                        activeWipeOutgoing = false; // direction flag for swap
-                        // Force scan to process this layer (no peer to merge).
-                        // The scan filters by isWipeOutgoing, so we need a
-                        // way to include incoming singletons.  See note in
-                        // the scan below for how this is handled.
+                        // Single-clip incoming dissolve (no left peer):
+                        // straight-alpha opacity fade-in (transparent →
+                        // opaque), exactly like Premiere's Cross Dissolve
+                        // at a clip head.
+                        opac *= prog;
                     }
                 } else {
                     // GPU-spatial transition: don't modulate opacity ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â store info for GPU path.
@@ -399,9 +399,14 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
 
                 // Character overlays always Half (they composite tiny),
                 // UNLESS forceFullResolution is set (ExportPanel preview/export).
-                // Other video follows the playback-resolution dropdown.
-                const auto charVideoTier = isVideoChar
-                    ? (m_forceFullResolution.load() ? ResolutionTier::Full : ResolutionTier::Half)
+                // Both characters and other video follow the playback-
+                // resolution dropdown so Full really means Full, etc.
+                // (Previously characters were pinned to Half regardless of
+                // the dropdown setting — the user picked Full and the
+                // character preview stayed blurry. forceFullResolution
+                // from ExportPanel still wins for the export/preview path.)
+                const auto charVideoTier = m_forceFullResolution.load()
+                    ? ResolutionTier::Full
                     : playbackTier();
 
                 // Clamp frame number to valid range.
@@ -624,12 +629,13 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
                                 }
                             }
 
-                            // Spine character overlays always use Half tier:
-                            // they're composited at 1920Ãƒâ€”1080 and never need
-                            // full resolution, even when paused. This avoids
-                            // massive initial-render decode (7 chars Ãƒâ€” Full res).
+                            // Spine character overlays follow the playback-
+                            // resolution dropdown (same as other clips). The
+                            // old pinned-Half meant "Full" never raised the
+                            // character resolution in the source-monitor
+                            // sequence preview.
                             frame = resolveMediaFrame(animHandle, animFrame,
-                                                    m_forceFullResolution.load() ? ResolutionTier::Full : ResolutionTier::Half, scrubMode);
+                                                    m_forceFullResolution.load() ? ResolutionTier::Full : playbackTier(), scrubMode);
                             if (frame) {
                                 // Packed-alpha unpack is now handled by:
                                 //   - GPU path: compositor shader isPacked UV split

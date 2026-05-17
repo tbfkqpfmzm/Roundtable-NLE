@@ -105,7 +105,10 @@ public:
     // ── Keyframe operations ─────────────────────────────────────────────
     void addKeyframe(int curveIndex, int64_t time, float value);
     void deleteSelectedKeyframes();
-    void setInterpolation(int interpMode); // 0=Linear, 1=Bezier, 2=Hold
+    /// Set interpolation on all selected keyframes. `interpMode` is an
+    /// InterpMode value (0=Linear, 1=Bezier, 2=Hold, 3=AutoBezier,
+    /// 4=ContinuousBezier, 5=EaseIn, 6=EaseOut).
+    void setInterpolation(int interpMode);
 
     // ── Clipboard ───────────────────────────────────────────────────────
     void copySelectedKeyframes();
@@ -123,10 +126,21 @@ public:
     [[nodiscard]] double viewValueMax() const noexcept { return m_viewValueMax; }
 
     // ── Coordinate conversion ───────────────────────────────────────────
-    /// Graph coordinates → widget pixel coordinates
+    /// Graph coordinates → widget pixel coordinates (value pane).
     [[nodiscard]] QPointF graphToPixel(double time, double value) const;
-    /// Widget pixel coordinates → graph coordinates
+    /// Widget pixel coordinates → graph coordinates (value pane).
     [[nodiscard]] QPointF pixelToGraph(double px, double py) const;
+
+    /// Velocity-pane coordinate conversions. Time axis is shared with the
+    /// value pane; the value axis is auto-scaled from observed slopes.
+    [[nodiscard]] QPointF graphToPixelVelocity(double time, double velocity) const;
+    [[nodiscard]] QPointF pixelToGraphVelocity(double px, double py) const;
+
+    // ── Velocity (speed) graph ─────────────────────────────────────────
+    /// Show or hide the expandable velocity graph below the value graph,
+    /// matching Premiere Pro's "Show Speed Graph" toggle.
+    void setShowVelocityGraph(bool on) noexcept;
+    [[nodiscard]] bool showVelocityGraph() const noexcept { return m_showVelocityGraph; }
 
     // ── Accessors for test introspection ────────────────────────────────
     [[nodiscard]] bool isDragging()  const noexcept { return m_dragging; }
@@ -157,6 +171,11 @@ private:
     void drawKeyframeHandles(QPainter& p, int curveIdx);
     void drawBezierHandles(QPainter& p, int curveIdx);
     void drawBoxSelection(QPainter& p);
+    void drawVelocityGraph(QPainter& p);
+
+    /// Auto-fit the velocity y-range from the observed slopes; called when
+    /// the velocity graph is shown or when keyframes change.
+    void recomputeVelocityRange();
 
     // ── Hit testing ─────────────────────────────────────────────────────
     static constexpr double kHitRadius = 8.0;
@@ -168,6 +187,8 @@ private:
         int  keyIndex{-1};
         bool isTangentIn{false};
         bool isTangentOut{false};
+        bool isVelocityIn{false};   ///< velocity-pane in-handle
+        bool isVelocityOut{false};  ///< velocity-pane out-handle
     };
     [[nodiscard]] HitResult hitTest(const QPointF& pos) const;
 
@@ -198,6 +219,7 @@ private:
     bool     m_boxSelecting{false};
     bool     m_draggingTangent{false};
     bool     m_tangentIsIn{false};   // which tangent handle
+    bool     m_velocityDrag{false};  // tangent drag originated in velocity pane
     int      m_dragCurveIdx{-1};
     int      m_dragKeyIdx{-1};
     QPointF  m_dragStartPos;
@@ -212,6 +234,11 @@ private:
     QAction* m_actLinear{nullptr};
     QAction* m_actBezier{nullptr};
     QAction* m_actHold{nullptr};
+    QAction* m_actAutoBezier{nullptr};
+    QAction* m_actContinuousBezier{nullptr};
+    QAction* m_actEaseIn{nullptr};
+    QAction* m_actEaseOut{nullptr};
+    QAction* m_actShowVelocity{nullptr};  ///< Toggle Show Velocity Graph
     QAction* m_actCopy{nullptr};
     QAction* m_actPaste{nullptr};
     QAction* m_actFitAll{nullptr};
@@ -219,6 +246,11 @@ private:
     QAction* m_actSelectAll{nullptr};
 
     QPointF  m_contextMenuGraphPos; // graph position for context-menu "add keyframe"
+
+    // ── Velocity (speed) graph state ─────────────────────────────────────
+    bool   m_showVelocityGraph{false};
+    double m_viewVelocityMin{-100.0};
+    double m_viewVelocityMax{ 100.0};
 };
 
 } // namespace rt

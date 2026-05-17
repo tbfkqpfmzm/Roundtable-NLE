@@ -13,6 +13,7 @@
 #include "timeline/Timeline.h"
 #include "timeline/Track.h"
 #include "timeline/Clip.h"
+#include "timeline/Position2D.h"
 #include "timeline/VideoClip.h"
 #include "timeline/ImageClip.h"
 #include "timeline/SequenceClip.h"
@@ -309,8 +310,9 @@ int FrameRenderer::evaluateLayers(const Timeline& timeline, int64_t tick, int de
 
             // ── Build transform ─────────────────────────────────────────
             float opac = clip->opacity().evaluate(localTick);
-            float px = clip->positionX().evaluate(localTick);
-            float py = clip->positionY().evaluate(localTick);
+            auto p2  = evaluatePosition2D(clip->positionX(), clip->positionY(), localTick);
+            float px = p2.first;
+            float py = p2.second;
             float sx = clip->scaleX().evaluate(localTick);
             float sy = clip->scaleY().evaluate(localTick);
             float rot = clip->rotation().evaluate(localTick);

@@ -47,6 +47,7 @@ void ThumbnailGrid::addItem(const std::filesystem::path& filePath,
                              uint64_t mediaHandle)
 {
     ThumbnailItem item;
+    item.itemId      = m_nextItemId++;
     item.filePath    = filePath;
     item.displayName = QString::fromStdString(filePath.filename().string());
     item.type        = (type == MediaType::Unknown)
@@ -68,6 +69,7 @@ void ThumbnailGrid::addItems(const std::vector<std::filesystem::path>& files)
     for (const auto& f : files)
     {
         ThumbnailItem item;
+        item.itemId      = m_nextItemId++;
         item.filePath    = f;
         item.displayName = QString::fromStdString(f.filename().string());
         item.type        = ThumbnailGenerator::detectMediaType(f);
@@ -96,6 +98,77 @@ bool ThumbnailGrid::removeItem(const std::filesystem::path& filePath)
     update();
     emit itemCountChanged(itemCount());
     return true;
+}
+
+int ThumbnailGrid::duplicateItem(int srcIndex)
+{
+    if (srcIndex < 0 || srcIndex >= static_cast<int>(m_items.size()))
+        return -1;
+
+    ThumbnailItem copy = m_items[static_cast<size_t>(srcIndex)];
+    copy.itemId   = m_nextItemId++;
+    copy.selected = false;
+    // Thumbnail is shareable (same source media), keep it for instant display.
+    m_items.push_back(std::move(copy));
+
+    recalcLayout();
+    update();
+    emit itemCountChanged(itemCount());
+    return static_cast<int>(m_items.size()) - 1;
+}
+
+bool ThumbnailGrid::removeItemById(uint64_t id)
+{
+    if (id == 0) return false;
+    auto it = std::find_if(m_items.begin(), m_items.end(),
+        [&](const ThumbnailItem& item) { return item.itemId == id; });
+
+    if (it == m_items.end()) return false;
+
+    int idx = static_cast<int>(std::distance(m_items.begin(), it));
+    if (m_selectedIndex == idx) m_selectedIndex = -1;
+    else if (m_selectedIndex > idx) --m_selectedIndex;
+
+    m_items.erase(it);
+    recalcLayout();
+    update();
+    emit itemCountChanged(itemCount());
+    return true;
+}
+
+int ThumbnailGrid::indexOfItemId(uint64_t id) const
+{
+    if (id == 0) return -1;
+    for (size_t i = 0; i < m_items.size(); ++i)
+        if (m_items[i].itemId == id)
+            return static_cast<int>(i);
+    return -1;
+}
+
+int ThumbnailGrid::addRestoredItem(const std::filesystem::path& filePath,
+                                   MediaType type, uint64_t mediaHandle,
+                                   uint64_t itemId, const QString& displayName,
+                                   uint32_t labelColor)
+{
+    ThumbnailItem item;
+    item.itemId      = itemId ? itemId : m_nextItemId++;
+    item.filePath    = filePath;
+    item.displayName = displayName.isEmpty()
+        ? QString::fromStdString(filePath.filename().string())
+        : displayName;
+    item.type        = (type == MediaType::Unknown)
+                         ? ThumbnailGenerator::detectMediaType(filePath)
+                         : type;
+    item.mediaHandle = mediaHandle;
+    item.labelColor  = labelColor;
+    item.visible     = matchesFilter(item);
+    ensureItemIdAbove(item.itemId);
+
+    m_items.push_back(std::move(item));
+    recalcLayout();
+    update();
+    emit itemCountChanged(itemCount());
+    return static_cast<int>(m_items.size()) - 1;
 }
 
 bool ThumbnailGrid::hasItem(const std::filesystem::path& filePath) const

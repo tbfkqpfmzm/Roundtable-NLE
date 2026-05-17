@@ -42,6 +42,7 @@ Project::Project(Project&& o) noexcept
     , m_commands(std::move(o.m_commands))
     , m_binFiles(std::move(o.m_binFiles))
     , m_binFolders(std::move(o.m_binFolders))
+    , m_binItems(std::move(o.m_binItems))
 {}
 
 Project& Project::operator=(Project&& o) noexcept
@@ -58,6 +59,7 @@ Project& Project::operator=(Project&& o) noexcept
         m_commands        = std::move(o.m_commands);
         m_binFiles        = std::move(o.m_binFiles);
         m_binFolders      = std::move(o.m_binFolders);
+        m_binItems        = std::move(o.m_binItems);
     }
     return *this;
 }
@@ -116,42 +118,23 @@ Timeline* Project::addSequence(const std::string& name)
     return m_sequences.back().get();
 }
 
+Timeline* Project::addSequence(std::unique_ptr<Timeline> seq)
+{
+    if (!seq) return nullptr;
+    std::string seqName = seq->name();
+    m_sequences.push_back(std::move(seq));
+    m_modified = true;
+    spdlog::info("Project: added pre-built sequence '{}' (total: {})", seqName, m_sequences.size());
+    return m_sequences.back().get();
+}
+
 Timeline* Project::duplicateSequence(size_t srcIndex)
 {
     if (srcIndex >= m_sequences.size()) return nullptr;
 
     const Timeline* src = m_sequences[srcIndex].get();
-    auto dup = std::make_unique<Timeline>();
+    auto dup = src->clone();
     dup->setName(src->name() + " Copy");
-
-    // Copy all tracks and their clips
-    for (size_t ti = 0; ti < src->trackCount(); ++ti) {
-        const Track* srcTrack = src->track(ti);
-        Track* dstTrack = nullptr;
-        if (srcTrack->type() == TrackType::Video)
-            dstTrack = dup->addVideoTrack(srcTrack->name());
-        else
-            dstTrack = dup->addAudioTrack(srcTrack->name());
-
-        dstTrack->setLocked(srcTrack->isLocked());
-        dstTrack->setMuted(srcTrack->isMuted());
-        dstTrack->setSoloed(srcTrack->isSoloed());
-        dstTrack->setHeight(srcTrack->height());
-
-        for (size_t ci = 0; ci < srcTrack->clipCount(); ++ci) {
-            dstTrack->addClip(srcTrack->clip(ci)->clone());
-        }
-    }
-
-    // Copy markers
-    for (const auto& marker : src->markers()) {
-        dup->addMarker(marker.time, marker.label, marker.color);
-    }
-
-    // Copy playback state
-    dup->setPlayheadPosition(src->playheadPosition());
-    dup->setInPoint(src->inPoint());
-    dup->setOutPoint(src->outPoint());
 
     m_sequences.push_back(std::move(dup));
     m_modified = true;

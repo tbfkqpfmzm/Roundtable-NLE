@@ -194,7 +194,7 @@ void MainWindow::onAbout()
         "<p>GPU-accelerated Non-Linear Video Editor for Spine Animation</p>"
         "<p>Created by <a href='http://youtube.com/@ExportErrorMusic/'>Export/Error Music</a></p>"
         "<p>GitHub: <a href='https://github.com/exporterrormusic/Roundtable-NLE'>https://github.com/exporterrormusic/Roundtable-NLE</a></p>"
-        "<p>Support with donations via <a href='https://streamelements.com/exporterrormusic/tip'>StreamElements</a></p>"
+        "<p>Support with donations via <a href='https://www.paypal.com/ncp/payment/7THEH3LWCTRZU'>PayPal</a></p>"
         "<p style='margin-top:12px;font-size:smaller;color:gray'>"
         "Licensed under AGPL-3.0. Bundles FFmpeg (LGPL), Qt 6 (LGPL), "
         "spine-cpp (Spine Runtimes License), and other components. "
@@ -531,6 +531,8 @@ void MainWindow::applySequenceSettingsRefresh(uint32_t resW, uint32_t resH, doub
         pm->setOutputResolution(resW, resH);
         pm->requestRefresh();
     }
+    if (auto* ec = effectControlsPanel())
+        ec->setSequenceResolution(resW, resH);
     if (m_playbackController)
         m_playbackController->setFrameRate(fps);
     if (m_timelineWorkspace && m_timelineWorkspace->timelinePanel())

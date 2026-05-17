@@ -268,6 +268,9 @@ void TimelinePanel::dragMoveEvent(QDragMoveEvent* event)
         if (tick < 0) tick = 0;
         size_t trackIdx = hitTestTrack(pos.y());
 
+        spdlog::debug("GHOST-CLIP: dragMove media pos=({:.0f},{:.0f}) px={:.0f} tick={} trackIdx={} widgets={}",
+                      pos.x(), pos.y(), px, tick, trackIdx, m_trackWidgets.size());
+
         // Determine clip duration for the preview
         int64_t previewDur = 0;
         bool isAudio = false;
@@ -391,15 +394,22 @@ void TimelinePanel::dragMoveEvent(QDragMoveEvent* event)
                 }
             }
         }
+        spdlog::debug("GHOST-CLIP: dragMove media isAudio={} previewDur={} trackCompatible={} m_engine={} trackCount={}",
+                      isAudio, previewDur, trackCompatible,
+                      (m_timeline && trackIdx < m_timeline->trackCount() ? "yes" : "N/A"),
+                      m_timeline ? m_timeline->trackCount() : 0);
+
         for (size_t i = 0; i < m_trackWidgets.size(); ++i) {
-            if (i == trackIdx && trackCompatible)
+            if (i == trackIdx && trackCompatible) {
+                spdlog::debug("GHOST-CLIP: >> setting preview on trackIdx={}", i);
                 m_trackWidgets[i]->setMediaDragPreview(tick, previewDur, isAudio);
-            else if (mediaHasAudio && i == audioTrackIdx)
+            } else if (mediaHasAudio && i == audioTrackIdx) {
                 m_trackWidgets[i]->setMediaDragPreview(tick, previewDur, true);
-            else if (!isAudio && i == videoTrackIdx)
+            } else if (!isAudio && i == videoTrackIdx) {
                 m_trackWidgets[i]->setMediaDragPreview(tick, previewDur, false);
-            else
+            } else {
                 m_trackWidgets[i]->clearMediaDragPreview();
+            }
         }
 
         // ── Ghost track overlay for bin/external drags ──
@@ -441,9 +451,36 @@ void TimelinePanel::dragMoveEvent(QDragMoveEvent* event)
                 m_ghostTrackY = lastBot.y();
             } else {
                 m_ghostTrackVisible = false;
-                if (m_ghostOverlay) m_ghostOverlay->hide();
+                if (m_ghostOverlay) {
+                    m_ghostOverlay->setClipPreviews({});
+                    m_ghostOverlay->hide();
+                }
             }
             if (m_ghostTrackVisible && m_ghostOverlay) {
+                // Populate ghost track with clip previews for bin/external drags
+                {
+                    std::vector<GhostTrackOverlay::GhostClipPreview> previews;
+                    if (previewDur > 0) {
+                        double clipPx = m_layoutEngine.timeToPixelX(tick);
+                        double clipPw = m_layoutEngine.timeToPixelX(tick + previewDur) - clipPx;
+                        if (clipPw > 0) {
+                            GhostTrackOverlay::GhostClipPreview gp;
+                            gp.x = static_cast<int>(clipPx);
+                            gp.width = static_cast<int>(clipPw);
+                            gp.color = isAudio ? 0x3CA05AFF : 0x4A90D9FF;
+                            // Extract clip label from the first URL, or use a placeholder
+                            if (event->mimeData()->hasUrls() && !event->mimeData()->urls().isEmpty())
+                                gp.label = QFileInfo(event->mimeData()->urls().first().toLocalFile()).fileName();
+                            else if (event->mimeData()->hasFormat("application/x-roundtable-media"))
+                                gp.label = QStringLiteral("Media");
+                            else
+                                gp.label = QStringLiteral("Clip");
+                            previews.push_back(gp);
+                        }
+                    }
+                    m_ghostOverlay->setClipPreviews(previews);
+                }
+
                 m_ghostOverlay->isAbove = m_ghostTrackIsAbove;
                 m_ghostOverlay->setGeometry(ghostX, m_ghostTrackY, ghostW, m_ghostTrackHeight);
                 m_ghostOverlay->raise();
@@ -456,7 +493,10 @@ void TimelinePanel::dragMoveEvent(QDragMoveEvent* event)
     } else {
         // Hide ghost overlay if not dragging media
         m_ghostTrackVisible = false;
-        if (m_ghostOverlay) m_ghostOverlay->hide();
+        if (m_ghostOverlay) {
+            m_ghostOverlay->setClipPreviews({});
+            m_ghostOverlay->hide();
+        }
         event->ignore();
     }
 }
@@ -466,7 +506,10 @@ void TimelinePanel::dragLeaveEvent(QDragLeaveEvent* event)
     m_effectDropTarget.reset();
     m_transitionDropTarget.reset();
     m_ghostTrackVisible = false;
-    if (m_ghostOverlay) m_ghostOverlay->hide();
+    if (m_ghostOverlay) {
+        m_ghostOverlay->setClipPreviews({});
+        m_ghostOverlay->hide();
+    }
     for (auto tw : m_trackWidgets) {
         tw->clearEffectHighlight();
         tw->clearTransitionDropEdge();
@@ -481,7 +524,10 @@ void TimelinePanel::dropEvent(QDropEvent* event)
     const bool ghostWasAbove = m_ghostTrackIsAbove;
 
     m_ghostTrackVisible = false;
-    if (m_ghostOverlay) m_ghostOverlay->hide();
+    if (m_ghostOverlay) {
+        m_ghostOverlay->setClipPreviews({});
+        m_ghostOverlay->hide();
+    }
 
     // Clear all drag previews
     for (auto tw : m_trackWidgets) tw->clearMediaDragPreview();

@@ -7,6 +7,7 @@
 #include "timeline/GraphicLayer.h"
 #include <QColorDialog>
 #include <QFontDatabase>
+#include <QPlainTextEdit>
 #include <QSlider>
 
 namespace rt {
@@ -125,6 +126,25 @@ void GraphicsEditorPanel::buildEditControls()
  if (m_selectedLayer->layerType() == GraphicLayerType::Text) {
  m_textSection = makeSectionHeader(tr("Text"));
  addW(m_textSection);
+
+ // ── Editable text content (the actual string) ──────────────────
+ // Premiere Pro shows the text itself in the Essential Graphics
+ // panel; typing here changes the on-screen text immediately.
+ {
+ m_textContentEdit = new QPlainTextEdit(m_editContainer);
+ m_textContentEdit->setPlaceholderText(tr("Type your text…"));
+ m_textContentEdit->setFixedHeight(56);
+ m_textContentEdit->setTabChangesFocus(true);
+ m_textContentEdit->setStyleSheet(QStringLiteral(
+ "QPlainTextEdit { background: %1; color: %2; "
+ "border: 1px solid %3; font-size: 13px; padding: 4px; }"
+ "QPlainTextEdit:focus { border: 1px solid %4; }")
+ .arg(Theme::hex(tc.surface0), Theme::hex(tc.textPrimary),
+ Theme::hex(tc.border), Theme::hex(tc.accent)));
+ connect(m_textContentEdit, &QPlainTextEdit::textChanged,
+ this, [this]() { applyTextProperties(); });
+ addW(m_textContentEdit);
+ }
 
  // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Font family (full width) ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
  {

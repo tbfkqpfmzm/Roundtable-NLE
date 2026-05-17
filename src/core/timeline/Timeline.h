@@ -78,6 +78,10 @@ public:
     [[nodiscard]] const std::string& name() const noexcept;
     void setName(const std::string& name);
 
+    /// Deep-clone the entire timeline (tracks, clips, markers, playback state).
+    /// Observers are NOT copied — the clone starts with no observers.
+    [[nodiscard]] std::unique_ptr<Timeline> clone() const;
+
 private:
     std::string                        m_name{"Sequence 1"};
     std::vector<std::unique_ptr<Track>> m_tracks;

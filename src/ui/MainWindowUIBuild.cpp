@@ -405,6 +405,8 @@ void MainWindow::buildPanels()
                 pm->setOutputResolution(s.resolution().width, s.resolution().height);
                 pm->requestRefresh();
             }
+            if (auto* ec = effectControlsPanel())
+                ec->setSequenceResolution(s.resolution().width, s.resolution().height);
             if (m_playbackController)
                 m_playbackController->setFrameRate(s.frameRate());
             if (m_timelineWorkspace && m_timelineWorkspace->timelinePanel())
@@ -432,6 +434,16 @@ void MainWindow::buildPanels()
                 m_timelineWorkspace->invalidateAudioSources();
                 m_timelineWorkspace->refreshAfterUndoRedo();
             }
+            if (auto* pm = programMonitor()) pm->refresh();
+        });
+
+        // A bin asset's bytes changed on disk (e.g. a recoloured Color
+        // Matte) → re-decode it and refresh every timeline instance.
+        connect(bin, &ProjectBin::mediaContentChanged, this,
+                [this](const std::filesystem::path& path) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
+            if (m_timelineWorkspace)
+                m_timelineWorkspace->refreshChangedMedia(path);
             if (auto* pm = programMonitor()) pm->refresh();
         });
 

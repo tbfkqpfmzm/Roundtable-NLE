@@ -107,7 +107,10 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
                     double clipLeft  = m_layoutEngine.timeToPixelX(clip->timelineIn());
                     double clipRight = m_layoutEngine.timeToPixelX(clip->timelineOut());
 
-                    constexpr double kEdgeThreshold = 6.0;
+                    // Match the press-time grab zone (TimelinePanel::edgeGrabPx)
+                    // so the resize cursor appears exactly where a trim will
+                    // actually start.
+                    const double kEdgeThreshold = edgeGrabPx(clipRight - clipLeft);
                     bool nearHead = std::abs(px - clipLeft)  < kEdgeThreshold;
                     bool nearTail = std::abs(px - clipRight) < kEdgeThreshold;
                     if (nearHead || nearTail)
@@ -566,7 +569,7 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
             double clipLeft  = m_layoutEngine.timeToPixelX(clip->timelineIn());
             double clipRight = m_layoutEngine.timeToPixelX(clip->timelineOut());
 
-            constexpr double kEdgeThreshold = 6.0;
+            const double kEdgeThreshold = edgeGrabPx(clipRight - clipLeft);
             if (std::abs(clickPx - clipLeft) < kEdgeThreshold) {
                 m_dragMode = DragMode::ClipTrimHead;
                 m_lastClickedEdge = { m_dragClipRef, ClipEdge::Head, true };

@@ -70,6 +70,12 @@ void writeKeyframeTrack(BinaryWriter& w, const KeyframeTrack<float>& track)
         w.writeF32(kf.bezierInY);
         w.writeF32(kf.bezierOutX);
         w.writeF32(kf.bezierOutY);
+        // v15+: spatial interpolation + 2D path handles (motion path).
+        w.writeU8(static_cast<uint8_t>(kf.spatialInterp));
+        w.writeF32(kf.spatialInX);
+        w.writeF32(kf.spatialInY);
+        w.writeF32(kf.spatialOutX);
+        w.writeF32(kf.spatialOutY);
     }
 }
 
@@ -105,7 +111,6 @@ void readKeyframeTrack(BinaryReader& r, KeyframeTrack<float>& track, uint32_t ve
         float boY    = r.readF32();
 
         track.addKeyframe(time, value, interp);
-        // Set bezier handles
         auto& kf = track.keyframe(track.keyframeCount() - 1);
         if (kf.time == time)
         {
@@ -113,6 +118,23 @@ void readKeyframeTrack(BinaryReader& r, KeyframeTrack<float>& track, uint32_t ve
             kf.bezierInY  = biY;
             kf.bezierOutX = boX;
             kf.bezierOutY = boY;
+        }
+        // v15+: spatial interpolation + 2D motion-path handles.
+        if (version >= 15)
+        {
+            auto spInterp = static_cast<InterpMode>(r.readU8());
+            float spInX   = r.readF32();
+            float spInY   = r.readF32();
+            float spOutX  = r.readF32();
+            float spOutY  = r.readF32();
+            if (kf.time == time)
+            {
+                kf.spatialInterp = spInterp;
+                kf.spatialInX    = spInX;
+                kf.spatialInY    = spInY;
+                kf.spatialOutX   = spOutX;
+                kf.spatialOutY   = spOutY;
+            }
         }
     }
 

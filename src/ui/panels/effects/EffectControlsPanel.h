@@ -124,6 +124,10 @@ signals:
     void goToPrevKeyframe(KeyframeTrack<float>* track);
     void goToNextKeyframe(KeyframeTrack<float>* track);
     void keyframingToggled(KeyframeTrack<float>* track, bool enabled);
+    /// Premiere-style per-attribute reset: restore this row's value(s) to
+    /// their factory default and clear any keyframes (undoable). Handled by
+    /// EffectControlsPanel which knows the spin→track mapping.
+    void resetRequested();
 
 private:
     void buildUI();
@@ -140,6 +144,7 @@ private:
     QToolButton*  m_prevKfBtn{nullptr};
     QToolButton*  m_addKfBtn{nullptr};
     QToolButton*  m_nextKfBtn{nullptr};
+    QToolButton*  m_resetBtn{nullptr};
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -184,6 +189,9 @@ protected:
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
+    void focusOutEvent(QFocusEvent* event) override;  // clears selection
+                                                      // when focus leaves to
+                                                      // a non-popup widget
 
 private:
     struct HitResult {
@@ -272,8 +280,23 @@ public:
     }
     void setTimeline(Timeline* tl) noexcept { m_timeline = tl; }
 
+    /// Sequence resolution used to convert the internal REF-1920 Position
+    /// values into displayed sequence pixels (Premiere-style Motion).  Stored
+    /// values stay REF-1920; only the Effect Controls UI shows seq-px.
+    void setSequenceResolution(uint32_t w, uint32_t h) noexcept {
+        if (w > 0) m_seqW = w;
+        if (h > 0) m_seqH = h;
+        if (m_clip) populateFromClip();
+    }
+
     /// Update playhead position (for keyframe nav + mini-timeline).
     void setPlayheadTick(int64_t tick);
+
+    /// Lightweight refresh of the transform spin-box VALUES only (no
+    /// property-tree rebuild).  Call this when the clip's transform is
+    /// changed externally — e.g. dragging the transform overlay in the
+    /// Program Monitor — so the Effect Controls numbers track live.
+    void syncValuesFromClip();
 
     /// Get the PropertyRow widgets for test introspection.
     [[nodiscard]] const std::vector<PropertyRow*>& propertyRows() const noexcept { return m_propertyRows; }
@@ -335,6 +358,11 @@ protected:
     void applyTransformLive();
     void commitTransform(double oldVal, double newVal);
 
+    /// Premiere-style per-attribute reset. Restores every value spin in the
+    /// row to its engine-native factory default and clears that property's
+    /// keyframes, as a single undoable command.
+    void resetPropertyRow(PropertyRow* row);
+
     // ── Keyframe operations ─────────────────────────────────────────────
     void onAddKeyframe(KeyframeTrack<float>* track, int64_t time);
     void onDeleteKeyframe(KeyframeTrack<float>* track, int64_t time);
@@ -343,6 +371,18 @@ protected:
 
     /// Clip-relative playhead tick (for keyframe ops).
     [[nodiscard]] int64_t clipRelativeTick() const noexcept;
+
+    /// Cover-fit factor for the current clip (Premiere-style native-pixel
+    /// Scale display).  For normal media (Image / non-character Video /
+    /// color matte), returns max(seqW/srcW, seqH/srcH) — the multiplier
+    /// the compositor bakes into scale=1.0.  Effect Controls multiplies
+    /// the stored scaleX/Y by this factor so a displayed 100% always
+    /// means the source is rendered 1:1 (no upscale = sharp), and any
+    /// other value tells the user honestly that pixels are being
+    /// stretched/shrunk.  Returns 1.0 for clip kinds without meaningful
+    /// native pixels (SpineClip, VideoCharacter, TitleClip, GraphicClip)
+    /// so their existing fill-model Scale numbers are unaffected.
+    [[nodiscard]] double coverFitForCurrentClip() const noexcept;
 
     ScrubbySpinBox* createScrubby(double min, double max, double step,
                                    int decimals, const QString& suffix = {});
@@ -355,6 +395,10 @@ protected:
     bool           m_updating{false};
     int64_t        m_playheadTick{0};
     int            m_selectedEffectIndex{-1};  // -1 = none selected
+    /// Sequence resolution for Position seq-px display conversion (defaults
+    /// to 1920×1080 — same basis as the internal REF representation).
+    uint32_t       m_seqW{1920};
+    uint32_t       m_seqH{1080};
 
     // ── UI ──────────────────────────────────────────────────────────────
     QLabel*         m_footerTimecodeLabel{nullptr};

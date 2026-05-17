@@ -34,9 +34,12 @@
 #include <QString>
 
 #include <atomic>
+#include <filesystem>
 #include <future>
 #include <memory>
 #include <mutex>
+#include <set>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -44,6 +47,7 @@
 
 
 class QDockWidget;
+class QFileSystemWatcher;
 class QLabel;
 class QSettings;
 class QTabBar;
@@ -158,6 +162,20 @@ public:
     /// Call after undo/redo to refresh composite cache and transform overlay.
     void refreshAfterUndoRedo();
 
+    /// A media file's bytes changed on disk (e.g. an edited Color Matte).
+    /// Forces MediaPool to re-decode it, drops the compositor's cached
+    /// handle for that path, flushes the composite cache, and refreshes
+    /// the program monitor so every timeline instance updates live.
+    void refreshChangedMedia(const std::filesystem::path& path);
+
+    /// Rescan the timeline for referenced media files and (re)arm a
+    /// QFileSystemWatcher on each. When a watched file is overwritten in
+    /// Windows Explorer (e.g. replacing a .png with a new version of the
+    /// same name) this live-swaps it into the project/program monitor,
+    /// just like Premiere Pro. Cheap and idempotent — safe to call after
+    /// any timeline mutation, project load, or media import.
+    void rescanMediaWatch();
+
     /// Backward compat — returns the QDockWidget wrapping the named panel.
     [[nodiscard]] QDockWidget* dockForPanel(const QString& panelName) const;
 
@@ -224,6 +242,15 @@ private:
     ModelManager*  m_modelManager{nullptr};
     ShotPresetManager* m_shotPresetManager{nullptr};
     Project*       m_project{nullptr};
+
+    // ── Live media file-swap watcher ────────────────────────────────────
+    // Watches every media file the timeline references so overwriting one
+    // in Windows Explorer (replace a .png with a same-named new version)
+    // hot-reloads it into the project, Premiere-style. fileChanged is
+    // debounced because editors/Explorer often write in several bursts.
+    QFileSystemWatcher* m_mediaWatcher{nullptr};
+    QTimer*             m_mediaWatchDebounce{nullptr};
+    std::set<std::string> m_mediaWatchPending;   ///< paths awaiting debounced reload
 
     // Composite service (GPU compositing + spine rendering)
     std::unique_ptr<CompositeService> m_compositeService;
@@ -371,6 +398,13 @@ private:
     size_t m_selectedTrackIdx{0};
     size_t m_selectedClipIdx{0};
     int    m_selectedGraphicLayerIdx{-1};  ///< Selected layer within GraphicClip (-1 = whole clip)
+
+    /// Text snapshot taken when in-place text editing begins. The layer's
+    /// text is temporarily cleared during editing so the rendered text
+    /// doesn't show through behind the editor box (Premiere Pro behavior).
+    /// Restored on cancel, replaced with new text on commit.
+    std::string m_preEditOriginalText;
+    bool        m_inlineTextEditActive{false};
     uint32_t m_overlayRefreshGen{0};          ///< Generation counter for deferred overlay updates
     size_t m_eyedropperEffectIdx{0};           ///< Effect index pending eyedropper pick
     uint8_t m_savedEditToolBeforeEyedropper{0}; ///< Saved edit tool to restore after pick

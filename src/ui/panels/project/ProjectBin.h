@@ -32,6 +32,7 @@
 #pragma once
 
 #include "media/ThumbnailGenerator.h"
+#include "project/Project.h"   // Project::BinItem (rich bin model)
 
 #include <QComboBox>
 #include <QHeaderView>
@@ -138,6 +139,24 @@ public:
     /// Select all items in the bin (for Ctrl+A).
     void selectAllItems();
 
+    /// Copy the current bin selection (sequence, media item, color matte,
+    /// or bin folder) into the bin clipboard (Ctrl+C). Returns true if a
+    /// copyable item was selected.
+    bool copySelection();
+
+    /// Paste the bin clipboard as a new, independent item (Ctrl+V).
+    /// Sequences and generated assets (color mattes) are deep-copied;
+    /// footage is duplicated as an independent reference to the same
+    /// media. Returns true if something was pasted.
+    bool pasteClipboard();
+
+    /// Copy the current selection and immediately paste it — one-step
+    /// "Duplicate", Premiere-style. Returns true if something was done.
+    bool duplicateSelection();
+
+    /// Whether the bin clipboard currently holds something pasteable.
+    [[nodiscard]] bool hasClipboard() const noexcept;
+
     /// Number of items in the bin.
     [[nodiscard]] int itemCount() const noexcept;
 
@@ -154,6 +173,16 @@ public:
 
     /// Restore bin folder structure from saved state (after adding files).
     void restoreBinFolders(const std::vector<BinFolderState>& folders);
+
+    /// Export every bin entry as a rich per-instance record (id, path,
+    /// display name, label colour) — duplicates included. For v14+ save.
+    [[nodiscard]] std::vector<Project::BinItem> exportBinItems() const;
+
+    /// Rebuild the bin from rich per-instance records (v14+ load),
+    /// preserving each entry's identity/name/label so footage
+    /// reference-duplicates survive a save/reload, then restore folders.
+    void restoreBinModel(const std::vector<Project::BinItem>& items,
+                         const std::vector<BinFolderState>& folders);
 
     // ── Accessors ───────────────────────────────────────────────────────
 
@@ -190,6 +219,14 @@ public:
     /// Prompts for color and name, generates a PNG, and imports it.
     void createColorMatte();
 
+    /// Whether a bin item path is a generated Color Matte asset
+    /// (lives in a "Mattes" directory).
+    [[nodiscard]] static bool isColorMatte(const std::filesystem::path& path);
+
+    /// Re-open the color picker for an existing Color Matte and rewrite
+    /// the PNG in place, refreshing the bin and every timeline instance.
+    void editColorMatte(const std::filesystem::path& mattePath);
+
     /// Scale all clips in a sequence proportionally when resolution changes.
     static void scaleClipsToResolution(class Timeline* seq,
                                        const Resolution& from,
@@ -217,6 +254,11 @@ signals:
 
     /// Emitted when sequence settings (resolution, frame rate, name) are changed.
     void sequenceSettingsChanged();
+
+    /// Emitted when a bin media file's bytes change on disk (e.g. a
+    /// Color Matte recoloured via double-click). Listeners must drop
+    /// any cached decode/texture for this path and refresh.
+    void mediaContentChanged(const std::filesystem::path& path);
 
     /// Emitted when clips have been removed from (or restored to) the
     /// timeline as a side-effect of deleting/undeleting bin media.
@@ -247,8 +289,45 @@ private:
         std::vector<std::filesystem::path> files;
         std::vector<BinFolderState> folders;
     };
+
+    /// One entry in the bin clipboard. Recursive so a copied bin folder
+    /// carries its whole subtree.
+    struct ClipboardEntry {
+        bool                  isBin = false;
+        // ── Media item fields ──
+        std::filesystem::path filePath;
+        QString               displayName;
+        uint32_t              labelColor = 0xFF888888;
+        MediaType             type = MediaType::Unknown;
+        uint64_t              mediaHandle = 0;
+        /// Generated, self-contained asset (e.g. a Color Matte PNG). On
+        /// paste the file is physically copied so the duplicate can be
+        /// changed independently; other footage is duplicated by reference.
+        bool                  generatedAsset = false;
+        // ── Bin folder fields ──
+        QString               binName;
+        std::vector<ClipboardEntry> children;
+    };
     BinSnapshot captureBinSnapshot();
     void applyBinSnapshot(const BinSnapshot& s);
+
+    // ── Bin clipboard helpers (ProjectBinEvents.cpp) ────────────────────
+
+    /// Snapshot a tree item (media / bin folder) into a ClipboardEntry,
+    /// recursing into bin children. Returns isBin=false with empty
+    /// filePath if the item can't be captured.
+    ClipboardEntry captureClipboardEntry(QTreeWidgetItem* item) const;
+
+    /// Materialize one clipboard entry as a new independent bin item.
+    /// `parentBinPath` is the destination folder ("" = bin root); copied
+    /// bin folders recurse with their own path. Appends every created
+    /// grid itemId, any physically copied file, and folder records (so
+    /// duplicated bins reuse the persistence machinery) for undo.
+    void applyClipboardEntry(const ClipboardEntry& e,
+                             const QString& parentBinPath,
+                             std::vector<uint64_t>& createdItemIds,
+                             std::vector<std::filesystem::path>& createdFiles,
+                             std::vector<BinFolderState>& createdFolders);
 
     bool handleDropEvent(QEvent* de);
     bool handleDragEnterEvent(QEvent* de);
@@ -291,7 +370,8 @@ private:
     std::unique_ptr<ThumbnailGenerator> m_ownedGenerator;  // owned if created internally
     Project*    m_project{nullptr};
     CommandStack* m_commandStack{nullptr};
-    int         m_copiedSequenceIdx{-1}; // index of copied sequence for paste
+    std::unique_ptr<Timeline> m_clipboardSequence; // deep copy of copied sequence for paste
+    std::vector<ClipboardEntry> m_clipboardItems;  // copied media/matte/bin (non-sequence)
     QTreeWidgetItem* m_dropHighlightItem{nullptr}; // bin highlighted during drag
     QVector<QStringList> m_binTabPaths;  // bin path for each tab (empty = root)
     std::atomic<bool> m_destroying{false};

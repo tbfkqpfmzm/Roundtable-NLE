@@ -13,6 +13,7 @@
 #include "media/MediaPool.h"
 #include "media/MediaSourceService.h"
 #include "command/CommandStack.h"
+#include "command/LambdaCommand.h"
 
 #include <QInputDialog>
 #include <QLineEdit>
@@ -80,24 +81,55 @@ void ProjectBin::createNewBin()
     if (!ok || name.isEmpty())
         return;
 
+    // Only create as a sub-bin when a bin is *itself* explicitly selected.
+    // Previously this fell back to the selected item's PARENT bin, which
+    // meant clicking any sequence inside a sub-bin would silently make the
+    // new bin a sub-sub-bin of that folder — even with Ctrl+B. Now an
+    // ambiguous selection (a clip/sequence sitting in some bin) creates
+    // at the root.
     QTreeWidgetItem* targetParentBin = nullptr;
     if (auto* selected = m_listWidget ? m_listWidget->currentItem() : nullptr) {
         if (selected->data(0, Qt::UserRole + 2).toBool())
             targetParentBin = selected;
-        else if (selected->parent() && selected->parent()->data(0, Qt::UserRole + 2).toBool())
-            targetParentBin = selected->parent();
     }
 
     auto* binItem = projectBinCreateBinItem(name);
-    if (targetParentBin) {
-        targetParentBin->addChild(binItem);
-        targetParentBin->setExpanded(true);
-    } else {
-        m_listWidget->addTopLevelItem(binItem);
-    }
+    auto addToParent = [this, binItem, targetParentBin]() {
+        if (targetParentBin) {
+            targetParentBin->addChild(binItem);
+            targetParentBin->setExpanded(true);
+        } else if (m_listWidget) {
+            m_listWidget->addTopLevelItem(binItem);
+        }
+        if (m_listWidget) {
+            m_listWidget->setCurrentItem(binItem);
+            m_listWidget->scrollToItem(binItem);
+        }
+    };
+    auto removeFromParent = [this, binItem, targetParentBin]() {
+        if (targetParentBin) {
+            int idx = targetParentBin->indexOfChild(binItem);
+            if (idx >= 0) targetParentBin->takeChild(idx);
+        } else if (m_listWidget) {
+            int idx = m_listWidget->indexOfTopLevelItem(binItem);
+            if (idx >= 0) m_listWidget->takeTopLevelItem(idx);
+        }
+    };
 
-    m_listWidget->setCurrentItem(binItem);
-    m_listWidget->scrollToItem(binItem);
+    // Route through the command stack so Ctrl+Z removes the new bin and
+    // redo re-adds it to the same parent. The QTreeWidgetItem* is owned
+    // either by the tree (when added) or by no one (after take) — the
+    // command keeps a reference, deleting it only when the command
+    // itself dies while the item is detached.
+    if (m_commandStack) {
+        auto cmd = std::make_unique<LambdaCommand>(
+            std::string("New Bin"),
+            addToParent,
+            removeFromParent);
+        m_commandStack->execute(std::move(cmd));
+    } else {
+        addToParent();
+    }
 }
 
 // -----------------------------------------------------------------------------

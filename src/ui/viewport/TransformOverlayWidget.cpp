@@ -4,12 +4,17 @@
 
 #include "viewport/TransformOverlayWidget.h"
 #include "viewport/OverlayMath.h"
+#include "timeline/KeyframeTrack.h"
+#include "timeline/Position2D.h"
+#include "command/CommandStack.h"
+#include "command/commands/KeyframeCmds.h"
 
 #include <climits>
 #include "viewport/VulkanViewport.h"
 #include "timeline/OpacityMask.h"
 #include "Theme.h"
 
+#include <QLineEdit>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPen>
@@ -17,11 +22,16 @@
 #include <QWheelEvent>
 #include <QPolygonF>
 #include <QCoreApplication>
+#include <QGuiApplication>
 
 #include <algorithm>
 #include <cmath>
 
 #include <spdlog/spdlog.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace rt {
 
@@ -56,12 +66,25 @@ TransformOverlayWidget::TransformOverlayWidget(VulkanViewport* viewport,
 
 }
 
+TransformOverlayWidget::~TransformOverlayWidget()
+{
+    clearCursorOverride();  // never leave a dangling app override cursor
+    // m_inlineTextEdit is a parent-less top-level widget — delete it
+    // explicitly so it doesn't leak when the overlay is destroyed.
+    if (m_inlineTextEdit) {
+        m_inlineTextEdit->deleteLater();
+        m_inlineTextEdit = nullptr;
+    }
+}
+
 void TransformOverlayWidget::setEditTool(uint8_t tool) noexcept
 {
     m_editTool = tool;
     // Immediately apply the correct cursor when switching tools.
     if (tool == 8)  // zoom tool
         applyCursor(zoomCursor());
+    else if (tool == 6)  // text/type tool — I-beam like Premiere Pro
+        applyCursor(Qt::IBeamCursor);
     else
         applyCursor(Qt::ArrowCursor);
 }
@@ -71,6 +94,8 @@ void TransformOverlayWidget::enterEvent(QEnterEvent* /*event*/)
     // Re-apply tool cursor when mouse enters overlay area.
     if (m_editTool == 8)
         applyCursor(zoomCursor());
+    else if (m_editTool == 6)
+        applyCursor(Qt::IBeamCursor);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -80,6 +105,8 @@ void TransformOverlayWidget::enterEvent(QEnterEvent* /*event*/)
 void TransformOverlayWidget::setTransformOverlay(const TransformOverlayInfo& info)
 {
     m_overlay = info;
+    if (!info.visible)
+        clearCursorOverride();  // no selection → no special cursor
     update();
 }
 
@@ -91,6 +118,117 @@ void TransformOverlayWidget::clearTransformOverlay()
     update();
 }
 
+void TransformOverlayWidget::setMotionPathTracks(KeyframeTrack<float>* trackX,
+                                                  KeyframeTrack<float>* trackY,
+                                                  CommandStack* commandStack) noexcept
+{
+    m_motionX = trackX;
+    m_motionY = trackY;
+    m_motionCmdStack = commandStack;
+    update();
+}
+
+void TransformOverlayWidget::clearMotionPath() noexcept
+{
+    m_motionX = nullptr;
+    m_motionY = nullptr;
+    m_motionCmdStack = nullptr;
+    update();
+}
+
+QPointF TransformOverlayWidget::refToWidget(float refX, float refY, const QRectF& frameRect) const
+{
+    // REF-1920 keyframe values are offsets from frame center; convert to
+    // frame-space pixels (origin at top-left), then to widget pixels.
+    const float fxScale = (m_seqW > 0 ? static_cast<float>(m_seqW) : 1920.0f) / 1920.0f;
+    const float fyScale = (m_seqH > 0 ? static_cast<float>(m_seqH) : 1080.0f) / 1080.0f;
+    const float frameX  = refX * fxScale + static_cast<float>(m_seqW) * 0.5f;
+    const float frameY  = refY * fyScale + static_cast<float>(m_seqH) * 0.5f;
+
+    // Map frame -> widget using the same math frameToWidget() uses, but
+    // taking the frameRect we already have so we don't recompute it.
+    const float u = frameX / static_cast<float>(m_seqW > 0 ? m_seqW : 1);
+    const float v = frameY / static_cast<float>(m_seqH > 0 ? m_seqH : 1);
+    return { frameRect.left() + u * frameRect.width(),
+             frameRect.top()  + v * frameRect.height() };
+}
+
+QPointF TransformOverlayWidget::widgetToRef(const QPointF& widgetPos, const QRectF& frameRect) const
+{
+    if (frameRect.width() <= 0.0 || frameRect.height() <= 0.0)
+        return QPointF(0.0, 0.0);
+    const double u = (widgetPos.x() - frameRect.left()) / frameRect.width();
+    const double v = (widgetPos.y() - frameRect.top())  / frameRect.height();
+    const double seqW = (m_seqW > 0) ? static_cast<double>(m_seqW) : 1920.0;
+    const double seqH = (m_seqH > 0) ? static_cast<double>(m_seqH) : 1080.0;
+    const double frameX = u * seqW;
+    const double frameY = v * seqH;
+    // Inverse of refToWidget: refX = (frameX - seqW/2) * 1920 / seqW.
+    const double refX = (frameX - seqW * 0.5) * 1920.0 / seqW;
+    const double refY = (frameY - seqH * 0.5) * 1080.0 / seqH;
+    return { refX, refY };
+}
+
+bool TransformOverlayWidget::hitTestMotionHandle(const QPointF& widgetPos,
+                                                  int& outKfIdx, bool& outIsIn) const
+{
+    if (!m_motionX || !m_motionY) return false;
+    const size_t n = m_motionX->keyframeCount();
+    if (n < 2 || m_motionY->keyframeCount() != n) return false;
+    const QRectF fr = computeFrameRect();
+    constexpr double kHitRadius = 7.0;
+
+    for (size_t i = 0; i < n; ++i) {
+        const auto& kx = m_motionX->keyframe(i);
+        const auto& ky = m_motionY->keyframe(i);
+        if (kx.time != ky.time) continue;
+        const bool hasManual =
+            kx.spatialInterp == InterpMode::Bezier ||
+            kx.spatialInterp == InterpMode::ContinuousBezier;
+        if (!hasManual) continue;
+
+        // Out-handle: only on segments that have one (not the last keyframe).
+        if (i + 1 < n) {
+            QPointF pt = refToWidget(kx.value + kx.spatialOutX,
+                                     ky.value + ky.spatialOutY, fr);
+            if (QLineF(widgetPos, pt).length() <= kHitRadius) {
+                outKfIdx = static_cast<int>(i);
+                outIsIn  = false;
+                return true;
+            }
+        }
+        // In-handle: only on segments that have one (not the first keyframe).
+        if (i > 0) {
+            QPointF pt = refToWidget(kx.value + kx.spatialInX,
+                                     ky.value + ky.spatialInY, fr);
+            if (QLineF(widgetPos, pt).length() <= kHitRadius) {
+                outKfIdx = static_cast<int>(i);
+                outIsIn  = true;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+int TransformOverlayWidget::hitTestMotionWaypoint(const QPointF& widgetPos) const
+{
+    if (!m_motionX || !m_motionY) return -1;
+    const size_t nx = m_motionX->keyframeCount();
+    const size_t ny = m_motionY->keyframeCount();
+    if (nx < 2 || nx != ny) return -1;
+    QRectF fr = computeFrameRect();
+    constexpr double kHitRadius = 8.0;
+    for (size_t i = 0; i < nx; ++i) {
+        const auto& kx = m_motionX->keyframe(i);
+        const auto& ky = m_motionY->keyframe(i);
+        QPointF pt = refToWidget(kx.value, ky.value, fr);
+        if (QLineF(widgetPos, pt).length() <= kHitRadius)
+            return static_cast<int>(i);
+    }
+    return -1;
+}
+
 void TransformOverlayWidget::applyCursor(Qt::CursorShape shape)
 {
     applyCursor(QCursor(shape));
@@ -98,12 +236,35 @@ void TransformOverlayWidget::applyCursor(Qt::CursorShape shape)
 
 void TransformOverlayWidget::applyCursor(const QCursor& cursor)
 {
-    // Must set cursor on the native QWindow — it sits on top and receives
-    // all mouse events.  Setting it on 'this' (the transparent overlay
-    // widget behind it) has no visible effect.
-    if (m_vulkanVp && m_vulkanVp->nativeWindow())
-        m_vulkanVp->nativeWindow()->setCursor(cursor);
-    setCursor(cursor); // keep in sync for completeness
+    // Per-window setCursor on a createWindowContainer'd Vulkan QWindow
+    // races with Qt's own cursor handling on every mouse-move, making the
+    // cursor flicker.  The application OVERRIDE cursor is authoritative —
+    // Qt forces it regardless of native-window quirks, with no race.
+    //
+    // "Plain arrow" means: no special affordance → drop any override.
+    // Anything else (scale / rotate / zoom / pen) → install or swap a
+    // single override (stack depth stays 0 or 1, so it's always balanced).
+    const bool wantSpecial =
+        !(cursor.shape() == Qt::ArrowCursor && cursor.pixmap().isNull());
+
+    if (wantSpecial) {
+        if (m_haveCursorOverride)
+            QGuiApplication::changeOverrideCursor(cursor);
+        else {
+            QGuiApplication::setOverrideCursor(cursor);
+            m_haveCursorOverride = true;
+        }
+    } else {
+        clearCursorOverride();
+    }
+}
+
+void TransformOverlayWidget::clearCursorOverride()
+{
+    if (m_haveCursorOverride) {
+        QGuiApplication::restoreOverrideCursor();
+        m_haveCursorOverride = false;
+    }
 }
 
 QCursor TransformOverlayWidget::rotateCursor()
@@ -275,25 +436,45 @@ QRectF TransformOverlayWidget::computeFrameRect() const
 {
     if (!m_vulkanVp) return {};
 
-    // Use the native surface size (HWND client rect) — the swapchain renders
-    // at this resolution, and the OS stretches it to fill the HWND.  The
-    // overlay is also positioned to cover the HWND area (see
-    // syncOverlayGeometry), so normalised VkViewport coords map 1:1 to
-    // overlay pixels when multiplied by the surface size.
+    // The composite is drawn into the swapchain at the SURFACE (HWND)
+    // size — and on this code path the HWND can be positioned and sized
+    // differently from the QWidget container.  (Observed: HWND extends
+    // 39 px UPWARD past the QWidget; that part is hidden behind the
+    // panel header but the composite's gpuFrameRect is still relative
+    // to the full HWND.)  Query the HWND's actual screen rect and shift
+    // the gpuFrameRect mapping by (HWND.topLeft − widget.topLeft) so
+    // the box lands in the overlay's coordinate space and aligns with
+    // the actually-displayed composite.
     QSize surface = m_vulkanVp->nativeSurfaceSize();
-    double vpW = static_cast<double>(surface.width());
-    double vpH = static_cast<double>(surface.height());
-    if (vpW <= 0 || vpH <= 0) return {};
+    double surfW = static_cast<double>(surface.width());
+    double surfH = static_cast<double>(surface.height());
+    if (surfW <= 0 || surfH <= 0) return {};
+
+    QPoint widgetGlobal = m_vulkanVp->mapToGlobal(QPoint(0, 0));
+    double hwndOffX = 0.0;
+    double hwndOffY = 0.0;
+#ifdef _WIN32
+    if (auto* nw = m_vulkanVp->nativeWindow()) {
+        HWND hwnd = reinterpret_cast<HWND>(nw->winId());
+        if (hwnd) {
+            RECT wr;
+            if (GetWindowRect(hwnd, &wr)) {
+                hwndOffX = static_cast<double>(wr.left - widgetGlobal.x());
+                hwndOffY = static_cast<double>(wr.top  - widgetGlobal.y());
+            }
+        }
+    }
+#endif
 
     // Primary: GPU normalized rect (0-1 range from VkViewport / swapchain).
     QRectF norm = m_vulkanVp->gpuFrameRect();
     if (!norm.isEmpty()) {
         double ox = static_cast<double>(m_vpOffset.x());
         double oy = static_cast<double>(m_vpOffset.y());
-        return QRectF(norm.x()     * vpW - ox,
-                      norm.y()     * vpH - oy,
-                      norm.width() * vpW,
-                      norm.height()* vpH);
+        return QRectF(norm.x()     * surfW + hwndOffX - ox,
+                      norm.y()     * surfH + hwndOffY - oy,
+                      norm.width() * surfW,
+                      norm.height()* surfH);
     }
 
     // Fallback (before first present): surface-based aspect fit.
@@ -302,19 +483,21 @@ QRectF TransformOverlayWidget::computeFrameRect() const
     if (srcW <= 0 || srcH <= 0) return {};
 
     double imgAspect = srcW / srcH;
-    double winAspect = vpW / vpH;
+    double winAspect = surfW / surfH;
     double baseW, baseH, baseX, baseY;
     if (winAspect > imgAspect) {
-        baseH = vpH; baseW = vpH * imgAspect;
-        baseX = (vpW - baseW) * 0.5; baseY = 0.0;
+        baseH = surfH; baseW = surfH * imgAspect;
+        baseX = (surfW - baseW) * 0.5; baseY = 0.0;
     } else {
-        baseW = vpW; baseH = vpW / imgAspect;
-        baseX = 0.0; baseY = (vpH - baseH) * 0.5;
+        baseW = surfW; baseH = surfW / imgAspect;
+        baseX = 0.0; baseY = (surfH - baseH) * 0.5;
     }
 
     double ox = static_cast<double>(m_vpOffset.x());
     double oy = static_cast<double>(m_vpOffset.y());
-    return QRectF(baseX - ox, baseY - oy, baseW, baseH);
+    return QRectF(baseX + hwndOffX - ox,
+                  baseY + hwndOffY - oy,
+                  baseW, baseH);
 }
 
 QPointF TransformOverlayWidget::frameToWidget(const QPointF& fp) const
@@ -362,6 +545,7 @@ void TransformOverlayWidget::computeOverlayCorners(QPointF corners[4]) const
             float clipRadians = ov.clipRotation * 3.14159265358979f / 180.0f;
             float clipCosR = std::cos(clipRadians);
             float clipSinR = std::sin(clipRadians);
+            // Clip-level position is in REF-1920 px; scale into canvas space.
             float clipPxX = ov.clipPosX * (canvasW / 1920.0f);
             float clipPxY = ov.clipPosY * (canvasH / 1080.0f);
 
@@ -411,7 +595,7 @@ void TransformOverlayWidget::computeOverlayCorners(QPointF corners[4]) const
         return;
     }
 
-    // Scale positions from reference to output
+    // Scale positions from reference (1920×1080) to output.
     float posXPx = ov.posX * (outW / REF_W);
     float posYPx = ov.posY * (outH / REF_H);
 
@@ -462,25 +646,54 @@ void TransformOverlayWidget::computeOverlayCorners(QPointF corners[4]) const
 
 int TransformOverlayWidget::hitTestHandle(const QPointF& widgetPos) const
 {
-    constexpr double HANDLE_RADIUS = 8.0;
+    constexpr double HANDLE_RADIUS = 18.0;  // generous, easy to hit
     QPointF corners[4];
     computeOverlayCorners(corners);
+
+    // Centroid — same robustness pattern as hitTestRotate. For a small
+    // item the 4 corner-handle circles overlap the body's centre; without
+    // this check, clicking the centre matches a corner handle and starts
+    // a SCALE drag instead of a body MOVE, which the user perceives as a
+    // dead zone in the middle.
+    const QPointF center(
+        (corners[0].x() + corners[1].x() + corners[2].x() + corners[3].x()) * 0.25,
+        (corners[0].y() + corners[1].y() + corners[2].y() + corners[3].y()) * 0.25);
 
     for (int i = 0; i < 4; ++i) {
         double dx = widgetPos.x() - corners[i].x();
         double dy = widgetPos.y() - corners[i].y();
-        if (dx * dx + dy * dy <= HANDLE_RADIUS * HANDLE_RADIUS)
-            return i;
+        if (dx * dx + dy * dy > HANDLE_RADIUS * HANDLE_RADIUS) continue;
+
+        // Must be on the corner's OUTSIDE half (radially beyond the
+        // corner from the centroid), so the centre/body never qualifies.
+        const double pcDx = widgetPos.x() - center.x();
+        const double pcDy = widgetPos.y() - center.y();
+        const double kcDx = corners[i].x() - center.x();
+        const double kcDy = corners[i].y() - center.y();
+        if ((pcDx * pcDx + pcDy * pcDy) < (kcDx * kcDx + kcDy * kcDy)) continue;
+
+        return i;
     }
     return -1;
 }
 
 int TransformOverlayWidget::hitTestRotate(const QPointF& widgetPos) const
 {
-    constexpr double INNER_RADIUS = 8.0;   // same as handle hit radius
+    constexpr double INNER_RADIUS = 18.0;  // == handle radius: zones abut, no overlap
     constexpr double OUTER_RADIUS = 50.0;  // rotation zone extends this far from corner
     QPointF corners[4];
     computeOverlayCorners(corners);
+
+    // Box centroid. The rotation zone is the OUTSIDE of each corner, so a
+    // valid point must sit farther from the centroid than the corner does
+    // (radially beyond it). This is robust for small items where the fixed
+    // 50px corner rings would otherwise blanket the whole body — and where
+    // the winding-based hitTestBody() is numerically unreliable on a tiny
+    // or near-degenerate quad. The centroid itself can never qualify, so
+    // the rotate cursor no longer appears over a small item's centre.
+    const QPointF center(
+        (corners[0].x() + corners[1].x() + corners[2].x() + corners[3].x()) * 0.25,
+        (corners[0].y() + corners[1].y() + corners[2].y() + corners[3].y()) * 0.25);
 
     for (int i = 0; i < 4; ++i) {
         double dx = widgetPos.x() - corners[i].x();
@@ -489,9 +702,15 @@ int TransformOverlayWidget::hitTestRotate(const QPointF& widgetPos) const
         if (distSq > INNER_RADIUS * INNER_RADIUS &&
             distSq <= OUTER_RADIUS * OUTER_RADIUS)
         {
-            // Check that we're on the OUTSIDE of the bounding box
-            // (not inside the body). The point should be outside.
-            if (!hitTestBody(widgetPos))
+            const double pcDx = widgetPos.x() - center.x();
+            const double pcDy = widgetPos.y() - center.y();
+            const double kcDx = corners[i].x() - center.x();
+            const double kcDy = corners[i].y() - center.y();
+            const bool beyondCorner =
+                (pcDx * pcDx + pcDy * pcDy) >= (kcDx * kcDx + kcDy * kcDy);
+
+            // Outside the body AND radially beyond the corner.
+            if (beyondCorner && !hitTestBody(widgetPos))
                 return i;
         }
     }

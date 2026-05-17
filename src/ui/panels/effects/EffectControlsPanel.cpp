@@ -11,10 +11,11 @@
 
 #include "timeline/Clip.h"
 #include "timeline/AudioClip.h"
+#include "timeline/ImageClip.h"
+#include "timeline/VideoClip.h"
 #include "timeline/Track.h"
 #include "timeline/Timeline.h"
 #include "timeline/KeyframeTrack.h"
-#include "timeline/KeyframeMode.h"
 #include "media/PlaybackController.h"
 #include "command/CommandStack.h"
 #include "command/LambdaCommand.h"
@@ -82,6 +83,16 @@ void EffectControlsPanel::setClip(Clip* clip, Track* track)
 
         m_kfTimeline->setClip(clip);
         m_kfTimeline->setPropertyRows(m_propertyRows);
+
+        // Prime each PropertyRow's add/delete diamond click handler for the
+        // current playhead position. PropertyRow::updateForTime captures the
+        // time in the click lambda; without this initial call the diamond
+        // button has no connected slot until something else moves the
+        // playhead, so clicking it right after selecting a clip would do
+        // nothing.
+        const int64_t relTick = clipRelativeTick();
+        for (auto* row : m_propertyRows)
+            row->updateForTime(relTick);
 
         // Show property tree, hide empty state
         m_splitter->show();
@@ -156,7 +167,52 @@ void EffectControlsPanel::setPlayheadTick(int64_t tick)
 int64_t EffectControlsPanel::clipRelativeTick() const noexcept
 {
     if (!m_clip) return 0;
-    return m_playheadTick - m_clip->timelineIn();
+    // Prefer the Timeline's live playhead so a value edit fired right after
+    // a scrub (before setPlayheadTick has propagated through signals) still
+    // sees the *current* playhead and writes a new keyframe at the right
+    // time. Falls back to the cached m_playheadTick when no timeline is set.
+    const int64_t playhead = m_timeline ? m_timeline->playheadPosition()
+                                        : m_playheadTick;
+    return playhead - m_clip->timelineIn();
+}
+
+void EffectControlsPanel::syncValuesFromClip()
+{
+    if (!m_clip || m_updating) return;
+    m_updating = true;
+    populateFromClip();
+    m_updating = false;
+}
+
+double EffectControlsPanel::coverFitForCurrentClip() const noexcept
+{
+    // Default factor 1.0 → no conversion (existing fill-model display).
+    if (!m_clip || m_seqW == 0 || m_seqH == 0) return 1.0;
+
+    uint32_t srcW = 0, srcH = 0;
+    if (auto* ic = dynamic_cast<ImageClip*>(m_clip)) {
+        srcW = ic->sourceWidth();
+        srcH = ic->sourceHeight();
+    } else if (auto* vc = dynamic_cast<VideoClip*>(m_clip)) {
+        // Video CHARACTERS are composited with the baked 0.85 / containFit
+        // factor and don't have a meaningful native-pixel size; leave their
+        // Scale display on the fill model.
+        if (vc->isVideoCharacter()) return 1.0;
+        srcW = vc->sourceWidth();
+        srcH = vc->sourceHeight();
+    } else {
+        // SpineClip, TitleClip, GraphicClip, etc. — keep existing fill-model
+        // Scale numbers.  Their "native pixels" is either an arbitrary cache
+        // raster (spine) or a canvas-relative authoring unit (title/graphic).
+        return 1.0;
+    }
+
+    if (srcW == 0 || srcH == 0) return 1.0;
+
+    // Same factor the compositor's cover-fit applies under the hood.
+    const double sx = static_cast<double>(m_seqW) / static_cast<double>(srcW);
+    const double sy = static_cast<double>(m_seqH) / static_cast<double>(srcH);
+    return std::max(sx, sy);
 }
 
 
@@ -214,16 +270,26 @@ void EffectControlsPanel::applyTransformLive()
     };
 
     if (spin == m_posXSpin) {
-        writeTrack(m_clip->positionX(), static_cast<float>(spin->value()));
+        // Spin shows sequence pixels; convert back to REF-1920 px on write.
+        const double f = (m_seqW > 0 ? static_cast<double>(m_seqW) : 1920.0) / 1920.0;
+        writeTrack(m_clip->positionX(), static_cast<float>(spin->value() / f));
     } else if (spin == m_posYSpin) {
-        writeTrack(m_clip->positionY(), static_cast<float>(spin->value()));
+        const double f = (m_seqH > 0 ? static_cast<double>(m_seqH) : 1080.0) / 1080.0;
+        writeTrack(m_clip->positionY(), static_cast<float>(spin->value() / f));
     } else if (spin == m_scaleSpin) {
-        float s = static_cast<float>(spin->value() / 100.0);
+        // Spin shows Premiere-style native percentage; convert back to the
+        // engine's cover-fit-multiplier storage so the compositor renders
+        // exactly the same on-screen size the displayed number promises.
+        const double sf = coverFitForCurrentClip();
+        const double divisor = (sf > 0.0001) ? sf : 1.0;
+        float s = static_cast<float>(spin->value() / 100.0 / divisor);
         writeTrack(m_clip->scaleX(), s);
         if (m_uniformScaleCheck && m_uniformScaleCheck->isChecked())
             writeTrack(m_clip->scaleY(), s);
     } else if (spin == m_scaleWSpin) {
-        writeTrack(m_clip->scaleY(), static_cast<float>(spin->value() / 100.0));
+        const double sf = coverFitForCurrentClip();
+        const double divisor = (sf > 0.0001) ? sf : 1.0;
+        writeTrack(m_clip->scaleY(), static_cast<float>(spin->value() / 100.0 / divisor));
     } else if (spin == m_rotationSpin) {
         writeTrack(m_clip->rotation(), static_cast<float>(spin->value()));
     } else if (spin == m_opacitySpin) {
@@ -261,11 +327,20 @@ void EffectControlsPanel::commitTransform(double /*oldVal*/, double /*newVal*/)
     double factor = 1.0;  // spin-display-value = track-value * factor
     bool uniformScale = false;
 
-    if      (spin == m_posXSpin)     { track = &m_clip->positionX(); }
-    else if (spin == m_posYSpin)     { track = &m_clip->positionY(); }
-    else if (spin == m_scaleSpin)    { track = &m_clip->scaleX(); factor = 100.0;
+    if      (spin == m_posXSpin)     { track = &m_clip->positionX();
+                                       factor = (m_seqW > 0 ? static_cast<double>(m_seqW) : 1920.0) / 1920.0; }
+    else if (spin == m_posYSpin)     { track = &m_clip->positionY();
+                                       factor = (m_seqH > 0 ? static_cast<double>(m_seqH) : 1080.0) / 1080.0; }
+    else if (spin == m_scaleSpin)    { track = &m_clip->scaleX();
+                                       // displayed = stored × coverFit × 100,
+                                       // so factor (= displayed / stored) is
+                                       // 100 × coverFit.  Captured at commit
+                                       // time so the undo command replays
+                                       // with the same conversion used live.
+                                       factor = 100.0 * coverFitForCurrentClip();
                                        uniformScale = m_uniformScaleCheck && m_uniformScaleCheck->isChecked(); }
-    else if (spin == m_scaleWSpin)   { track = &m_clip->scaleY(); factor = 100.0; }
+    else if (spin == m_scaleWSpin)   { track = &m_clip->scaleY();
+                                       factor = 100.0 * coverFitForCurrentClip(); }
     else if (spin == m_rotationSpin) { track = &m_clip->rotation(); }
     else if (spin == m_opacitySpin)  { track = &m_clip->opacity(); factor = 100.0; }
     else if (spin == m_speedSpin) {
@@ -315,17 +390,15 @@ void EffectControlsPanel::commitTransform(double /*oldVal*/, double /*newVal*/)
     };
 
     bool createdKF = kfWasCreated(*trk, t, oldF);
-    // Auto-keyframe gate: with global Auto-Keyframe OFF (default), spinbox edits
-    // only update an existing keyframe at the playhead time on already-animated
-    // tracks. They do not create new keyframes mid-edit (Premiere-style).
-    const bool autoKf = KeyframeMode::isAutoEnabled();
-    bool wasAnimated = (trk->keyframeCount() > 0) && (autoKf || trk->hasKeyframeAt(t));
+    // Animated tracks (stopwatch ON) keyframe on every edit (Premiere-style),
+    // so the redo path must re-add the keyframe rather than touch the default.
+    bool wasAnimated = trk->keyframeCount() > 0;
 
     // Also handle uniform scale (mirror to scaleY)
     KeyframeTrack<float>* trkY = uniformScale ? &m_clip->scaleY() : nullptr;
     int64_t tY = trkY ? ((trkY->keyframeCount() > 0) ? clipRelativeTick() : 0) : 0;
     bool createdKFY = trkY ? kfWasCreated(*trkY, tY, oldF) : false;
-    bool wasAnimatedY = trkY && (trkY->keyframeCount() > 0) && (autoKf || trkY->hasKeyframeAt(tY));
+    bool wasAnimatedY = trkY && (trkY->keyframeCount() > 0);
 
     if (m_commandStack) {
         m_commandStack->pushWithoutExecute(std::make_unique<LambdaCommand>(
@@ -352,6 +425,118 @@ void EffectControlsPanel::commitTransform(double /*oldVal*/, double /*newVal*/)
                 panel->populateFromClip();
                 emit panel->propertyChanged();
             }));
+    }
+}
+
+
+void EffectControlsPanel::resetPropertyRow(PropertyRow* row)
+{
+    // Premiere Pro-style per-attribute reset: every value spin in the row is
+    // returned to the engine-native factory default and the property's
+    // keyframes are cleared, all as one undoable command.
+    if (!row || !m_clip) return;
+
+    const auto spins = row->findChildren<ScrubbySpinBox*>();
+    if (spins.isEmpty()) return;
+
+    // Full snapshot of one keyframe track so undo restores it exactly
+    // (default value + every keyframe, including bezier handles).
+    struct TrackSnap {
+        KeyframeTrack<float>*        trk;
+        float                        oldDefault;
+        std::vector<Keyframe<float>> oldKfs;
+        float                        factory;   // value to reset to
+    };
+    std::vector<TrackSnap> snaps;
+
+    auto addTrack = [&](KeyframeTrack<float>* trk, float factory) {
+        if (!trk) return;
+        for (const auto& s : snaps) if (s.trk == trk) return;  // dedupe
+        snaps.push_back({trk, trk->defaultValue(), trk->keyframes(), factory});
+    };
+
+    auto* audio = dynamic_cast<AudioClip*>(m_clip);
+    bool  resetSpeed = false;
+
+    for (auto* spin : spins) {
+        if      (spin == m_posXSpin)                 addTrack(&m_clip->positionX(), 0.0f);
+        else if (spin == m_posYSpin)                 addTrack(&m_clip->positionY(), 0.0f);
+        else if (spin == m_scaleSpin)                addTrack(&m_clip->scaleX(),    1.0f);
+        else if (spin == m_scaleWSpin)               addTrack(&m_clip->scaleY(),    1.0f);
+        else if (spin == m_rotationSpin)             addTrack(&m_clip->rotation(),  0.0f);
+        else if (spin == m_opacitySpin)              addTrack(&m_clip->opacity(),   1.0f);
+        else if (spin == m_speedSpin)                resetSpeed = true;
+        else if (audio && spin == m_panSpin)         addTrack(&audio->pan(),        0.0f);
+        else if (audio && spin == m_audioVolumeSpin) addTrack(&audio->volume(),     1.0f);
+    }
+
+    // Scale and Scale Width share a lock — reset the companion too so the
+    // displayed pair stays consistent.
+    const bool uniform = m_uniformScaleCheck && m_uniformScaleCheck->isChecked();
+    if (uniform) {
+        bool touchedScale = false;
+        for (const auto& s : snaps)
+            if (s.trk == &m_clip->scaleX() || s.trk == &m_clip->scaleY())
+                touchedScale = true;
+        if (touchedScale) {
+            addTrack(&m_clip->scaleX(), 1.0f);
+            addTrack(&m_clip->scaleY(), 1.0f);
+        }
+    }
+
+    if (snaps.empty() && !resetSpeed) {
+        // Crop / anchor / anti-flicker rows are not keyframe-backed; just
+        // restore their displayed default (best effort, matches the
+        // section-reset behaviour) without polluting the undo stack.
+        for (auto* spin : spins) {
+            spin->blockSignals(true);
+            spin->setValue(0.0);
+            spin->blockSignals(false);
+        }
+        applyTransformLive();
+        emit propertyChanged();
+        return;
+    }
+
+    const double oldSpeed = m_clip->speed();
+    auto* panel = this;
+    Clip* clip  = m_clip;
+
+    auto apply = [clip, panel](bool toFactory,
+                               const std::vector<TrackSnap>& src) {
+        for (const auto& s : src) {
+            while (s.trk->keyframeCount() > 0) s.trk->removeKeyframe(0);
+            if (toFactory) {
+                s.trk->setDefaultValue(s.factory);
+            } else {
+                s.trk->setDefaultValue(s.oldDefault);
+                for (const auto& kf : s.oldKfs) s.trk->restoreKeyframe(kf);
+            }
+        }
+        panel->populateFromClip();
+        emit panel->propertyChanged();
+        if (auto* ac = dynamic_cast<AudioClip*>(clip))
+            emit panel->audioLevelsChanged(
+                ac->id(),
+                ac->volume().evaluate(panel->clipRelativeTick()),
+                ac->pan().evaluate(panel->clipRelativeTick()));
+    };
+
+    auto doReset = [apply, snaps, resetSpeed, clip]() {
+        if (resetSpeed) clip->setSpeed(1.0);
+        apply(true, snaps);
+    };
+    auto undoReset = [apply, snaps, resetSpeed, clip, oldSpeed]() {
+        if (resetSpeed) clip->setSpeed(oldSpeed);
+        apply(false, snaps);
+    };
+
+    if (m_commandStack) {
+        m_commandStack->execute(std::make_unique<LambdaCommand>(
+            QStringLiteral("Reset %1").arg(row->propertyName()).toStdString(),
+            doReset, undoReset));
+    } else {
+        doReset();
     }
 }
 

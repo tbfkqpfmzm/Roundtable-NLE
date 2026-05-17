@@ -262,13 +262,15 @@ void TimelinePanel::mouseReleaseEvent(QMouseEvent* event)
         if (m_ghostOverlay) m_ghostOverlay->hide();
 
         if (didMove) {
-            if (newTrackIndex != SIZE_MAX) {
-                // Ghost track was inserted — add one widget incrementally
-                // instead of full rebuildTracks() to avoid the blank flash.
-                insertTrackWidgetIncremental(newTrackIndex);
-            } else {
-                rebuildTracks();
-            }
+            // Always do a full rebuild after a ghost-track drop.
+            // insertTrackWidgetIncremental() reassigned every existing
+            // widget to the POST-insert track index before inserting the
+            // new widget, so all existing widgets ended up off-by-one —
+            // one of them showed the new track's clip too, which looked
+            // like a duplicate clip on a phantom track at the very top.
+            // A full rebuild keeps widgets perfectly in sync with the
+            // model (a brief flash is far better than a phantom track).
+            rebuildTracks();
             emit selectionChanged();
         }
     }

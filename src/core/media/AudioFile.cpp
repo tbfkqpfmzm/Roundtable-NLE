@@ -17,16 +17,225 @@
 #ifdef ROUNDTABLE_HAS_FFMPEG
 extern "C" {
 #include <libavformat/avformat.h>
+#include <libavformat/avio.h>
 #include <libavcodec/avcodec.h>
 #include <libswresample/swresample.h>
+#include <libavutil/error.h>
+#include <libavutil/mem.h>
 #include <libavutil/opt.h>
 #include <libavutil/channel_layout.h>
 }
 #endif
 
+// Shared-mode file open helpers (used by both FFmpeg and libsndfile
+// backends, so the includes live outside the FFmpeg-only guard).
+#include <cstdio>
+#include <cerrno>
+#ifdef _WIN32
+  #include <io.h>
+  #include <fcntl.h>
+  #include <windows.h>
+#endif
+
 namespace rt {
 
 namespace {
+
+// Shared-mode file open — bypass MSVCRT on Windows (raw HANDLE + Win32
+// ReadFile / SetFilePointerEx) so FILE_SHARE_DELETE is GUARANTEED to be
+// honored. Earlier _fdopen-based approach worked in theory but at least
+// one MSVCRT path strips the share state once the CRT wraps the
+// descriptor, which is why the lock persisted after we thought we'd
+// fixed it. The HANDLE we hold here is the only kernel object for the
+// open and its share mask never changes.
+//
+// On POSIX this collapses to a regular FILE* — POSIX has no exclusive
+// open by default, so there's nothing to fix there.
+
+#ifdef _WIN32
+using SharedFileHandle = HANDLE;
+// const (not constexpr): INVALID_HANDLE_VALUE casts (LONG_PTR)-1 to a
+// pointer, which isn't a core constant expression under MSVC C++17/20.
+const SharedFileHandle kInvalidShared = INVALID_HANDLE_VALUE;
+#else
+using SharedFileHandle = FILE*;
+constexpr SharedFileHandle kInvalidShared = nullptr;
+#endif
+
+SharedFileHandle openSharedReadHandle(const std::filesystem::path& p)
+{
+#ifdef _WIN32
+    HANDLE h = ::CreateFileW(p.wstring().c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    // Share-mode self-test — see VideoDecoderInit.cpp for the rationale.
+    if (h != INVALID_HANDLE_VALUE) {
+        HANDLE h2 = ::CreateFileW(p.wstring().c_str(),
+            DELETE | SYNCHRONIZE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h2 != INVALID_HANDLE_VALUE) {
+            spdlog::info("AudioFile: share-mode self-test PASSED '{}'",
+                         p.string());
+            ::CloseHandle(h2);
+        } else {
+            DWORD err = ::GetLastError();
+            spdlog::warn("AudioFile: share-mode self-test FAILED '{}' "
+                         "GetLastError={} — FILE_SHARE_DELETE not active",
+                         p.string(), err);
+        }
+    }
+    return h;
+#else
+    return std::fopen(p.string().c_str(), "rb");
+#endif
+}
+
+void closeSharedHandle(SharedFileHandle h)
+{
+    if (h == kInvalidShared) return;
+#ifdef _WIN32
+    ::CloseHandle(h);
+#else
+    std::fclose(h);
+#endif
+}
+
+#ifdef ROUNDTABLE_HAS_FFMPEG
+constexpr int kAudioAvioBufSize = 32 * 1024;
+
+int audioAvioRead(void* opaque, uint8_t* buf, int bufSize)
+{
+#ifdef _WIN32
+    HANDLE h = static_cast<HANDLE>(opaque);
+    DWORD got = 0;
+    if (!::ReadFile(h, buf, static_cast<DWORD>(bufSize), &got, nullptr))
+        return AVERROR(EIO);
+    if (got == 0) return AVERROR_EOF;
+    return static_cast<int>(got);
+#else
+    FILE* fp = static_cast<FILE*>(opaque);
+    size_t n = std::fread(buf, 1, static_cast<size_t>(bufSize), fp);
+    if (n == 0) {
+        if (std::feof(fp)) return AVERROR_EOF;
+        return AVERROR(errno ? errno : EIO);
+    }
+    return static_cast<int>(n);
+#endif
+}
+
+int64_t audioAvioSeek(void* opaque, int64_t offset, int whence)
+{
+#ifdef _WIN32
+    HANDLE h = static_cast<HANDLE>(opaque);
+    if (whence == AVSEEK_SIZE) {
+        LARGE_INTEGER sz;
+        if (!::GetFileSizeEx(h, &sz)) return AVERROR(EIO);
+        return sz.QuadPart;
+    }
+    DWORD mode = FILE_BEGIN;
+    switch (whence & ~AVSEEK_FORCE) {
+        case SEEK_SET: mode = FILE_BEGIN;   break;
+        case SEEK_CUR: mode = FILE_CURRENT; break;
+        case SEEK_END: mode = FILE_END;     break;
+        default: return AVERROR(EINVAL);
+    }
+    LARGE_INTEGER off;    off.QuadPart    = offset;
+    LARGE_INTEGER newPos; newPos.QuadPart = 0;
+    if (!::SetFilePointerEx(h, off, &newPos, mode))
+        return AVERROR(EIO);
+    return newPos.QuadPart;
+#else
+    FILE* fp = static_cast<FILE*>(opaque);
+    if (whence == AVSEEK_SIZE) {
+        long cur = std::ftell(fp);
+        if (std::fseek(fp, 0, SEEK_END) != 0) return AVERROR(errno);
+        long sz = std::ftell(fp);
+        std::fseek(fp, cur, SEEK_SET);
+        return sz < 0 ? AVERROR(errno) : sz;
+    }
+    int stdWhence = SEEK_SET;
+    switch (whence & ~AVSEEK_FORCE) {
+        case SEEK_SET: stdWhence = SEEK_SET; break;
+        case SEEK_CUR: stdWhence = SEEK_CUR; break;
+        case SEEK_END: stdWhence = SEEK_END; break;
+        default: return AVERROR(EINVAL);
+    }
+    if (std::fseek(fp, static_cast<long>(offset), stdWhence) != 0)
+        return AVERROR(errno);
+    return std::ftell(fp);
+#endif
+}
+#endif // ROUNDTABLE_HAS_FFMPEG
+
+#ifdef ROUNDTABLE_HAS_SNDFILE
+// libsndfile virtual IO bound to a raw Win32 HANDLE — bypasses MSVCRT
+// entirely so FILE_SHARE_DELETE / FILE_SHARE_WRITE are kept on the
+// kernel object for the lifetime of the open. (Reusing the same raw-
+// HANDLE pattern as the FFmpeg path above.)
+
+sf_count_t sfVioGetFilelen(void* ud) {
+#ifdef _WIN32
+    HANDLE h = static_cast<HANDLE>(ud);
+    LARGE_INTEGER sz;
+    if (!::GetFileSizeEx(h, &sz)) return -1;
+    return static_cast<sf_count_t>(sz.QuadPart);
+#else
+    FILE* fp = static_cast<FILE*>(ud);
+    long cur = std::ftell(fp);
+    std::fseek(fp, 0, SEEK_END);
+    long end = std::ftell(fp);
+    std::fseek(fp, cur, SEEK_SET);
+    return end;
+#endif
+}
+sf_count_t sfVioSeek(sf_count_t off, int whence, void* ud) {
+#ifdef _WIN32
+    HANDLE h = static_cast<HANDLE>(ud);
+    DWORD mode = FILE_BEGIN;
+    switch (whence) {
+        case SEEK_SET: mode = FILE_BEGIN;   break;
+        case SEEK_CUR: mode = FILE_CURRENT; break;
+        case SEEK_END: mode = FILE_END;     break;
+        default: return -1;
+    }
+    LARGE_INTEGER liOff;    liOff.QuadPart    = off;
+    LARGE_INTEGER liNewPos; liNewPos.QuadPart = 0;
+    if (!::SetFilePointerEx(h, liOff, &liNewPos, mode)) return -1;
+    return static_cast<sf_count_t>(liNewPos.QuadPart);
+#else
+    FILE* fp = static_cast<FILE*>(ud);
+    if (std::fseek(fp, static_cast<long>(off), whence) != 0) return -1;
+    return std::ftell(fp);
+#endif
+}
+sf_count_t sfVioRead(void* ptr, sf_count_t count, void* ud) {
+#ifdef _WIN32
+    HANDLE h = static_cast<HANDLE>(ud);
+    DWORD got = 0;
+    if (!::ReadFile(h, ptr, static_cast<DWORD>(count), &got, nullptr)) return -1;
+    return static_cast<sf_count_t>(got);
+#else
+    FILE* fp = static_cast<FILE*>(ud);
+    return static_cast<sf_count_t>(
+        std::fread(ptr, 1, static_cast<size_t>(count), fp));
+#endif
+}
+sf_count_t sfVioTell(void* ud) {
+#ifdef _WIN32
+    HANDLE h = static_cast<HANDLE>(ud);
+    LARGE_INTEGER zero; zero.QuadPart = 0;
+    LARGE_INTEGER pos;  pos.QuadPart  = 0;
+    if (!::SetFilePointerEx(h, zero, &pos, FILE_CURRENT)) return -1;
+    return static_cast<sf_count_t>(pos.QuadPart);
+#else
+    FILE* fp = static_cast<FILE*>(ud);
+    return std::ftell(fp);
+#endif
+}
+#endif // ROUNDTABLE_HAS_SNDFILE
+
 
 std::vector<float> resampleInterleavedLinear(const std::vector<float>& samples,
                                              uint16_t channels,
@@ -124,6 +333,11 @@ struct AudioFile::Impl
 #ifdef ROUNDTABLE_HAS_SNDFILE
     SNDFILE*  sndFile{nullptr};
     SF_INFO   sfInfo{};
+    // libsndfile doesn't take ownership of the user data we pass to
+    // sf_open_virtual, so we own + close it alongside sndFile.
+    // On Windows this is a raw HANDLE; on POSIX a FILE*. Stored as
+    // void* so the struct doesn't need to know which platform.
+    void*     sndFileFP{nullptr};
 #endif
 
 #ifdef ROUNDTABLE_HAS_FFMPEG
@@ -131,6 +345,13 @@ struct AudioFile::Impl
     AVCodecContext*   codecCtx{nullptr};
     int               audioStreamIdx{-1};
     SwrContext*       swrCtx{nullptr};
+
+    // Custom AVIO so the source file is opened with full Windows share
+    // access (read | write | delete). See VideoDecoderInit.cpp for the
+    // full rationale — same fix, parallel decoder. avioFile holds a
+    // raw HANDLE on Windows / FILE* on POSIX.
+    AVIOContext*      avioCtx{nullptr};
+    void*             avioFile{nullptr};
 #endif
 };
 
@@ -202,6 +423,11 @@ void AudioFile::close()
         m_impl->sndFile = nullptr;
         m_impl->sfInfo  = {};
     }
+    // Close the shared-mode handle that backed sf_open_virtual.
+    if (m_impl->sndFileFP) {
+        closeSharedHandle(static_cast<SharedFileHandle>(m_impl->sndFileFP));
+        m_impl->sndFileFP = nullptr;
+    }
 #endif
 
 #ifdef ROUNDTABLE_HAS_FFMPEG
@@ -213,6 +439,18 @@ void AudioFile::close()
     }
     if (m_impl->fmtCtx) {
         avformat_close_input(&m_impl->fmtCtx);
+    }
+    // Tear down custom AVIO + shared FILE. AVFMT_FLAG_CUSTOM_IO means
+    // avformat_close_input does NOT free our AVIOContext.
+    if (m_impl->avioCtx) {
+        av_freep(&m_impl->avioCtx->buffer);
+        AVIOContext* tmp = m_impl->avioCtx;
+        avio_context_free(&tmp);
+        m_impl->avioCtx = nullptr;
+    }
+    if (m_impl->avioFile) {
+        closeSharedHandle(static_cast<SharedFileHandle>(m_impl->avioFile));
+        m_impl->avioFile = nullptr;
     }
     m_impl->audioStreamIdx = -1;
 #endif
@@ -464,10 +702,33 @@ bool AudioFile::openSndfile([[maybe_unused]] const std::filesystem::path& path)
 {
 #ifdef ROUNDTABLE_HAS_SNDFILE
     m_impl->sfInfo = {};
-    m_impl->sndFile = sf_open(path.string().c_str(), SFM_READ, &m_impl->sfInfo);
+
+    // Open the file ourselves in shared mode (read|write|delete) and
+    // hand libsndfile a virtual IO bound to that FILE*. sf_open() would
+    // open via default fopen and re-lock the file on Windows, defeating
+    // the un-lock work done for the FFmpeg path.
+    SharedFileHandle sndHandle = openSharedReadHandle(path);
+    if (sndHandle == kInvalidShared) {
+        m_lastError = "Cannot open audio file (shared mode): " + path.string();
+        return false;
+    }
+    m_impl->sndFileFP = static_cast<void*>(sndHandle);
+    spdlog::info("AudioFile/sndfile: shared-mode open '{}' (raw HANDLE)", path.string());
+
+    SF_VIRTUAL_IO vio;
+    vio.get_filelen = &sfVioGetFilelen;
+    vio.seek        = &sfVioSeek;
+    vio.read        = &sfVioRead;
+    vio.write       = nullptr;
+    vio.tell        = &sfVioTell;
+
+    m_impl->sndFile = sf_open_virtual(&vio, SFM_READ, &m_impl->sfInfo,
+                                      m_impl->sndFileFP);
 
     if (!m_impl->sndFile) {
         m_lastError = sf_strerror(nullptr);
+        closeSharedHandle(static_cast<SharedFileHandle>(m_impl->sndFileFP));
+        m_impl->sndFileFP = nullptr;
         return false;
     }
 
@@ -515,12 +776,63 @@ bool AudioFile::openSndfile([[maybe_unused]] const std::filesystem::path& path)
 bool AudioFile::openFFmpeg([[maybe_unused]] const std::filesystem::path& path)
 {
 #ifdef ROUNDTABLE_HAS_FFMPEG
+    // Shared-mode open + custom AVIO (see header for rationale).
+    SharedFileHandle sh = openSharedReadHandle(path);
+    if (sh == kInvalidShared) {
+        m_lastError = "Cannot open audio file (shared mode): " + path.string();
+        return false;
+    }
+    m_impl->avioFile = static_cast<void*>(sh);
+    spdlog::info("AudioFile/FFmpeg: shared-mode open '{}' (raw HANDLE)", path.string());
+
+    auto* buf = static_cast<uint8_t*>(av_malloc(kAudioAvioBufSize));
+    if (!buf) {
+        closeSharedHandle(sh);
+        m_impl->avioFile = nullptr;
+        m_lastError = "av_malloc(AVIO buffer) failed";
+        return false;
+    }
+
+    m_impl->avioCtx = avio_alloc_context(buf, kAudioAvioBufSize,
+                                         /*write_flag=*/0,
+                                         /*opaque=*/static_cast<void*>(sh),
+                                         &audioAvioRead,
+                                         /*write_packet=*/nullptr,
+                                         &audioAvioSeek);
+    if (!m_impl->avioCtx) {
+        av_free(buf);
+        closeSharedHandle(sh);
+        m_impl->avioFile = nullptr;
+        m_lastError = "avio_alloc_context failed";
+        return false;
+    }
+
+    m_impl->fmtCtx = avformat_alloc_context();
+    if (!m_impl->fmtCtx) {
+        av_freep(&m_impl->avioCtx->buffer);
+        avio_context_free(&m_impl->avioCtx);
+        closeSharedHandle(sh);
+        m_impl->avioFile = nullptr;
+        m_lastError = "avformat_alloc_context failed";
+        return false;
+    }
+    m_impl->fmtCtx->pb     = m_impl->avioCtx;
+    m_impl->fmtCtx->flags |= AVFMT_FLAG_CUSTOM_IO;
+
     int ret = avformat_open_input(&m_impl->fmtCtx, path.string().c_str(),
                                   nullptr, nullptr);
     if (ret < 0) {
         char errbuf[256];
         av_strerror(ret, errbuf, sizeof(errbuf));
         m_lastError = std::string("FFmpeg open error: ") + errbuf;
+        // avformat_open_input frees fmtCtx on failure; our AVIO + handle
+        // are independent and still need teardown.
+        if (m_impl->avioCtx) {
+            av_freep(&m_impl->avioCtx->buffer);
+            avio_context_free(&m_impl->avioCtx);
+        }
+        closeSharedHandle(sh);
+        m_impl->avioFile = nullptr;
         return false;
     }
 

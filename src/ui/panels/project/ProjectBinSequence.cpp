@@ -9,6 +9,8 @@
 #include "panels/project/ProjectBin.h"
 #include "Theme.h"
 #include "widgets/MediaDragTreeWidget.h"
+#include "widgets/ThumbnailGrid.h"
+#include "media/ThumbnailGenerator.h"
 #include "project/Project.h"
 #include "project/Settings.h"
 #include "timeline/Timeline.h"
@@ -36,6 +38,68 @@
 #include <filesystem>
 
 namespace rt {
+
+namespace {
+// Write a solid-colour matte PNG of the given size. Returns false on
+// failure. Shared by createColorMatte() and editColorMatte().
+bool writeMattePng(const std::filesystem::path& path,
+                   const QColor& color, int w, int h)
+{
+    if (w <= 0 || h <= 0) { w = 1920; h = 1080; }
+    QImage img(w, h, QImage::Format_ARGB32_Premultiplied);
+    img.fill(color);
+    return img.save(QString::fromStdString(path.string()), "PNG");
+}
+} // namespace
+
+bool ProjectBin::isColorMatte(const std::filesystem::path& path)
+{
+    for (const auto& part : path) {
+        std::string s = part.string();
+        std::transform(s.begin(), s.end(), s.begin(),
+                       [](unsigned char c){ return std::tolower(c); });
+        if (s == "mattes") return true;
+    }
+    return false;
+}
+
+void ProjectBin::editColorMatte(const std::filesystem::path& mattePath)
+{
+    // Seed the picker with the matte's current colour and preserve its
+    // dimensions so the edit is a pure recolour.
+    QImage current(QString::fromStdString(mattePath.string()));
+    QColor seed = current.isNull() ? QColor(Qt::white)
+                                   : current.pixelColor(0, 0);
+    int w = current.isNull() ? 1920 : current.width();
+    int h = current.isNull() ? 1080 : current.height();
+
+    QColor color = QColorDialog::getColor(
+        seed, this, tr("Color Matte"), QColorDialog::ShowAlphaChannel);
+    if (!color.isValid())
+        return;
+
+    if (!writeMattePng(mattePath, color, w, h)) {
+        spdlog::error("Failed to rewrite color matte: {}", mattePath.string());
+        QMessageBox::warning(this, tr("Error"),
+                             tr("Failed to update color matte image."));
+        return;
+    }
+    spdlog::info("ProjectBin: recoloured matte '{}'", mattePath.string());
+
+    // Re-decode everywhere it's used (timeline/program monitor) — handled
+    // by the MainWindow listener.
+    emit mediaContentChanged(mattePath);
+
+    // Refresh the bin's own thumbnail for this file.
+    if (m_generator) m_generator->clearCache();
+    if (m_grid) {
+        for (auto& gi : m_grid->mutableItems())
+            if (!gi.isFolder && gi.filePath == mattePath)
+                gi.thumbnail.reset();
+        m_grid->loadVisibleThumbnails();
+    }
+    syncListView();
+}
 
 // =============================================================================
 //  Sequence creation
@@ -312,9 +376,7 @@ void ProjectBin::createColorMatte()
     }
 
     // 5. Create the solid-color PNG (1920x1080 like Premiere's default)
-    QImage matteImage(1920, 1080, QImage::Format_ARGB32_Premultiplied);
-    matteImage.fill(color);
-    if (!matteImage.save(QString::fromStdString(mattePath.string()), "PNG")) {
+    if (!writeMattePng(mattePath, color, 1920, 1080)) {
         spdlog::error("Failed to save color matte: {}", mattePath.string());
         QMessageBox::warning(this, tr("Error"),
                              tr("Failed to save color matte image."));

@@ -29,7 +29,6 @@ add_library(roundtable_core STATIC
     timeline/Transition.cpp
     timeline/Keyframe.cpp
     timeline/KeyframeTrack.cpp
-    timeline/KeyframeMode.cpp
     timeline/MediaRelinker.cpp
     timeline/Marker.cpp
     timeline/EditOperations.cpp

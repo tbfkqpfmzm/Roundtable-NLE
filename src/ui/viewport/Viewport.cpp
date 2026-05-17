@@ -16,6 +16,9 @@
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <QResizeEvent>
+#include <QPixmap>
+#include <QPolygonF>
+#include <QCursor>
 
 #include <algorithm>
 #include <cmath>
@@ -365,7 +368,29 @@ void Viewport::mousePressEvent(QMouseEvent* event)
             m_dragStartPosY = m_transformOverlay.posY;
             m_dragStartScX  = m_transformOverlay.scaleX;
             m_dragStartScY  = m_transformOverlay.scaleY;
+            m_dragStartRot  = m_transformOverlay.rotation;
             setCursor(Qt::SizeFDiagCursor);
+            return;
+        }
+
+        // Rotation zone — just OUTSIDE a corner (Premiere-style)
+        int rotHandle = hitTestRotate(wPos);
+        if (rotHandle >= 0) {
+            m_dragMode = DragMode::RotateCorner;
+            m_dragHandle = rotHandle;
+            m_dragStartWidget = wPos;
+            m_dragStartPosX = m_transformOverlay.posX;
+            m_dragStartPosY = m_transformOverlay.posY;
+            m_dragStartScX  = m_transformOverlay.scaleX;
+            m_dragStartScY  = m_transformOverlay.scaleY;
+            m_dragStartRot  = m_transformOverlay.rotation;
+            QPointF corners[4];
+            computeOverlayCorners(corners);
+            QPointF center = (corners[0] + corners[2]) * 0.5;
+            m_dragStartAngle = static_cast<float>(
+                std::atan2(wPos.y() - center.y(), wPos.x() - center.x())
+                * 180.0 / 3.14159265358979);
+            setCursor(rotateCursor());
             return;
         }
 
@@ -377,7 +402,8 @@ void Viewport::mousePressEvent(QMouseEvent* event)
             m_dragStartPosY = m_transformOverlay.posY;
             m_dragStartScX  = m_transformOverlay.scaleX;
             m_dragStartScY  = m_transformOverlay.scaleY;
-            setCursor(Qt::ClosedHandCursor);
+            m_dragStartRot  = m_transformOverlay.rotation;
+            setCursor(Qt::ArrowCursor);   // no special move cursor
             return;
         }
     }
@@ -463,15 +489,34 @@ void Viewport::mouseMoveEvent(QMouseEvent* event)
         return;
     }
 
+    if (m_dragMode == DragMode::RotateCorner && (event->buttons() & Qt::LeftButton))
+    {
+        QPointF corners[4];
+        computeOverlayCorners(corners);
+        QPointF center = (corners[0] + corners[2]) * 0.5;
+
+        float curAngle = static_cast<float>(
+            std::atan2(wPos.y() - center.y(), wPos.x() - center.x())
+            * 180.0 / 3.14159265358979);
+        float deltaAngle = curAngle - m_dragStartAngle;
+        while (deltaAngle >  180.0f) deltaAngle -= 360.0f;
+        while (deltaAngle < -180.0f) deltaAngle += 360.0f;
+
+        m_transformOverlay.rotation = m_dragStartRot + deltaAngle;
+        emit transformRotationChanged(m_transformOverlay.rotation);
+        update();
+        return;
+    }
+
     // ── Cursor hint when hovering ───────────────────────────────────────
     if (m_transformOverlay.visible && m_dragMode == DragMode::None)
     {
         if (hitTestHandle(wPos) >= 0)
             setCursor(Qt::SizeFDiagCursor);
-        else if (hitTestBody(wPos))
-            setCursor(Qt::OpenHandCursor);
+        else if (hitTestRotate(wPos) >= 0)
+            setCursor(rotateCursor());
         else
-            setCursor(Qt::ArrowCursor);
+            setCursor(Qt::ArrowCursor);   // body = plain arrow (no hand)
     }
 
     QPointF fp = widgetToFrame(wPos);
@@ -498,7 +543,7 @@ void Viewport::mouseReleaseEvent(QMouseEvent* event)
         float oldSX = m_dragStartScX,  oldSY = m_dragStartScY;
         float newPX = m_transformOverlay.posX, newPY = m_transformOverlay.posY;
         float newSX = m_transformOverlay.scaleX, newSY = m_transformOverlay.scaleY;
-        float oldRot = m_transformOverlay.rotation; // CPU viewport doesn't support rotation drag yet
+        float oldRot = m_dragStartRot;
         float newRot = m_transformOverlay.rotation;
         m_dragMode = DragMode::None;
         setCursor(Qt::ArrowCursor);
@@ -653,6 +698,90 @@ bool Viewport::hitTestBody(const QPointF& widgetPos) const
 {
     const QPointF* corners = getCachedCorners();
     return rt::hitTestBody(widgetPos, corners);
+}
+
+int Viewport::hitTestRotate(const QPointF& widgetPos) const
+{
+    // Mirrors TransformOverlayWidget::hitTestRotate (GPU path): a ring
+    // just OUTSIDE each corner handle is the Premiere-style rotation zone.
+    constexpr double INNER_RADIUS = 18.0;  // == corner-handle hit radius (zones abut)
+    constexpr double OUTER_RADIUS = 50.0;  // rotation zone reach from corner
+    const QPointF* corners = getCachedCorners();
+    // Centroid: a rotate point must be radially beyond the corner (outside
+    // the box). This keeps the rotate zone off the centre/body of small
+    // items, where the fixed 50px rings would otherwise cover everything
+    // and the winding-based hitTestBody() is unreliable on a tiny quad.
+    const QPointF center(
+        (corners[0].x() + corners[1].x() + corners[2].x() + corners[3].x()) * 0.25,
+        (corners[0].y() + corners[1].y() + corners[2].y() + corners[3].y()) * 0.25);
+    for (int i = 0; i < 4; ++i) {
+        double dx = widgetPos.x() - corners[i].x();
+        double dy = widgetPos.y() - corners[i].y();
+        double distSq = dx * dx + dy * dy;
+        const double pcDx = widgetPos.x() - center.x();
+        const double pcDy = widgetPos.y() - center.y();
+        const double kcDx = corners[i].x() - center.x();
+        const double kcDy = corners[i].y() - center.y();
+        const bool beyondCorner =
+            (pcDx * pcDx + pcDy * pcDy) >= (kcDx * kcDx + kcDy * kcDy);
+        if (distSq > INNER_RADIUS * INNER_RADIUS &&
+            distSq <= OUTER_RADIUS * OUTER_RADIUS &&
+            beyondCorner &&
+            !rt::hitTestBody(widgetPos, corners))   // must be outside the box
+            return i;
+    }
+    return -1;
+}
+
+QCursor Viewport::rotateCursor()
+{
+    // Premiere-style curved-arrow rotation cursor (same as the GPU path's
+    // TransformOverlayWidget::rotateCursor).
+    constexpr int SZ = 32;
+    constexpr float CX = SZ / 2.0f;
+    constexpr float CY = SZ / 2.0f;
+    constexpr float R  = 7.0f;
+
+    QPixmap pix(SZ, SZ);
+    pix.fill(Qt::transparent);
+
+    QPainter p(&pix);
+    p.setRenderHint(QPainter::Antialiasing, true);
+
+    QRectF arcRect(CX - R, CY - R, R * 2, R * 2);
+    int startAngle16 = 45 * 16;
+    int spanAngle16  = 270 * 16;
+
+    constexpr float PI = 3.14159265f;
+    float a = 45.0f * PI / 180.0f;
+    float ex = CX + R * std::cos(a);
+    float ey = CY - R * std::sin(a);
+    float tx =  std::sin(a);
+    float ty =  std::cos(a);
+    float arrLen = 5.0f;
+    float arrHalf = 2.8f;
+    QPointF tip(ex + arrLen * tx, ey - arrLen * ty);
+    float px2 = -ty, py2 = -tx;
+    QPointF base1(ex + arrHalf * px2, ey - arrHalf * py2);
+    QPointF base2(ex - arrHalf * px2, ey + arrHalf * py2);
+
+    auto drawShape = [&](const QPen& pen, const QBrush& brush) {
+        p.setPen(pen);
+        p.setBrush(Qt::NoBrush);
+        p.drawArc(arcRect, startAngle16, spanAngle16);
+        p.setBrush(brush);
+        QPolygonF arrow;
+        arrow << tip << base1 << base2;
+        p.drawPolygon(arrow);
+    };
+
+    drawShape(QPen(Qt::black, 4.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin),
+              QBrush(Qt::black));
+    drawShape(QPen(Qt::white, 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin),
+              QBrush(Qt::white));
+
+    p.end();
+    return QCursor(pix, SZ / 2, SZ / 2);
 }
 
 void Viewport::drawTransformOverlay(QPainter& painter)

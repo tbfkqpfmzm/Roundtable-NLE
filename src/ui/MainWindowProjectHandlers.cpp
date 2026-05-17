@@ -726,8 +726,10 @@ void MainWindow::onSaveProject()
     {
         // Persist only what is explicitly in the Project Bin.
         std::vector<std::filesystem::path> binFiles;
-        if (auto* bin = projectBin())
+        if (auto* bin = projectBin()) {
             binFiles = bin->allFiles();
+            m_currentProject->setBinItems(bin->exportBinItems());
+        }
 
         m_currentProject->setBinFiles(binFiles);
 
@@ -818,8 +820,10 @@ void MainWindow::onSaveProjectAs()
     // ── Capture bin state into the project before serialization ─────────
     {
         std::vector<std::filesystem::path> binFiles;
-        if (auto* bin = projectBin())
+        if (auto* bin = projectBin()) {
             binFiles = bin->allFiles();
+            m_currentProject->setBinItems(bin->exportBinItems());
+        }
         m_currentProject->setBinFiles(binFiles);
 
         if (auto* bin = projectBin()) {

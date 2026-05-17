@@ -20,6 +20,7 @@
 
 struct AVFormatContext;
 struct AVCodecContext;
+struct AVIOContext;
 struct AVFrame;
 struct AVPacket;
 struct AVBufferRef;
@@ -156,6 +157,15 @@ private:
 
     AVFormatContext*     m_fmtCtx{nullptr};
     AVCodecContext*      m_codecCtx{nullptr};
+
+    // Custom AVIO so the source file is opened with full share access
+    // (FILE_SHARE_READ | _WRITE | _DELETE on Windows via _SH_DENYNO).
+    // Without this FFmpeg's default file: protocol denies Explorer's
+    // overwrite/delete while the decoder is cached. Premiere-style
+    // hot-swap requires the lock be cooperative, not exclusive.
+    AVIOContext*         m_avioCtx{nullptr};
+    void*                m_avioBuf{nullptr};   // av_malloc'd, owned by m_avioCtx after init
+    void*                m_avioFile{nullptr};  // FILE* opened in shared mode
     AVFrame*             m_frame{nullptr};
     AVFrame*             m_hwFrame{nullptr};     // For hw→sw transfer
     AVPacket*            m_packet{nullptr};
