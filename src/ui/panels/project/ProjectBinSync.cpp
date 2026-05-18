@@ -399,7 +399,16 @@ void ProjectBin::refreshSequences()
 {
     if (m_listView) {
         syncListView();
+    } else {
+        // In icon view mode, we still need to rebuild the tree (which
+        // syncIconView reads from) so sequences appear in the grid.
+        syncListView();
     }
+    // Always sync the icon view so sequences show up in both modes.
+    // syncListView rebuilds the tree; syncIconView then reads it to
+    // populate the grid.  This is cheap when nothing changed because
+    // the grid only rebuilds visible items.
+    syncIconView();
 }
 
 

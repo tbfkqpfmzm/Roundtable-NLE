@@ -43,6 +43,10 @@ enum class EffectType : uint8_t
     // Audio effects
     FillLeftWithRight,
     FillRightWithLeft,
+    // New video effects appended here so existing serialized projects
+    // (effect type stored as a raw uint8) keep their numbering.
+    FlipHorizontal,
+    FlipVertical,
     Count
 };
 
@@ -63,6 +67,8 @@ inline const char* effectTypeName(EffectType t) noexcept
     case EffectType::LumetriColor: return "Color Grading (legacy)";
     case EffectType::OtsLeft:      return "OTS LEFT";
     case EffectType::OtsRight:     return "OTS RIGHT";
+    case EffectType::FlipHorizontal: return "Flip Horizontal";
+    case EffectType::FlipVertical:   return "Flip Vertical";
     case EffectType::FillLeftWithRight: return "Fill Left with Right";
     case EffectType::FillRightWithLeft: return "Fill Right with Left";
     default:                       return "Unknown";

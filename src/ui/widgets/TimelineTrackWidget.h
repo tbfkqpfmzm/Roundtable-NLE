@@ -23,6 +23,13 @@ class AnimationVideoCache;
 class TimelineLayoutEngine;
 class Track;
 
+/// Which side(s) of an edit-point bracket selection to draw.
+/// Both = two facing brackets at a connected seam between touching clips.
+/// HeadOnly = single right-opening bracket on the head of an isolated clip.
+/// TailOnly = single left-opening bracket on the tail of an isolated clip.
+/// (Underlying type pinned so it can be forward-declared in TimelinePanel.h.)
+enum class EditPointSide : int { Both, HeadOnly, TailOnly };
+
 /// Visual representation of a single timeline track (clip area only).
 class TimelineTrackWidget : public QWidget
 {
@@ -57,10 +64,12 @@ public:
     /// Set hover edge highlight. edgeTick = the tick position of the hovered edge, -1 to clear.
     void setHoverEdgeTick(int64_t tick);
 
-    /// Set / clear the Premiere-style "between clips" edit-point selection.
-    /// Pass -1 to clear. The widget draws facing brackets at the cut so the
-    /// user can see they've selected the seam (not a single clip).
-    void setEditPointTick(int64_t tick);
+    /// Set / clear the Premiere-style edit-point selection.
+    /// Pass -1 to clear. With side=Both the widget draws facing brackets
+    /// at the connected cut. With HeadOnly/TailOnly only the inward-facing
+    /// bracket is drawn — used when clicking the outer edge of an isolated
+    /// clip so the user sees the edge as selected (not the whole clip).
+    void setEditPointTick(int64_t tick, EditPointSide side = EditPointSide::Both);
 
     /// Set razor position tick (-1 to hide). Draws a vertical red line through the clip.
     void setRazorTick(int64_t tick);
@@ -132,6 +141,7 @@ private:
     int64_t                     m_hoverEdgeTick{-1};
     int64_t                     m_razorTick{-1};
     int64_t                     m_editPointTick{-1};  ///< "between clips" selection (-1 = none)
+    EditPointSide               m_editPointSide{EditPointSide::Both}; ///< which bracket(s) to draw
     const std::unordered_map<uint64_t, std::vector<float>>* m_waveformCache{nullptr};
     const std::unordered_map<uint64_t, QPixmap>* m_thumbnailCache{nullptr};
     const AnimationVideoCache*  m_animVideoCache{nullptr};

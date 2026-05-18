@@ -88,93 +88,42 @@ void TimelinePanel::setTimeline(Timeline* timeline)
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  rebuildTracks — Full tear-down and re-create of all track widgets
+//  rebuildTracks — Reconcile track widgets against the current timeline.
+//
+//  Reuses existing TrackHeader / TimelineTrackWidget instances in place
+//  (calling setTrack() to repoint them at the current Track*) instead of
+//  destroying and recreating them on every edit.  Destroy+create caused
+//  a one-frame blank flash because newly-allocated child widgets are
+//  visible immediately but only receive their first paintEvent on the
+//  next event-loop pass — during that gap the entire timeline showed as
+//  empty background.  Only widgets for tracks beyond the previous count
+//  are newly created (and have their signals connected); widgets past
+//  the new count are hidden + deleteLater()'d.
 // ═════════════════════════════════════════════════════════════════════════════
 
 void TimelinePanel::rebuildTracks()
 {
-    // Disable repaints during the full rebuild to prevent paint → layout →
-    // repaint recursion and use-after-free when old widgets are deleted
-    // while paint events are still pending.
-    setUpdatesEnabled(false);
-
     // Make sure a divider track separates the video and audio sections
-    // BEFORE we build widgets, so it's part of the single build pass.
+    // BEFORE we count tracks, so the divider is part of this pass.
     ensureSectionDivider();
 
-    spdlog::info("[TimelinePanel] ENTER rebuildTracks: m_timeline={} trackCount={}", (void*)m_timeline, m_timeline ? m_timeline->trackCount() : 0);
-    spdlog::info("rebuildTracks: disconnecting and deleting old widgets");
-    for (size_t i = 0; i < m_trackHeaders.size(); ++i) {
-        auto header = m_trackHeaders[i];
-        TrackHeader* rawHeader = header;
-        if (rawHeader) {
-            spdlog::info("[LIFECYCLE] About to disable/disconnect TrackHeader {} at {} (type={})", (void*)rawHeader, i, rawHeader ? rawHeader->metaObject()->className() : "null");
-            rawHeader->setEnabled(false);
-            bool disconnected = rawHeader->disconnect();
-            spdlog::info("[LIFECYCLE] TrackHeader {} disconnect() returned {}", (void*)rawHeader, disconnected);
-        }
-    }
-    for (size_t i = 0; i < m_trackWidgets.size(); ++i) {
-        auto widget = m_trackWidgets[i];
-        TimelineTrackWidget* rawWidget = widget;
-        if (rawWidget) {
-            spdlog::info("[LIFECYCLE] About to disable/disconnect TrackWidget {} at {} (type={})", (void*)rawWidget, i, rawWidget ? rawWidget->metaObject()->className() : "null");
-            rawWidget->setEnabled(false);
-            bool disconnected = rawWidget->disconnect();
-            spdlog::info("[LIFECYCLE] TrackWidget {} disconnect() returned {}", (void*)rawWidget, disconnected);
-        }
-    }
-    // NOTE: Do NOT call processEvents() here.  During loading, pending
-    // paint/signal events could be delivered to disabled/disconnected
-    // widgets and trigger re-entrant calls into the partially torn-down
-    // timeline, causing use-after-free crashes.
-    // Hide old widgets BEFORE scheduling deletion.  deleteLater() defers
-    // destruction to the next event-loop iteration, but paint events can
-    // still fire in the meantime.  If the Track object's storage was
-    // reallocated (e.g. tracks added/removed from the timeline), the old
-    // widget's m_track raw pointer is dangling — accessing it in a paint
-    // event causes ACCESS_VIOLATION.  Hiding the widget prevents paint.
-    for (size_t i = 0; i < m_trackHeaders.size(); ++i) {
-        auto header = m_trackHeaders[i];
-        TrackHeader* rawHeader = header;
-        if (rawHeader) {
-            rawHeader->hide();
-            spdlog::info("[LIFECYCLE] Hidden TrackHeader {} at {}", (void*)rawHeader, i);
-        }
-    }
-    for (size_t i = 0; i < m_trackHeaders.size(); ++i) {
-        auto header = m_trackHeaders[i];
-        TrackHeader* rawHeader = header;
-        if (rawHeader) {
-            rawHeader->deleteLater();
-            spdlog::info("[LIFECYCLE] Scheduled deleteLater for TrackHeader {} at {}", (void*)rawHeader, i);
-        }
-    }
-    m_trackHeaders.clear();
-    spdlog::info("[STEP] Finished deleting all TrackHeaders");
+    spdlog::info("[TimelinePanel] ENTER rebuildTracks: m_timeline={} trackCount={}",
+                 (void*)m_timeline,
+                 m_timeline ? m_timeline->trackCount() : 0);
 
-    for (size_t i = 0; i < m_trackWidgets.size(); ++i) {
-        auto widget = m_trackWidgets[i];
-        TimelineTrackWidget* rawWidget = widget;
-        if (rawWidget) {
-            rawWidget->hide();
-            spdlog::info("[LIFECYCLE] Hidden TrackWidget {} at {}", (void*)rawWidget, i);
-        }
-    }
-    for (size_t i = 0; i < m_trackWidgets.size(); ++i) {
-        auto widget = m_trackWidgets[i];
-        TimelineTrackWidget* rawWidget = widget;
-        if (rawWidget) {
-            rawWidget->deleteLater();
-            spdlog::info("[LIFECYCLE] Scheduled deleteLater for TrackWidget {} at {}", (void*)rawWidget, i);
-        }
-    }
-    m_trackWidgets.clear();
-    spdlog::info("[STEP] Finished deleting all TrackWidgets");
+    auto* headerLayout = m_trackHeaderArea->layout();
+    auto* trackLayout  = m_trackContentArea->layout();
 
-    spdlog::info("rebuildTracks: creating new widgets for {} tracks", m_timeline ? m_timeline->trackCount() : 0);
-
-    if (!m_timeline) return;
+    // ── Tear-down path when there is no timeline ─────────────────────────
+    if (!m_timeline) {
+        for (auto h : m_trackHeaders) if (h) { h->hide(); h->setEnabled(false); h->disconnect(); h->deleteLater(); }
+        for (auto w : m_trackWidgets) if (w) { w->hide(); w->setEnabled(false); w->disconnect(); w->deleteLater(); }
+        m_trackHeaders.clear();
+        m_trackWidgets.clear();
+        while (headerLayout->count() > 0) headerLayout->takeAt(0);
+        while (trackLayout->count() > 0)  trackLayout->takeAt(0);
+        return;
+    }
 
     // ── Auto-rename tracks with Premiere Pro-style numbering ──────────────
     // Video tracks: V1 = lowest (bottom of video section), V2 above, etc.
@@ -215,28 +164,24 @@ void TimelinePanel::rebuildTracks()
         }
     }
 
-    auto* headerLayout = m_trackHeaderArea->layout();
-    auto* trackLayout  = m_trackContentArea->layout();
+    // Compact any null QPointer slots from prior deferred deletions so the
+    // indexing in Phases 1–3 below is contiguous.
+    auto compact = [](auto& vec) {
+        vec.erase(std::remove_if(vec.begin(), vec.end(),
+                                 [](const auto& p){ return !p; }),
+                  vec.end());
+    };
+    compact(m_trackHeaders);
+    compact(m_trackWidgets);
 
-    // Remove old items from layouts (headers, track widgets, stretches)
-    while (headerLayout->count() > 0)
-        headerLayout->takeAt(0);
-    while (trackLayout->count() > 0)
-        trackLayout->takeAt(0);
-    spdlog::info("[STEP] Cleared layouts");
-
-    // Vertically center tracks in both scroll areas (Premiere Pro style).
-    // Both scroll areas are the same height (right column has a 24px spacer
-    // matching the Add Track button) so stretches expand identically.
-    static_cast<QVBoxLayout*>(headerLayout)->addStretch();
-    static_cast<QVBoxLayout*>(trackLayout)->addStretch();
-    spdlog::info("[STEP] Added stretches to layouts");
+    const size_t newCount = m_timeline->trackCount();
+    const size_t liveOld  = std::min(m_trackHeaders.size(), m_trackWidgets.size());
 
     // Determine the current "standard" track height so dividers can size
     // themselves as 1/4 of whatever the user's real tracks are right now.
     // Use the first non-divider track as reference; fall back to 80.
     float refTrackHeight = 80.0f;
-    for (size_t ri = 0; ri < m_timeline->trackCount(); ++ri) {
+    for (size_t ri = 0; ri < newCount; ++ri) {
         Track* t = m_timeline->track(ri);
         if (!t || t->isDivider()) continue;
         float rh = t->height();
@@ -244,10 +189,7 @@ void TimelinePanel::rebuildTracks()
     }
     const float dividerHeight = std::max(8.0f, refTrackHeight * 0.25f);
 
-    spdlog::info("[STEP] About to create headers and widgets for each track");
-    for (size_t i = 0; i < m_timeline->trackCount(); ++i)
-    {
-        Track* track = m_timeline->track(i);
+    auto resolvedHeight = [&](Track* track) {
         float h = track->height();
         if (track->isDivider()) {
             h = dividerHeight;
@@ -256,28 +198,112 @@ void TimelinePanel::rebuildTracks()
             h = 80.0f;
             track->setHeight(h);
         }
+        return h;
+    };
+
+    // ── Phase 1: reuse existing widgets at positions [0, min(liveOld,newCount)) ──
+    // No destruction, no flicker — repoint each widget at its (possibly new)
+    // Track* and update its row height.  Signals are already connected and
+    // pick up the new index from the QPointer-stored m_trackIndex via setTrack().
+    const size_t reuseN = std::min(liveOld, newCount);
+    for (size_t i = 0; i < reuseN; ++i)
+    {
+        Track* track = m_timeline->track(i);
+        float h = resolvedHeight(track);
+
+        if (auto header = m_trackHeaders[i]) {
+            header->setTrack(track, i);
+            header->setHeight(h);
+            header->setFixedWidth(m_headerScroll->width());
+        }
+        if (auto tw = m_trackWidgets[i]) {
+            tw->setTrack(track, i);
+            tw->setFixedHeight(static_cast<int>(h));
+        }
+    }
+
+    // ── Phase 2: drop excess widgets at the tail (only when tracks shrink) ──
+    // Take only the doomed widgets out of the layout, hide them, and
+    // schedule deletion.  The rest of the layout (and its painted state)
+    // stays exactly as it was.
+    if (newCount < liveOld)
+    {
+        for (size_t i = newCount; i < liveOld; ++i)
+        {
+            auto header = m_trackHeaders[i];
+            auto widget = m_trackWidgets[i];
+            if (header) {
+                headerLayout->removeWidget(header);
+                header->hide();
+                header->setEnabled(false);
+                header->disconnect();
+                header->deleteLater();
+            }
+            if (widget) {
+                trackLayout->removeWidget(widget);
+                widget->hide();
+                widget->setEnabled(false);
+                widget->disconnect();
+                widget->deleteLater();
+            }
+        }
+        m_trackHeaders.resize(newCount);
+        m_trackWidgets.resize(newCount);
+    }
+
+    // On the very first build the layouts are empty — add the top stretch
+    // so subsequently inserted widgets land in the centre-aligned region.
+    if (liveOld == 0 && headerLayout->count() == 0) {
+        static_cast<QVBoxLayout*>(headerLayout)->addStretch();
+        static_cast<QVBoxLayout*>(trackLayout)->addStretch();
+    }
+
+    // Detect whether a bottom stretch already exists.  A QSpacerItem
+    // returns nullptr from widget() — that's how we tell stretches apart
+    // from widget items.  On the first build there's only the top stretch
+    // (no bottom one yet); we add it after Phase 3 in that case.
+    auto hasBottomStretch = [](QLayout* L) {
+        if (L->count() == 0) return false;
+        QLayoutItem* last = L->itemAt(L->count() - 1);
+        return last && last->widget() == nullptr
+                    && last->spacerItem() != nullptr
+                    && L->count() > 1; // exclude the lone top stretch case
+    };
+
+    // ── Phase 3: create + insert new widgets for tracks beyond liveOld ───
+    // These are inserted BEFORE the bottom stretch (if one exists), so
+    // existing widgets above them never reflow.
+    spdlog::info("rebuildTracks: reuse {} / create {} / drop {} (was {} → now {})",
+                 reuseN,
+                 newCount > liveOld ? newCount - liveOld : 0,
+                 liveOld > newCount ? liveOld - newCount : 0,
+                 liveOld, newCount);
+    for (size_t i = liveOld; i < newCount; ++i)
+    {
+        Track* track = m_timeline->track(i);
+        float h = resolvedHeight(track);
 
         // Header
-        spdlog::info("[LIFECYCLE] About to create TrackHeader for track {} (type={})", i, (track ? (int)track->type() : -1));
         auto* header = new TrackHeader(m_trackHeaderArea);
-        spdlog::info("[LIFECYCLE] Created TrackHeader {} for track {} (type={})", (void*)header, i, (track ? (int)track->type() : -1));
-        spdlog::info("[STEP] TrackHeader created and added to layout for track {}", i);
         header->setTrack(track, i);
         header->setHeight(h);
         header->setFixedWidth(m_headerScroll->width());
         header->setMouseTracking(true);  // Enable hover cursor changes
-        headerLayout->addWidget(header);
+        const int hInsertAt = hasBottomStretch(headerLayout)
+                                  ? headerLayout->count() - 1
+                                  : headerLayout->count();
+        static_cast<QBoxLayout*>(headerLayout)->insertWidget(hInsertAt, header);
         m_trackHeaders.push_back(header);
 
         // Track content
-        spdlog::info("[LIFECYCLE] About to create TimelineTrackWidget for track {} (type={})", i, (track ? (int)track->type() : -1));
         auto* tw = new TimelineTrackWidget(m_trackContentArea);
-        spdlog::info("[LIFECYCLE] Created TimelineTrackWidget {} for track {} (type={})", (void*)tw, i, (track ? (int)track->type() : -1));
-        spdlog::info("[STEP] TimelineTrackWidget created and added to layout for track {}", i);
         tw->setLayoutEngine(&m_layoutEngine);
         tw->setTrack(track, i);
         tw->setFixedHeight(static_cast<int>(h));
-        trackLayout->addWidget(tw);
+        const int tInsertAt = hasBottomStretch(trackLayout)
+                                  ? trackLayout->count() - 1
+                                  : trackLayout->count();
+        static_cast<QBoxLayout*>(trackLayout)->insertWidget(tInsertAt, tw);
         m_trackWidgets.push_back(tw);
 
         // Connect track height resize from header drag
@@ -537,76 +563,64 @@ void TimelinePanel::rebuildTracks()
         tw->installEventFilter(this);
     }
 
-    // Bottom stretch to balance vertical centering.
-    static_cast<QVBoxLayout*>(headerLayout)->addStretch();
-    static_cast<QVBoxLayout*>(trackLayout)->addStretch();
-
-    spdlog::info("rebuildTracks: created {} headers, {} widgets for {} tracks",
-                 m_trackHeaders.size(), m_trackWidgets.size(),
-                 m_timeline->trackCount());
-
-    // Diagnostic: log each widget's state
-    for (size_t i = 0; i < m_trackWidgets.size(); ++i) {
-        auto tw = m_trackWidgets[i];
-        auto* track = m_timeline->track(i);
-        spdlog::info("  widget[{}]: track='{}' size={}x{} visible={} "
-                     "fixedH={} clips={}",
-                     i, track->name(),
-                     tw->width(), tw->height(),
-                     tw->isVisible(),
-                     tw->minimumHeight(),
-                     track->clipCount());
+    // First-build only: now that the first widgets are in place, add the
+    // bottom stretch so tracks are vertically centred (Premiere Pro style).
+    // Subsequent rebuilds keep the existing stretch in place.
+    if (liveOld == 0 && newCount > 0) {
+        static_cast<QVBoxLayout*>(headerLayout)->addStretch();
+        static_cast<QVBoxLayout*>(trackLayout)->addStretch();
     }
 
-    // Scroll so the video/audio boundary is vertically centered.
-    // This ensures all video tracks and the top audio track are visible.
-    QTimer::singleShot(0, this, [this]() {
-        if (m_destroying.load(std::memory_order_acquire)) return;
-        if (!m_verticalScroll || !m_timeline) return;
-        // Find the pixel position of the first audio track (= bottom of video section)
-        int videoBottom = 0;
-        for (size_t i = 0; i < m_timeline->trackCount(); ++i) {
-            if (m_timeline->track(i)->type() == TrackType::Audio) break;
-            videoBottom += static_cast<int>(m_timeline->track(i)->height());
-        }
-        // Account for the top stretch: in a centered layout the stretch
-        // pushes content down. After layout, widget positions are final.
-        // Scroll so that the video/audio boundary sits at ~40% from top.
-        int viewH = m_verticalScroll->viewport()->height();
-        int contentH = m_trackContentArea->sizeHint().height();
-        if (contentH > viewH) {
-            // Content overflows — scroll so video/audio boundary is centered
-            int target = videoBottom - viewH * 2 / 5;
-            if (target < 0) target = 0;
-            m_verticalScroll->verticalScrollBar()->setValue(target);
-        }
-    });
+    spdlog::info("rebuildTracks: now have {} headers, {} widgets for {} tracks",
+                 m_trackHeaders.size(), m_trackWidgets.size(), newCount);
+
+    // Scroll so the video/audio boundary is vertically centred — only on
+    // first build / when track set materially changed.  On a pure in-place
+    // reuse pass we leave the user's current vertical scroll alone.
+    if (liveOld != newCount) {
+        QTimer::singleShot(0, this, [this]() {
+            if (m_destroying.load(std::memory_order_acquire)) return;
+            if (!m_verticalScroll || !m_timeline) return;
+            // Find the pixel position of the first audio track (= bottom of video section)
+            int videoBottom = 0;
+            for (size_t i = 0; i < m_timeline->trackCount(); ++i) {
+                if (m_timeline->track(i)->type() == TrackType::Audio) break;
+                videoBottom += static_cast<int>(m_timeline->track(i)->height());
+            }
+            int viewH = m_verticalScroll->viewport()->height();
+            int contentH = m_trackContentArea->sizeHint().height();
+            if (contentH > viewH) {
+                int target = videoBottom - viewH * 2 / 5;
+                if (target < 0) target = 0;
+                m_verticalScroll->verticalScrollBar()->setValue(target);
+            }
+        });
+    }
 
     // Load waveform peaks for audio clips and pass to track widgets
     loadWaveforms();
     for (auto tw : m_trackWidgets)
-        tw->setWaveformCache(&m_waveformPeaks);
+        if (tw) tw->setWaveformCache(&m_waveformPeaks);
 
     // Load video thumbnails and pass to track widgets
     loadThumbnails();
     for (auto tw : m_trackWidgets)
-        tw->setThumbnailCache(&m_thumbnailCache);
+        if (tw) tw->setThumbnailCache(&m_thumbnailCache);
 
     // Pass animation video cache to track widgets
     for (auto tw : m_trackWidgets)
-        tw->setAnimVideoCache(m_animVideoCache);
+        if (tw) tw->setAnimVideoCache(m_animVideoCache);
 
     // Push in/out point overlays to track widgets
-    if (m_timeline) {
+    {
         int64_t inPt  = m_timeline->inPoint();
         int64_t outPt = m_timeline->outPoint();
         for (auto tw : m_trackWidgets)
-            tw->setInOutPoints(inPt, outPt);
+            if (tw) tw->setInOutPoints(inPt, outPt);
     }
 
-    // Re-apply visual selection to the newly created track widgets.
-    // m_selection persists across rebuilds but the widget highlight state
-    // is lost when old widgets are deleted.
+    // Re-apply visual selection.  m_selection persists across rebuilds but
+    // any newly-created widget needs to learn its highlight state.
     emit selectionChanged();
 
     // Update minimum header width based on current track names.
@@ -614,7 +628,6 @@ void TimelinePanel::rebuildTracks()
     // layout pass settles widget widths). This ensures newly created track
     // headers reposition their label/buttons based on actual name length and
     // height — matching the behavior existing tracks get on resize.
-
     updateMinHeaderWidth();
     QTimer::singleShot(0, this, [this]() {
         if (m_destroying.load(std::memory_order_acquire)) return;
@@ -623,10 +636,11 @@ void TimelinePanel::rebuildTracks()
             if (hdr) hdr->update();
     });
 
-    // Re-enable repaints — forces one consolidated layout + paint.
-    setUpdatesEnabled(true);
+    // NOTE: no setUpdatesEnabled(true)/repaint() pair here — we never
+    // disabled updates, and reused widgets already hold valid painted
+    // content.  Newly-added widgets will get their first paintEvent on
+    // the next event-loop iteration like any normal child widget.
     updateGeometry();
-    repaint();
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -959,6 +973,14 @@ void TimelinePanel::clearGapSelection()
     m_gapSelection.active = false;
     for (auto tw : m_trackWidgets)
         tw->setGapHighlight(-1, -1);
+}
+
+void TimelinePanel::clearTransitionSelection()
+{
+    m_selectedTransitionTrack = SIZE_MAX;
+    m_selectedTransitionIndex = SIZE_MAX;
+    for (auto tw : m_trackWidgets)
+        tw->setSelectedTransition(SIZE_MAX);
 }
 
 void TimelinePanel::notifyZoomChanged()

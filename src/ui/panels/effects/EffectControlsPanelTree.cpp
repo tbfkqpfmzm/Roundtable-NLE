@@ -629,6 +629,12 @@ void EffectControlsPanel::buildPropertyTree()
                 buildLUTUI(fx, effectIdx, rowIdx);
             } else if (fx.effectType() == EffectType::Letterbox) {
                 buildLetterboxUI(fx, effectIdx, rowIdx);
+            } else if (fx.effectType() == EffectType::FlipHorizontal ||
+                       fx.effectType() == EffectType::FlipVertical) {
+                // Flip has no user-editable parameters (the axis is fixed
+                // by the effect type) — like Premiere Pro's Flip effects.
+                // The hidden "Axis" param still rides along to the shader
+                // via evalAllParams(); we just don't render a row for it.
             } else {
                 // Generic effect: flat parameter rows
                 buildGenericEffectUI(fx, effectIdx, rowIdx);

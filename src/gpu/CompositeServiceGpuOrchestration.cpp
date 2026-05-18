@@ -30,7 +30,8 @@ std::shared_ptr<CachedFrame> CompositeService::tryCompositeOnGpu(
     std::chrono::high_resolution_clock::time_point perfT0,
     std::chrono::high_resolution_clock::time_point& perfTlayers,
     int& effectLayerCount, int& effectPassCount,
-    int& transitionCount)
+    int& transitionCount,
+    bool isNestedRecursion)
 {
     if (!m_engine)
         return nullptr;
@@ -43,11 +44,15 @@ std::shared_ptr<CachedFrame> CompositeService::tryCompositeOnGpu(
     auto perfTgpuUp = perfT0;
     auto perfTcomp = perfT0;
 
+    // isNestedRecursion → don't let the inner sequence composite write its
+    // (untransformed, CPU) result into the shared composite LRU; that frame
+    // collides with the outer program tick and flickers the nested clip.
     auto result = m_engine->composite(
         layers, outW, outH, tick, scrubMode, m_gpuDisplayMode,
         compositor, effectProcessor, transitionRenderer,
         perfLog, perfT0, perfTlayers, perfTgpuUp, perfTcomp,
-        effectLayerCount, effectPassCount, transitionCount);
+        effectLayerCount, effectPassCount, transitionCount,
+        /*allowLruInsert=*/!isNestedRecursion);
 
     return result;
 }

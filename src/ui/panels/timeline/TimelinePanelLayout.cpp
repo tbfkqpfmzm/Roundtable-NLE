@@ -208,9 +208,20 @@ void TimelinePanel::setupLayout()
     });
 
     // Sync selection highlights to track widgets whenever selection changes.
+    // This handler is AUTHORITATIVE: it fully reconciles both the per-clip
+    // highlight and the per-track transition highlight from m_selection and
+    // m_selectedTransitionTrack/Index every time.  Any code path that wants
+    // to change selection just mutates those members and emits
+    // selectionChanged() — it does not need to poke widgets itself.  A clip
+    // selection and a transition selection are mutually exclusive, so a
+    // non-empty clip selection forcibly clears the transition selection.
     connect(this, &TimelinePanel::selectionChanged, this, [this]() {
         if (!m_timeline) return;
-        bool hasClipSelection = !m_selection.empty();
+        const bool hasClipSelection = !m_selection.empty();
+        if (hasClipSelection) {
+            m_selectedTransitionTrack = SIZE_MAX;
+            m_selectedTransitionIndex = SIZE_MAX;
+        }
         for (size_t ti = 0; ti < m_trackWidgets.size(); ++ti) {
             std::vector<size_t> selectedIndices;
             Track* trk = m_timeline->track(ti);
@@ -224,13 +235,13 @@ void TimelinePanel::setupLayout()
                 }
             }
             m_trackWidgets[ti]->setSelectedClips(selectedIndices);
-            // Clear transition highlight when clips are selected
-            if (hasClipSelection)
-                m_trackWidgets[ti]->setSelectedTransition(SIZE_MAX);
-        }
-        if (hasClipSelection) {
-            m_selectedTransitionTrack = SIZE_MAX;
-            m_selectedTransitionIndex = SIZE_MAX;
+            // Always reconcile the transition highlight from the single
+            // source of truth (m_selectedTransitionTrack/Index) so a
+            // stale highlight can never linger on any track.
+            m_trackWidgets[ti]->setSelectedTransition(
+                (ti == m_selectedTransitionTrack)
+                    ? m_selectedTransitionIndex
+                    : SIZE_MAX);
         }
     });
 

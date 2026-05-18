@@ -255,6 +255,15 @@ private:
     QTimer*             m_mediaWatchDebounce{nullptr};
     std::set<std::string> m_mediaWatchPending;   ///< paths awaiting debounced reload
     std::atomic<bool>   m_mediaWatchRescanQueued{false}; ///< coalesces MediaPool open notifications
+    /// Single-shot debounce for the MediaPool onMediaOpened → rescan path.
+    /// MediaPool opens files constantly (prewarm, lookahead, still-image
+    /// live-replace re-opens); rescanning the watcher on every open turned
+    /// into a GUI-thread storm (stat ×N on a cloud drive + watcher churn).
+    /// Coalesce a burst of opens into ONE rescan ~1.5 s later.
+    QTimer*             m_mediaWatchRescanTimer{nullptr};
+    /// Last media-path set rescanMediaWatch() actually applied — lets a
+    /// (debounced) rescan early-out as a cheap no-op when nothing changed.
+    std::set<std::string> m_lastMediaWatchWant;
     /// Per-path (size, mtime) signature so a fileChanged whose content
     /// didn't actually change (Windows delivers spurious/coalesced events
     /// on window restore, attribute touches, etc.) does NOT trigger a
@@ -322,6 +331,22 @@ private:
     /// maximized writes the pre-maximize arrangement instead of the broken
     /// state where the maximized dock is reparented out and all others hidden.
     QByteArray m_dockStateBeforeMaximize;
+
+    /// Exact visibility snapshot captured at maximize time so restore can
+    /// revert to PRECISELY the prior layout (panels the user had closed
+    /// stay closed).  No widget is ever reparented — the maximized panel
+    /// just gets all the space because its siblings are hidden — so the
+    /// program monitor's native Vulkan surface is never destroyed.
+    std::unordered_map<QDockWidget*, bool> m_dockVisBeforeMax;
+    std::vector<std::pair<QMainWindow*, bool>> m_edgeVisBeforeMax;
+    /// saveState() for EVERY dock-hosting window (inner + each edge
+    /// column).  Each edge column is its own QMainWindow with its own
+    /// internal dock heights; restoring only the inner one left the edge
+    /// columns' stacked panels relaying to default proportions.
+    std::vector<std::pair<QMainWindow*, QByteArray>> m_dockStatesBeforeMax;
+    QByteArray m_edgeSplitterStateBeforeMax;
+    QWidget*   m_centralBeforeMax{nullptr};
+    bool       m_centralVisBeforeMax{true};
 public:
     void togglePanelMaximize();
 private:

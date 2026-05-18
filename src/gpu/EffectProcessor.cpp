@@ -172,6 +172,7 @@ void EffectProcessor::shutdown()
     m_letterboxPipeline      = VK_NULL_HANDLE;
     m_colorGradingPipeline   = VK_NULL_HANDLE;
     m_otsPipeline            = VK_NULL_HANDLE;
+    m_flipPipeline           = VK_NULL_HANDLE;
     m_pipelineLayout       = VK_NULL_HANDLE;
 
     // Storage textures + placeholder
@@ -895,6 +896,7 @@ bool EffectProcessor::createPipelines()
     m_letterboxPipeline   = loadPipeline("letterbox.comp.spv");
     m_colorGradingPipeline = loadPipeline("lumetri_color.comp.spv");
     m_otsPipeline         = loadPipeline("ots.comp.spv");
+    m_flipPipeline        = loadPipeline("flip.comp.spv");
 
     spdlog::info("EffectProcessor: pipelines created (colorCorrect={}, blur={}, lumetri={})",
                  m_colorCorrectPipeline != VK_NULL_HANDLE,
@@ -1033,6 +1035,8 @@ VkPipeline EffectProcessor::getPipeline(EffectType type) const
     case EffectType::LumetriColor:   return m_colorGradingPipeline;
     case EffectType::OtsLeft:        return m_otsPipeline;
     case EffectType::OtsRight:       return m_otsPipeline;
+    case EffectType::FlipHorizontal: return m_flipPipeline;
+    case EffectType::FlipVertical:   return m_flipPipeline;
     default:                       return VK_NULL_HANDLE;
     }
 }

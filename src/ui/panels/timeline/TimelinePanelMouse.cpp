@@ -52,9 +52,37 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
     }
     m_dragMode = DragMode::None;
 
-    // Wipe any prior "between clips" edit-point selection at the start of
-    // every press; specific branches below re-set it when appropriate.
-    clearEditPointSelection();
+    // The Zoom tool is a pure view operation (like in Premiere): a
+    // zoom-in/out click must NOT disturb any selection.  Clip selection
+    // already survives it (press-start never clears m_selection); the
+    // edit-point bracket and transition highlight must survive it too,
+    // otherwise zooming silently wipes the "Ctrl+T will add a transition
+    // here" indicator even though the edit point is still selected.
+    const bool viewOnlyPress = (m_activeTool == EditTool::Zoom);
+
+    if (!viewOnlyPress) {
+        // Wipe any prior "between clips" edit-point selection at the start
+        // of every press; specific branches below re-set it when needed.
+        clearEditPointSelection();
+
+        // Also wipe any stale snap-indicator line (the white dashed
+        // vertical line drawn at a snap target during a trim/roll drag).
+        // It is only cleared inside the drag-move handlers, so without
+        // this a snapped roller/trim leaves the dashed line stuck at the
+        // cut point until the next drag — it reads like a phantom
+        // selection.  Drag branches below re-set it as the mouse moves.
+        setSnapIndicator(-1);
+
+        // Likewise wipe any prior transition selection at press-start; the
+        // transition-body-click and transition-trim branches below
+        // re-select the relevant transition when appropriate.  Without
+        // this, click paths that return early (the transition-trim
+        // handle, a clip-edge bracket click, etc.) leave the previously
+        // selected transition highlighted forever — so clicking a second
+        // transition never moves the indicator and it stays stuck on the
+        // first one.
+        clearTransitionSelection();
+    }
 
     if (!m_timeline || event->button() != Qt::LeftButton)
     {
@@ -70,6 +98,7 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
     case EditTool::Razor:
     {
         // Split at click position
+        bool didSplit = false;
         size_t ti = hitTestTrack(pos.y());
         if (ti < m_timeline->trackCount())
         {
@@ -84,9 +113,14 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
                     auto cmd = EditOperations::splitClip(*m_timeline, ti, clip->id(), tick);
                     executeCommand(std::move(cmd));
                     refreshTrackContents();
+                    didSplit = true;
                     break;
                 }
             }
+        }
+        if (!didSplit) {
+            // Empty-space click — deselect on release.
+            m_dragMode = DragMode::PendingMarquee;
         }
         event->accept();
         return;
@@ -121,6 +155,13 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
                         m_transTrimIsStart     = true;
                         m_transTrimOrigDuration   = trans->duration;
                         m_transTrimOrigEditPoint  = trans->editPointTick;
+                        // Re-select the grabbed transition (press-start
+                        // cleared it) so the indicator follows the click
+                        // to this transition instead of staying stuck.
+                        m_selection.clear();
+                        m_selectedTransitionTrack = ti;
+                        m_selectedTransitionIndex = trI;
+                        emit selectionChanged();
                         event->accept();
                         return;
                     }
@@ -131,6 +172,13 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
                         m_transTrimIsStart     = false;
                         m_transTrimOrigDuration   = trans->duration;
                         m_transTrimOrigEditPoint  = trans->editPointTick;
+                        // Re-select the grabbed transition (press-start
+                        // cleared it) so the indicator follows the click
+                        // to this transition instead of staying stuck.
+                        m_selection.clear();
+                        m_selectedTransitionTrack = ti;
+                        m_selectedTransitionIndex = trI;
+                        emit selectionChanged();
                         event->accept();
                         return;
                     }
@@ -139,28 +187,32 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
         }
 
         // â”€â”€ Check for transition body click (select transition) â”€â”€â”€â”€â”€â”€â”€â”€
-        // Skip when the click is within edge-trim distance of a clip head
-        // or tail on the same track: otherwise putting a cross-dissolve on
-        // a clip stole the trim handle so the user could never drag the
-        // clip's edge underneath the transition.
+        // SKIP when the click is within the edge-grab zone of any clip's
+        // head or tail on this track: otherwise a clip with a transition
+        // on its edge becomes un-trimmable — the transition body covers
+        // the clip edge.  The clip-edge bracket branch below handles
+        // those clicks (Premiere-style: edge wins, drag to trim).
+        // The transition's own start/end handles (TransitionTrim branch
+        // above) and the body away from the seam are still selectable.
         {
             double px = pos.x() - headerWidth();
             size_t ti = hitTestTrack(pos.y());
             if (ti < m_timeline->trackCount()) {
                 Track* track = m_timeline->track(ti);
-                constexpr double kEdgePassThrough = 6.0;
+
                 bool nearClipEdge = false;
                 for (size_t ci = 0; ci < track->clipCount(); ++ci) {
                     const Clip* c = track->clip(ci);
                     if (!c) continue;
-                    double clipL = m_layoutEngine.timeToPixelX(c->timelineIn());
-                    double clipR = m_layoutEngine.timeToPixelX(c->timelineOut());
-                    if (std::abs(px - clipL) < kEdgePassThrough ||
-                        std::abs(px - clipR) < kEdgePassThrough) {
+                    double cl = m_layoutEngine.timeToPixelX(c->timelineIn());
+                    double cr = m_layoutEngine.timeToPixelX(c->timelineOut());
+                    double ez = edgeGrabPx(cr - cl);
+                    if (std::abs(px - cl) < ez || std::abs(px - cr) < ez) {
                         nearClipEdge = true;
                         break;
                     }
                 }
+
                 if (!nearClipEdge) {
                     for (size_t trI = 0; trI < track->transitionCount(); ++trI) {
                         const Transition* trans = track->transition(trI);
@@ -189,6 +241,32 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
         }
 
         auto hitRef = hitTestClip(pos);
+
+        // Edge-halo fallback: when zoomed out, a clip can be only a few
+        // pixels wide, so the press lands just outside the clip's tick
+        // range (hitTestClip returns no match) yet still within the edge
+        // grab zone. Scan the pressed track for any clip edge within
+        // edgeGrabPx of the cursor so the user can still grab + trim it.
+        if (!hitRef) {
+            size_t tiScan = hitTestTrack(pos.y());
+            if (tiScan < m_timeline->trackCount()) {
+                const Track* trkScan = m_timeline->track(tiScan);
+                double pxScan = pos.x() - headerWidth();
+                for (size_t ci = 0; ci < trkScan->clipCount(); ++ci) {
+                    const Clip* c = trkScan->clip(ci);
+                    if (!c) continue;
+                    double l = m_layoutEngine.timeToPixelX(c->timelineIn());
+                    double r = m_layoutEngine.timeToPixelX(c->timelineOut());
+                    double zone = edgeGrabPx(r - l);
+                    if (std::abs(pxScan - l) < zone
+                            || std::abs(pxScan - r) < zone) {
+                        hitRef = ClipRef{ tiScan, c->id() };
+                        break;
+                    }
+                }
+            }
+        }
+
         if (hitRef)
         {
             // Clear any gap selection when clicking a clip
@@ -198,16 +276,14 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
                     m_trackWidgets[w]->setGapHighlight(-1, -1);
             }
 
-            // ── Connected-seam (edit-point) click? ──────────────────────
-            // Premiere selects the EDIT POINT (no clip highlight, just
-            // facing brackets at the cut) when you click between two
-            // butt-joined clips. Detect that FIRST, before the
-            // alreadySelected early-return would otherwise eat the click.
-            // Works from either side of the seam:
-            //   * hitTestClip → right clip,  cursor near its head, a left
-            //     neighbour ends at that head → trim the LEFT clip's tail
-            //   * hitTestClip → left clip,   cursor near its tail, a right
-            //     neighbour starts at that tail → trim the RIGHT clip's head
+            // ── Edge / seam click detection (Premiere-style) ────────────
+            // Clicking within the edge-grab zone of either the head or
+            // tail of the hit clip selects an EDIT POINT (single bracket
+            // for an isolated edge, two facing brackets for a connected
+            // seam) and primes a trim drag of THAT clip's edge.  The
+            // whole-clip highlight is suppressed — only the bracket
+            // shows, like Premiere.  This also enables Ctrl+T to add a
+            // transition at the clicked edge (m_lastClickedEdge).
             {
                 Track* hitTrack = m_timeline->track(hitRef->trackIndex);
                 size_t hitIdx   = hitTrack ? hitTrack->findClipIndexById(hitRef->clipId)
@@ -218,59 +294,107 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
                     const double pxLocal  = pos.x() - headerWidth();
                     const double clipL    = m_layoutEngine.timeToPixelX(hitClip->timelineIn());
                     const double clipR    = m_layoutEngine.timeToPixelX(hitClip->timelineOut());
-                    const double seamZone = edgeGrabPx(clipR - clipL);
+                    const double edgeZone = edgeGrabPx(clipR - clipL);
 
-                    const Clip* leftNb  = nullptr;
-                    const Clip* rightNb = nullptr;
-                    int64_t     seamTick = 0;
+                    const bool nearLeft  = std::abs(pxLocal - clipL) < edgeZone;
+                    const bool nearRight = !nearLeft
+                                        && std::abs(pxLocal - clipR) < edgeZone;
 
-                    if (std::abs(pxLocal - clipL) < seamZone) {
-                        for (size_t ci = 0; ci < hitTrack->clipCount(); ++ci) {
-                            const Clip* n = hitTrack->clip(ci);
-                            if (n->id() != hitClip->id() &&
-                                n->timelineOut() == hitClip->timelineIn()) {
-                                leftNb   = n;
-                                seamTick = hitClip->timelineIn();
-                                break;
+                    if (nearLeft || nearRight)
+                    {
+                        // Look for a touching neighbour on the relevant side.
+                        const Clip* leftNeighbour  = nullptr;
+                        const Clip* rightNeighbour = nullptr;
+                        if (nearLeft) {
+                            for (size_t ci = 0; ci < hitTrack->clipCount(); ++ci) {
+                                const Clip* n = hitTrack->clip(ci);
+                                if (n->id() != hitClip->id() &&
+                                    n->timelineOut() == hitClip->timelineIn()) {
+                                    leftNeighbour = n;
+                                    break;
+                                }
+                            }
+                        } else { // nearRight
+                            for (size_t ci = 0; ci < hitTrack->clipCount(); ++ci) {
+                                const Clip* n = hitTrack->clip(ci);
+                                if (n->id() != hitClip->id() &&
+                                    n->timelineIn() == hitClip->timelineOut()) {
+                                    rightNeighbour = n;
+                                    break;
+                                }
                             }
                         }
-                    }
-                    if (!leftNb && std::abs(pxLocal - clipR) < seamZone) {
-                        for (size_t ci = 0; ci < hitTrack->clipCount(); ++ci) {
-                            const Clip* n = hitTrack->clip(ci);
-                            if (n->id() != hitClip->id() &&
-                                n->timelineIn() == hitClip->timelineOut()) {
-                                rightNb  = n;
-                                seamTick = hitClip->timelineOut();
-                                break;
-                            }
-                        }
-                    }
 
-                    if (leftNb || rightNb) {
-                        // Edit-point selection: clear clip selection so
-                        // the only highlight is the facing brackets at
-                        // the cut, then prime a trim drag.
+                        // At a connected seam, hitTestClip is biased: it
+                        // uses [in, out) ranges so a click *at* the seam
+                        // tick always lands on the RIGHT clip.  If the
+                        // user actually clicked just left of the seam
+                        // pixel they wanted to trim the LEFT clip's tail
+                        // — never the right clip's head.  Use the click's
+                        // pixel position relative to the seam to pick the
+                        // correct side; for an isolated edge fall back
+                        // to the hit clip's edge.
+                        const Clip* trimClip = hitClip;
+                        ClipEdge    trimEdge;
+                        int64_t     seamTick;
+                        EditPointSide side;
+                        if (leftNeighbour) {
+                            // Seam between leftNeighbour and hitClip at clipL.
+                            const double seamPx = clipL;
+                            if (pxLocal < seamPx) {
+                                trimClip = leftNeighbour;
+                                trimEdge = ClipEdge::Tail;
+                            } else {
+                                trimClip = hitClip;
+                                trimEdge = ClipEdge::Head;
+                            }
+                            seamTick = hitClip->timelineIn();
+                            side = EditPointSide::Both;
+                        } else if (rightNeighbour) {
+                            // Seam between hitClip and rightNeighbour at clipR.
+                            const double seamPx = clipR;
+                            if (pxLocal < seamPx) {
+                                trimClip = hitClip;
+                                trimEdge = ClipEdge::Tail;
+                            } else {
+                                trimClip = rightNeighbour;
+                                trimEdge = ClipEdge::Head;
+                            }
+                            seamTick = hitClip->timelineOut();
+                            side = EditPointSide::Both;
+                        } else {
+                            // Isolated edge — no neighbour, hit clip's edge.
+                            trimClip = hitClip;
+                            trimEdge = nearLeft ? ClipEdge::Head : ClipEdge::Tail;
+                            seamTick = nearLeft ? hitClip->timelineIn()
+                                                : hitClip->timelineOut();
+                            side = nearLeft ? EditPointSide::HeadOnly
+                                            : EditPointSide::TailOnly;
+                        }
+
+                        // Locate the chosen clip's owning track index.
+                        // Always the same as the hit clip's track since
+                        // neighbours come from the same hitTrack.
+                        const size_t trimTrackIdx = hitRef->trackIndex;
+
+                        // Clip selection is suppressed for edge clicks —
+                        // only the bracket shows.  m_lastClickedEdge is
+                        // recorded so Ctrl+T can add a transition here.
+                        // Also drop any selected transition so its
+                        // highlight doesn't linger (the selectionChanged
+                        // handler only auto-clears it when a clip is
+                        // selected, and here the selection is empty).
                         m_selection.clear();
+                        m_selectedTransitionTrack = SIZE_MAX;
+                        m_selectedTransitionIndex = SIZE_MAX;
                         emit selectionChanged();
-                        setEditPointSelection(hitRef->trackIndex, seamTick);
+                        setEditPointSelection(trimTrackIdx, seamTick, side);
 
-                        const Clip* trimClip = leftNb ? leftNb : hitClip;
-                        ClipEdge    trimEdge = leftNb ? ClipEdge::Tail : ClipEdge::Head;
-                        if (rightNb) trimClip = hitClip;   // right side: trim hit clip tail-? no, head of right
-                        // From the LEFT side of the seam: trim the left
-                        // clip's TAIL. From the RIGHT side: trim the right
-                        // clip's HEAD.
-                        if (rightNb) {
-                            trimClip = rightNb;
-                            trimEdge = ClipEdge::Head;
-                        }
-
-                        m_dragClipRef          = { hitRef->trackIndex, trimClip->id() };
+                        m_dragClipRef          = { trimTrackIdx, trimClip->id() };
                         m_dragOriginalIn       = trimClip->timelineIn();
                         m_dragOriginalSourceIn = trimClip->sourceIn();
                         m_dragOriginalDuration = trimClip->duration();
-                        m_dragOriginalTrack    = hitRef->trackIndex;
+                        m_dragOriginalTrack    = trimTrackIdx;
                         m_dragMode = (trimEdge == ClipEdge::Tail)
                                        ? DragMode::ClipTrimTail
                                        : DragMode::ClipTrimHead;
@@ -278,7 +402,8 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
 
                         m_snapEngine.setPixelsPerSecond(m_layoutEngine.pixelsPerSecond());
                         std::vector<uint64_t> excludeIds{ trimClip->id() };
-                        m_snapEngine.buildTargets(*m_timeline, m_playheadTick, 0.0, excludeIds);
+                        m_snapEngine.buildTargets(*m_timeline, m_playheadTick,
+                                                  0.0, excludeIds);
 
                         event->accept();
                         return;
@@ -286,8 +411,6 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
                 }
             }
 
-            // Check if we're near an edge for trim
-            [[maybe_unused]] ClipEdge edge = hitTestClipEdge(pos, *hitRef);
             bool isShift = event->modifiers() & Qt::ShiftModifier;
 
             // If clicking on an already-selected clip WITHOUT shift,
@@ -326,7 +449,9 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
                     emit clipSelected(hitRef->trackIndex, clipIdx);
             }
 
-            // Determine drag mode
+            // Body of the clip was clicked — initiate a move drag.  Edge
+            // clicks were intercepted by the bracket branch above, so
+            // here we always fall through to ClipMove.
             m_dragClipRef = *hitRef;
 
             Track* track = m_timeline->track(hitRef->trackIndex);
@@ -339,31 +464,17 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
                 m_dragOriginalDuration = clip->duration();
                 m_dragOriginalTrack = hitRef->trackIndex;
 
-                // Check edge proximity for trim
-                double px = pos.x() - headerWidth();
-                double clipLeft = m_layoutEngine.timeToPixelX(clip->timelineIn());
-                double clipRight = m_layoutEngine.timeToPixelX(clip->timelineOut());
-
-                const double kEdgeThreshold = edgeGrabPx(clipRight - clipLeft);
-
-                // (Connected-seam clicks were already intercepted by the
-                // hoisted "edit point" branch above; here clipLeft/clipRight
-                // are non-seam edges (track end, gap-facing edge) and the
-                // grab zone just triggers a plain head/tail trim.)
-                if (std::abs(px - clipLeft) < kEdgeThreshold) {
-                    m_dragMode = DragMode::ClipTrimHead;
-                    m_lastClickedEdge = { *hitRef, ClipEdge::Head, true };
-                }
-                else if (std::abs(px - clipRight) < kEdgeThreshold) {
-                    m_dragMode = DragMode::ClipTrimTail;
-                    m_lastClickedEdge = { *hitRef, ClipEdge::Tail, true };
-                }
-                else {
+                {
                     m_dragMode = DragMode::ClipMove;
                     m_lastClickedEdge.valid = false;
 
                     // Record original positions of ALL selected clips
-                    // so we can move them together as a group.
+                    // so we can move them together as a group.  Also
+                    // snapshot any transitions referencing each clip
+                    // on its current track — the live-drag preview
+                    // will drop them when it removes+adds the clip
+                    // across tracks, and we replay them on release so
+                    // moveClipToTrack can carry them to the destination.
                     m_dragSelectedClips.clear();
                     m_dragTargetTrack = hitRef->trackIndex;
                     for (const auto& sel : m_selection.clips()) {
@@ -375,6 +486,11 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
                             dcs.ref = sel;
                             dcs.originalIn = selTrack->clip(si)->timelineIn();
                             dcs.originalTrack = sel.trackIndex;
+                            for (const auto& t : selTrack->transitions()) {
+                                if (t.leftClipId == sel.clipId
+                                 || t.rightClipId == sel.clipId)
+                                    dcs.originalTransitions.push_back(t);
+                            }
                             m_dragSelectedClips.push_back(dcs);
                         }
                     }
@@ -492,6 +608,9 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
             size_t idx = track->findClipIndexById(hitRef->clipId);
             if (idx < track->clipCount())
                 m_dragOriginalSourceIn = track->clip(idx)->sourceIn();
+        } else {
+            // Empty-space click — deselect on release (Premiere style).
+            m_dragMode = DragMode::PendingMarquee;
         }
         event->accept();
         return;
@@ -507,6 +626,8 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
             size_t idx = track->findClipIndexById(hitRef->clipId);
             if (idx < track->clipCount())
                 m_dragOriginalIn = track->clip(idx)->timelineIn();
+        } else {
+            m_dragMode = DragMode::PendingMarquee;
         }
         event->accept();
         return;
@@ -547,10 +668,13 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
                 }
             }
 
-            // Accept if the click was reasonably close to an edit point
-            double editPx = m_layoutEngine.timeToPixelX(bestEditPt);
-            double clickPx = pos.x() - headerWidth();
-            if (bestLeft != 0 && std::abs(editPx - clickPx) < 20.0) {
+            // Always engage the nearest edit point on the clicked track —
+            // the Rolling tool would otherwise silently no-op when the user
+            // clicked even slightly off the seam (Premiere doesn't gate
+            // this on a pixel radius; whatever edit point is closest wins).
+            // Without this the tool felt like it had "reverted to selection
+            // mode" — actually nothing happened, but the user couldn't tell.
+            if (bestLeft != 0) {
                 m_dragMode = DragMode::RollingEdit;
                 m_rollLeftClipId = bestLeft;
                 m_rollRightClipId = bestRight;
@@ -575,6 +699,14 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
                 m_snapEngine.buildTargets(*m_timeline, m_playheadTick, 0.0,
                                           {m_rollLeftClipId, m_rollRightClipId});
             }
+        }
+        if (m_dragMode != DragMode::RollingEdit) {
+            // No edit point on the clicked track (or click was outside any
+            // track).  Fall through to PendingMarquee so the empty-space
+            // release deselects any currently-selected clip.  This is what
+            // resolves the "clips stay selected after rolling / clicking
+            // empty space doesn't deselect" complaint.
+            m_dragMode = DragMode::PendingMarquee;
         }
         event->accept();
         return;
@@ -602,6 +734,9 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
                 else
                     m_dragMode = DragMode::ClipTrimHead;
             }
+        } else {
+            // Empty-space click — deselect on release.
+            m_dragMode = DragMode::PendingMarquee;
         }
         event->accept();
         return;

@@ -146,7 +146,10 @@ void ProgramMonitor::requestRefresh()
     // Kick a multi-cycle settle window so that cold decode misses
     // are retried.  Unlike scrub settle, edit settle does NOT reduce
     // resolution — the user expects crisp display after an edit.
-    m_editSettleCounter = 15;
+    // 60 cycles @ 16ms = ~960ms: covers cold NVDEC init (~100-170ms
+    // per character clip) and FFmpeg probe even when a shot-preset
+    // swap opens several new clips at once.
+    m_editSettleCounter = 60;
 
     // Composite + present immediately so the Program Monitor reflects
     // clip property changes, timeline edits, etc. without waiting for
@@ -565,7 +568,20 @@ void ProgramMonitor::onPollTimer()
     // playhead from advancing and the Program Monitor from updating.
     if (!m_newFrameAvailable.exchange(false)) {
         const bool isPlaying = m_controller && m_controller->isPlaying();
-        if (!isPlaying && !m_scrubPending && m_scrubSettleCounter <= 0) {
+        // Edit-settle MUST keep this loop alive even when no new frame is
+        // pending. Without this, requestRefresh() arms editSettleCounter=15
+        // and fires one composite request, but if the pipeline's first
+        // response is empty (e.g. media not yet open after a project-load
+        // or a shot-preset swap) m_newFrameAvailable stays false and every
+        // subsequent poll tick early-returns -- updateDisplay never runs,
+        // editSettleCounter never decrements, and no further composites are
+        // requested. Result: the monitor stays blank until the user nudges
+        // the playhead. Letting edit-settle through the gate lets the loop
+        // keep re-requesting the frame until late media open / decode
+        // completes.
+        if (!isPlaying && !m_scrubPending
+                && m_scrubSettleCounter <= 0
+                && m_editSettleCounter <= 0) {
             syncOverlayGeometry();
             return;
         }

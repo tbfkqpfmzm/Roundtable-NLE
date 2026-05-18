@@ -299,7 +299,15 @@ void TimelineWorkspace::registerKeyboardShortcuts()
         m_commandStack->execute(std::move(cmd));
 
         invalidateCompositeCache();
-        if (m_timelinePanel) m_timelinePanel->rebuildTracks();
+        if (m_timelinePanel) {
+            m_timelinePanel->rebuildTracks();
+            // The edge click that primed this transition left an edit-point
+            // bracket painted at the cut.  rebuildTracks() reuses widgets
+            // in place and doesn't touch it, so clear it explicitly — the
+            // transition is now applied and the bracket would otherwise
+            // sit there looking like a stuck selection until the next click.
+            m_timelinePanel->clearEditPointSelection();
+        }
         if (m_programMonitor) m_programMonitor->requestRefresh();
     });
 

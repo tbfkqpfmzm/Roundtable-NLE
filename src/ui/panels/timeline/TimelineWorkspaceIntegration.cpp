@@ -31,6 +31,7 @@
 #include "timeline/VideoClip.h"
 #include "timeline/ImageClip.h"
 #include "timeline/AudioClip.h"
+#include "timeline/SpineClip.h"
 
 #include <QFileSystemWatcher>
 #include <QTimer>
@@ -343,6 +344,21 @@ void TimelineWorkspace::rescanMediaWatch()
         }
     }
 
+    // Early-out: if the referenced media set is byte-for-byte the set we
+    // last applied, there is nothing to add/remove.  This makes the
+    // debounced onMediaOpened-driven rescans cheap no-ops during steady
+    // playback (the storm) instead of QFileSystemWatcher add/remove churn
+    // + per-path stat + a wall of log lines on the GUI thread.  A genuine
+    // file *content* swap doesn't change this set — it fires fileChanged
+    // on an already-watched path, which is handled separately.
+    {
+        std::set<std::string> wantPaths;
+        for (const QString& w : want) wantPaths.insert(w.toStdString());
+        if (wantPaths == m_lastMediaWatchWant && !m_mediaWatcher->files().isEmpty())
+            return;
+        m_lastMediaWatchWant = std::move(wantPaths);
+    }
+
     // Diff against the currently-watched set: drop stale, add new. (Re-adding
     // an already-watched path is a no-op in QFileSystemWatcher.)
     const QStringList watched = m_mediaWatcher->files();
@@ -413,8 +429,16 @@ void TimelineWorkspace::refreshAfterUndoRedo()
         for (size_t ti = 0; ti < m_timeline->trackCount(); ++ti) {
             auto* track = m_timeline->track(ti);
             if (!track) continue;
-            for (size_t ci = 0; ci < track->clipCount(); ++ci)
-                liveIds.insert(track->clip(ci)->id());
+            for (size_t ci = 0; ci < track->clipCount(); ++ci) {
+                auto* clip = track->clip(ci);
+                liveIds.insert(clip->id());
+                // Undo/redo mutates clip data directly; the cached spine
+                // engine was configured at creation and would otherwise
+                // keep playing the pre-undo animation/talk/speed even
+                // though the clip (and its label) reverted.
+                if (auto* sc = dynamic_cast<SpineClip*>(clip))
+                    m_compositeService->resyncSpineClip(sc);
+            }
         }
         m_compositeService->purgeDeadSpineStates(liveIds);
     }
@@ -432,11 +456,16 @@ void TimelineWorkspace::refreshAfterUndoRedo()
 
     updateTransformOverlay();
     if (m_programMonitor) {
+        // requestRefresh() forces a re-composite of the current playhead
+        // without wiping the displayed frame first — the new frame
+        // replaces the old in a single present, so there is no blank
+        // flicker.  resetViewState() used to be called here as a defence
+        // against dock-layout corruption, but it calls clearFrame() on
+        // both viewports which produces a one-frame black flash on every
+        // undo/redo even when nothing on-screen actually changed.  The
+        // real dock-layout recovery already happens in showEvent() when
+        // the panel becomes visible.
         m_programMonitor->requestRefresh();
-        // Also reset view state as a defense-in-depth measure so that
-        // undo/redo (which may have changed dock layout indirectly) does
-        // not leave the Program Monitor showing stale/corrupted content.
-        m_programMonitor->resetViewState();
     }
 
     // Clips may have been added/removed/relinked — keep the live file-swap

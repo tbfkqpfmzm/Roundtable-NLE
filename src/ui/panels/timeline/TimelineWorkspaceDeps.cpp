@@ -12,6 +12,7 @@
 #include "panels/timeline/TimelineWorkspace.h"
 
 #include <QMetaObject>
+#include <QTimer>
 
 #include "CompositeService.h"
 #include "spine/AnimationVideoCache.h"
@@ -89,12 +90,32 @@ void TimelineWorkspace::setMediaPool(MediaPool* pool) {
             bool expected = false;
             if (!m_mediaWatchRescanQueued.compare_exchange_strong(
                     expected, true))
-                return;  // a rescan is already queued — coalesce
+                return;  // a marshal is already queued — coalesce
+            // Callback fires on arbitrary decode/prewarm threads.  Marshal
+            // to the GUI thread and (re)start a single-shot debounce timer
+            // instead of rescanning immediately: MediaPool opens files
+            // constantly during playback, and an unthrottled rescan per
+            // open is a GUI-thread storm.  A real timeline edit still
+            // rescans synchronously via the edit hooks; a swap of an
+            // already-watched file fires fileChanged without a rescan, so
+            // a ~1.5 s coalescing delay here is harmless.
             QMetaObject::invokeMethod(this, [this]() {
                 m_mediaWatchRescanQueued.store(false,
                                                std::memory_order_release);
                 if (m_destroying.load(std::memory_order_acquire)) return;
-                rescanMediaWatch();
+                if (!m_mediaWatchRescanTimer) {
+                    m_mediaWatchRescanTimer = new QTimer(this);
+                    m_mediaWatchRescanTimer->setSingleShot(true);
+                    m_mediaWatchRescanTimer->setInterval(1500);
+                    connect(m_mediaWatchRescanTimer, &QTimer::timeout, this,
+                            [this]() {
+                        if (m_destroying.load(std::memory_order_acquire))
+                            return;
+                        rescanMediaWatch();
+                    });
+                }
+                if (!m_mediaWatchRescanTimer->isActive())
+                    m_mediaWatchRescanTimer->start();
             }, Qt::QueuedConnection);
         });
     }

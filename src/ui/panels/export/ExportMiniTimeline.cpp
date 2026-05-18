@@ -82,9 +82,15 @@ int ExportMiniTimeline::tickToX(int64_t tick) const
 
 void ExportMiniTimeline::paintEvent(QPaintEvent* event)
 {
+    // Re-entrancy guard. Use RAII so the counter is always
+    // decremented — even on the normal-paint path. The previous
+    // version forgot to decrement here, so after 5 paints the widget
+    // silently no-op'd every subsequent paintEvent.
     static thread_local int s_paintDepth = 0;
-    if (++s_paintDepth > 5) {
-        --s_paintDepth;
+    struct DepthGuard {
+        int& d; explicit DepthGuard(int& v) : d(v) { ++d; } ~DepthGuard() { --d; }
+    } depthGuard(s_paintDepth);
+    if (s_paintDepth > 5) {
         QWidget::paintEvent(event);
         return;
     }
@@ -99,7 +105,7 @@ void ExportMiniTimeline::paintEvent(QPaintEvent* event)
     const int barTop   = kBarMarginTop;
     const int barBot   = barTop + kBarHeight;
 
-    if (barW <= 0) { --s_paintDepth; return; }
+    if (barW <= 0) return;
 
     // ── 1. Draw the full-range bar background ───────────────────────
     QRect barRect(barLeft, barTop, barW, kBarHeight);

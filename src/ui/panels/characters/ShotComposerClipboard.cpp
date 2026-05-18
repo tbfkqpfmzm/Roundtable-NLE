@@ -174,6 +174,7 @@ void ShotComposer::copyTransform()
         tc.rotation   = ch->rotation;
         tc.opacity    = ch->opacity;
         tc.flipX      = ch->flipX;
+        tc.flipY      = ch->flipY;
         tc.visible    = ch->visible;
         tc.cropLeft   = ch->cropLeft;
         tc.cropRight  = ch->cropRight;
@@ -189,6 +190,7 @@ void ShotComposer::copyTransform()
         tc.rotation   = 0.0f;
         tc.opacity    = bg->opacity;
         tc.flipX      = false;
+        tc.flipY      = false;
         tc.visible    = bg->visible;
         tc.cropLeft   = bg->cropLeft;
         tc.cropRight  = bg->cropRight;
@@ -231,6 +233,7 @@ void ShotComposer::pasteTransform()
             ch->rotation   = tc.rotation;
             ch->opacity    = tc.opacity;
             ch->flipX      = tc.flipX;
+            ch->flipY      = tc.flipY;
             ch->visible    = tc.visible;
             ch->cropLeft   = tc.cropLeft;
             ch->cropRight  = tc.cropRight;

@@ -900,8 +900,8 @@ QPixmap ShotComposer::makeShotThumbnail(const ShotPreset& shot, int thumbW, int 
                 QImage scaled = charImg.scaled(drawW, drawH,
                     Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
 
-                if (ch->flipX)
-                    scaled = scaled.mirrored(true, false);
+                if (ch->flipX || ch->flipY)
+                    scaled = scaled.mirrored(ch->flipX, ch->flipY);
 
                 // Position: posX/posY are normalized (0.5 = center)
                 int cx = static_cast<int>(ch->posX * thumbW);
@@ -966,8 +966,8 @@ QPixmap ShotComposer::makeShotThumbnail(const ShotPreset& shot, int thumbW, int 
                 if (drawW > 0 && drawH > 0) {
                     QImage scaled = thumb.scaled(drawW, drawH,
                         Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-                    if (ch->flipX)
-                        scaled = scaled.mirrored(true, false);
+                    if (ch->flipX || ch->flipY)
+                        scaled = scaled.mirrored(ch->flipX, ch->flipY);
                     int cx = static_cast<int>(ch->posX * thumbW);
                     int cy = static_cast<int>(ch->posY * thumbH);
                     if (ch->opacity < 0.996f)
@@ -1001,8 +1001,8 @@ QPixmap ShotComposer::makeShotThumbnail(const ShotPreset& shot, int thumbW, int 
                 if (drawW > 0 && drawH > 0) {
                     QImage scaled = fullBody.toImage().scaled(drawW, drawH,
                         Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-                    if (ch->flipX)
-                        scaled = scaled.mirrored(true, false);
+                    if (ch->flipX || ch->flipY)
+                        scaled = scaled.mirrored(ch->flipX, ch->flipY);
                     int cx = static_cast<int>(ch->posX * thumbW);
                     int cy = static_cast<int>(ch->posY * thumbH);
                     if (ch->opacity < 0.996f)

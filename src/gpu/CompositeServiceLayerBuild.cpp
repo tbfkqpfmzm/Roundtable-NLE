@@ -434,7 +434,8 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
                 // source is 24fps).
                 auto* texCache = m_engine ? m_engine->textureCache() : nullptr;
                 if (texCache && m_engine->isGpuCompositeEnabled()) {
-                    auto gpuHit = texCache->get(handle, frameNum);
+                    auto gpuHit = texCache->get(handle, frameNum,
+                        static_cast<uint8_t>(charVideoTier));
                     if (gpuHit.found) {
                         LayerInfo layer;
                         layer.gpuTextureReady = true;
@@ -539,7 +540,14 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
                         m_timeline = innerTimeline;
                         lock.unlock();
 
-                        auto innerFrame = compositeFrame(innerTick, outW, outH, scrubMode);
+                        // isNestedRecursion=true so the inner composite
+                        // doesn't touch the outer's m_lastGoodComposite /
+                        // LRU / invalidate flag.  Without this, the inner
+                        // overwrites the cached frame the presenter reads,
+                        // producing the "nested sequence glitches to its
+                        // own first frame every other display tick" bug.
+                        auto innerFrame = compositeFrame(innerTick, outW, outH, scrubMode,
+                                                          /*isNestedRecursion=*/true);
 
                         // Snapshot into a clean CPU-only BGRA frame. The
                         // inner composite returns its shared m_lastGoodComposite,
@@ -625,7 +633,9 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
                             // Ã¢â€â‚¬Ã¢â€‚¬ DIRTY TRACKING: Skip decode for pre-rendered spine Ã¢â€â‚¬Ã¢â€â‚¬
                             auto* texCache2 = m_engine ? m_engine->textureCache() : nullptr;
                             if (texCache2 && m_engine->isGpuCompositeEnabled()) {
-                                auto gpuHit = texCache2->get(animHandle, animFrame);
+                                auto gpuHit = texCache2->get(animHandle, animFrame,
+                                    static_cast<uint8_t>(m_forceFullResolution.load()
+                                        ? ResolutionTier::Full : playbackTier()));
                                 if (gpuHit.found) {
                                     LayerInfo layer;
                                     layer.gpuTextureReady = true;
@@ -1133,6 +1143,7 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
                     }
                     texCache3->putShared(
                         frame->mediaId, frame->frameNumber,
+                        static_cast<uint8_t>(frame->tier),
                         frame->gpuTextureOwner,
                         gpuInfo,
                         frame->width, frame->height,

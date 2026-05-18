@@ -207,6 +207,18 @@ void Compositor::updateDescriptorSet()
     vkUpdateDescriptorSets(dev, 4, writes, 0, nullptr);
 }
 
+// ── advanceOutputRing ───────────────────────────────────────────────────────
+
+void Compositor::advanceOutputRing()
+{
+    m_outputRingIdx = (m_outputRingIdx + 1) % kOutputRing;
+    // m_outputTexture is the alias every accessor / readback reads, so the
+    // ring stays fully transparent to callers.  shared_ptr assignment
+    // keeps the slot the presenter still holds (via gpuTextureOwner)
+    // alive even though the ring has moved on.
+    m_outputTexture = m_outputRing[m_outputRingIdx];
+}
+
 // ── composite ───────────────────────────────────────────────────────────────
 
 bool Compositor::composite(VkCommandBuffer cmd)
@@ -217,13 +229,24 @@ bool Compositor::composite(VkCommandBuffer cmd)
         return false;
     }
 
-    // Update SSBO and descriptors if layers changed
+    // Rotate to a fresh output texture so this composite does not
+    // overwrite the slot the presenter (or a nested inner readback) is
+    // still referencing.  Must happen BEFORE updateDescriptorSet() so
+    // binding 0 points at the new slot.
+    advanceOutputRing();
+
+    // SSBO only needs re-uploading when the layer set changed, but the
+    // descriptor set MUST be rewritten every composite because binding 0
+    // (the output storage image) just rotated to a different ring slot.
+    // Re-recording happens after the previous submit's fence was waited
+    // (CompositeEngine beginRecording), so updating the shared descriptor
+    // set here is safe w.r.t. in-flight work.
     if (m_layersDirty)
     {
         updateSSBO();
-        updateDescriptorSet();
         m_layersDirty = false;
     }
+    updateDescriptorSet();
 
     // Reset and write timestamp queries
     if (m_queryPool != VK_NULL_HANDLE)
@@ -315,7 +338,12 @@ bool Compositor::resize(uint32_t width, uint32_t height)
     m_config.outputHeight = height;
 
     m_readbackStaging.destroy(); // recreated on next readback
+    // deviceWaitIdle() above guarantees no in-flight work references any
+    // ring slot, so it is safe to drop them all and rebuild at the new
+    // size.  createOutputTexture() repopulates the whole ring.
+    for (auto& t : m_outputRing) t.reset();
     m_outputTexture.reset();
+    m_outputRingIdx = 0;
     if (!createOutputTexture())
         return false;
 

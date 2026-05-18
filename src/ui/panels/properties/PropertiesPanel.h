@@ -322,6 +322,8 @@ private:
     ScrubbySpinBox* m_posYSpin{nullptr};
     ScrubbySpinBox* m_scaleXSpin{nullptr};
     ScrubbySpinBox* m_scaleYSpin{nullptr};
+    QCheckBox*      m_flipHCheck{nullptr};   // negates scaleX
+    QCheckBox*      m_flipVCheck{nullptr};   // negates scaleY
     ScrubbySpinBox* m_rotationSpin{nullptr};
     ScrubbySpinBox* m_opacitySpin{nullptr};
     // Crop spinboxes (percentage 0-100)

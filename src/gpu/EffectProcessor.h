@@ -179,6 +179,7 @@ private:
     VkPipeline       m_letterboxPipeline{VK_NULL_HANDLE};
     VkPipeline       m_colorGradingPipeline{VK_NULL_HANDLE};
     VkPipeline       m_otsPipeline{VK_NULL_HANDLE};
+    VkPipeline       m_flipPipeline{VK_NULL_HANDLE};
     VkPipelineLayout m_pipelineLayout{VK_NULL_HANDLE};
 
     // Descriptors

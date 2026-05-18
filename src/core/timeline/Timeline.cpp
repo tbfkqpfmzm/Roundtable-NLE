@@ -7,6 +7,7 @@
 #include "timeline/Clip.h"
 
 #include <algorithm>
+#include <unordered_map>
 #include <spdlog/spdlog.h>
 
 namespace rt {
@@ -297,13 +298,33 @@ std::unique_ptr<Timeline> Timeline::clone() const
         dstTrack->setVolume(srcTrack->volume());
         dstTrack->setPan(srcTrack->pan());
 
+        // Clone clips and build old→new ID map for transition remapping
+        std::unordered_map<uint64_t, uint64_t> idMap;
         for (size_t ci = 0; ci < srcTrack->clipCount(); ++ci) {
-            dstTrack->addClip(srcTrack->clip(ci)->clone());
+            const Clip* srcClip = srcTrack->clip(ci);
+            uint64_t oldId = srcClip->id();
+            auto cloned = srcClip->clone();
+            uint64_t newId = cloned->id();
+            idMap[oldId] = newId;
+            dstTrack->addClip(std::move(cloned));
         }
 
-        // Copy transitions
+        // Copy transitions, remapping clip IDs to the new cloned clips
         for (size_t tri = 0; tri < srcTrack->transitionCount(); ++tri) {
-            dstTrack->addTransition(*srcTrack->transition(tri));
+            Transition t = *srcTrack->transition(tri);
+            // Remap leftClipId (0 = no clip, e.g. fade-in from nothing)
+            if (t.leftClipId != 0) {
+                auto it = idMap.find(t.leftClipId);
+                if (it != idMap.end())
+                    t.leftClipId = it->second;
+            }
+            // Remap rightClipId (0 = no clip, e.g. fade-out to nothing)
+            if (t.rightClipId != 0) {
+                auto it = idMap.find(t.rightClipId);
+                if (it != idMap.end())
+                    t.rightClipId = it->second;
+            }
+            dstTrack->addTransition(t);
         }
     }
 

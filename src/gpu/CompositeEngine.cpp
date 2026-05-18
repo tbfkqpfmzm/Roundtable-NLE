@@ -405,7 +405,8 @@ std::shared_ptr<CachedFrame> CompositeEngine::composite(
     std::chrono::high_resolution_clock::time_point& perfTgpuUp,
     std::chrono::high_resolution_clock::time_point& perfTcomp,
     int& effectLayerCount, int& effectPassCount,
-    int& transitionCount)
+    int& transitionCount,
+    bool allowLruInsert)
 {
     if (m_gpuCompositeState == 0) {
         m_gpuCompositeState = GpuContext::get().isInitialized() ? 1 : -1;
@@ -446,7 +447,8 @@ std::shared_ptr<CachedFrame> CompositeEngine::composite(
         layers, outW, outH, tick, scrubMode, gpuDisplayMode,
         compositor, effectProcessor, transitionRenderer,
         perfLog, perfT0, perfTlayers, perfTgpuUp, perfTcomp,
-        effectLayerCount, effectPassCount, transitionCount);
+        effectLayerCount, effectPassCount, transitionCount,
+        allowLruInsert);
 }
 
 // ============================================================================
@@ -467,7 +469,8 @@ std::shared_ptr<CachedFrame> CompositeEngine::compositeViaRenderGraph(
     std::chrono::high_resolution_clock::time_point& perfTgpuUp,
     std::chrono::high_resolution_clock::time_point& perfTcomp,
     int& effectLayerCount, int& effectPassCount,
-    int& transitionCount)
+    int& transitionCount,
+    bool allowLruInsert)
 {
     using namespace render_graph;
 
@@ -1252,7 +1255,12 @@ std::shared_ptr<CachedFrame> CompositeEngine::compositeViaRenderGraph(
             compositor->mapAndCopyReadback(result->pixels);
         }
 
-        if (!result->gpuReady) {
+        // allowLruInsert is false for nested-sequence inner composites:
+        // their CPU result is the inner timeline WITHOUT the SequenceClip
+        // transform and would collide with the outer program tick in the
+        // shared (tick,w,h)-keyed LRU, flickering the nested clip every
+        // other frame.
+        if (allowLruInsert && !result->gpuReady) {
             insertLru(tick, outW, outH, result);
         }
 

@@ -14,6 +14,7 @@
 #include "media/AudioPlaybackService.h"
 #include "media/MediaPool.h"
 #include "media/PlaybackController.h"
+#include "panels/monitors/ProgramMonitor.h"  // for requestRefresh() after warmup
 
 #include "timeline/Timeline.h"
 #include "timeline/Track.h"
@@ -251,9 +252,19 @@ void TimelineWorkspace::preOpenVideoMedia()
                      opened, loopWarmCount, headWarmCount, ms);
 
         // Signal completion on the UI thread so isBackgroundWarmupActive()
-        // returns false and playback can proceed.
+        // returns false and playback can proceed.  Also re-kick the Program
+        // Monitor so the just-warmed media actually paints: the 100ms
+        // post-setTimeline requestRefresh fires a 15-cycle (~240ms) settle
+        // window that typically expires before this background open
+        // completes (NVDEC init + FFmpeg probe is 100-170ms per character
+        // clip), so the cold-start composite returned nothing and the
+        // tick-dedup gate then froze the monitor blank until the user
+        // scrubbed or played.  A second requestRefresh here resets the
+        // settle window with the cache warm, so the saved-playhead frame
+        // composites for real on the next poll tick.
         QMetaObject::invokeMethod(qApp, [this]() {
             m_backgroundWarmupActive.fetch_sub(1, std::memory_order_release);
+            if (m_programMonitor) m_programMonitor->requestRefresh();
         }, Qt::QueuedConnection);
     }).detach();
 }

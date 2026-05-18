@@ -162,11 +162,15 @@ private:
     // / Resolve enforce similar caps (~24-32 active media textures per
     // composite frame).  Pin lifetime is one ring traversal (~3 frames).
     static constexpr size_t kMaxPinsPerSlot = 32;
-    using PinKey = std::pair<uint64_t, int64_t>;
+    struct PinKey {
+        uint64_t mediaId;
+        int64_t  frameNumber;
+        uint8_t  tier;
+    };
     std::array<std::vector<PinKey>, kRingSize> m_slotPins;
 
     int  m_currentSubmissionSlot{0};  // set by beginFrame()
-    void recordPin(uint64_t mediaId, int64_t frameNumber);
+    void recordPin(uint64_t mediaId, int64_t frameNumber, uint8_t tier);
     void releaseSlotPins(int slotIndex);
 
     // ── A4: Recycled-texture pool ──────────────────────────────────────

@@ -17,6 +17,7 @@
 #include "command/Command.h"
 #include "command/CompoundCommand.h"
 #include "command/commands/ClipCommands.h"
+#include "command/commands/TransitionCmds.h"
 
 #include <spdlog/spdlog.h>
 #include <algorithm>
@@ -64,16 +65,59 @@ std::unique_ptr<Command> EditOperations::moveClipToTrack(
 
     newTimelineIn = std::max<int64_t>(0, newTimelineIn);
 
+    // ── Save single-sided transitions before removal ────────────────────
+    // Single-sided fades referencing the moved clip follow it to the
+    // destination track.  Two-sided dissolves where the OTHER side stays
+    // on srcTrack are intentionally dropped (matches Premiere — moving
+    // one half of a dissolve removes it).  Joint moves where BOTH halves
+    // travel together are handled by the caller before reaching here:
+    // it strips the shared transition out of srcTrack and re-adds it on
+    // dstTrack after the moves complete.
+    const Clip* clip = srcTrack->clip(idx);
+    std::vector<Transition> savedTransitions;
+    for (const auto& t : srcTrack->transitions()) {
+        bool isSingleSided = (t.leftClipId == 0) || (t.rightClipId == 0);
+        bool referencesClip = (t.leftClipId == clipId) || (t.rightClipId == clipId);
+        if (isSingleSided && referencesClip) {
+            savedTransitions.push_back(t);
+        }
+    }
+
+    // Clone the clip for the destination track, preserving its ID so any
+    // transitions that reference this clipId (saved single-sided fades,
+    // or joint-move shared transitions added by the caller) stay valid.
+    // The original is removed in the same compound, so there is no ID
+    // collision at any point.
+    auto cloned = clip->clone();
+    cloned->setId(clipId);
+    cloned->setTimelineIn(newTimelineIn);
+    const int64_t newOut = cloned->timelineOut();
+
     auto compound = std::make_unique<CompoundCommand>("Move clip to track");
 
-    // Remove from source track (the RemoveClipCommand stores the clip)
+    // Remove from source track (this drops transitions referencing clipId
+    // on srcTrack, which is fine — single-sided ones were saved above and
+    // any shared joint-move transitions were already extracted by caller).
     compound->addCommand(std::make_unique<RemoveClipCommand>(srcTrack, clipId));
 
-    // Clone the clip for the destination track
-    const Clip* clip = srcTrack->clip(idx);
-    auto cloned = clip->clone();
-    cloned->setTimelineIn(newTimelineIn);
+    // Add to destination track (with the original clipId preserved).
     compound->addCommand(std::make_unique<AddClipCommand>(dstTrack, std::move(cloned)));
+
+    // Restore the single-sided transitions on the destination track,
+    // re-anchoring editPointTick to the clip's new position.  Clip ID is
+    // unchanged so leftClipId / rightClipId still resolve correctly.
+    for (auto& t : savedTransitions) {
+        if (t.leftClipId == clipId) {
+            t.editPointTick = newOut;
+        }
+        if (t.rightClipId == clipId) {
+            t.editPointTick = newTimelineIn;
+        }
+        // clipIndexA / clipIndexB are unused by AddTransitionCommand (the
+        // Transition struct already carries the clip IDs).
+        compound->addCommand(std::make_unique<AddTransitionCommand>(
+            dstTrack, 0, 0, t));
+    }
 
     return compound;
 }

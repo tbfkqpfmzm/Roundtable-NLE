@@ -110,8 +110,20 @@ public:
     void setShotPresetManager(ShotPresetManager* m) { m_shotPresetManager = m; }
 
     // ── Core compositing ────────────────────────────────────────────────
+    /// Composite a frame for the given tick.
+    ///
+    /// @param isNestedRecursion  Internal flag: when true, the call is a
+    ///        recursive descent into a nested sequence (SequenceClip ->
+    ///        inner timeline). The inner composite skips the cache-side-
+    ///        effects (clearLru, m_lastGoodComposite write, settle-window
+    ///        bookkeeping) so the recursive frame does not pollute the
+    ///        outer composite's cached state. Without this, the presenter
+    ///        can read the inner frame from m_lastGoodComposite -- visible
+    ///        as the nested sequence "glitching to its original frame
+    ///        every other display tick" during playback / scrub.
     std::shared_ptr<CachedFrame> compositeFrame(int64_t tick, uint32_t outW, uint32_t outH,
-                                                 bool scrubMode);
+                                                 bool scrubMode,
+                                                 bool isNestedRecursion = false);
 
     /// Enqueue a prewarm request on the background thread.
     /// Returns immediately — the work runs asynchronously on m_prewarmThread.
@@ -300,6 +312,16 @@ public:
         std::shared_ptr<SpineSharedData> shared;
         std::shared_ptr<CachedFrame> cachedFrame;
         int64_t cachedTick{-1};
+        // Clip-driven settings the engine was last configured with.
+        // Used to detect a stale engine after the clip is mutated
+        // out-of-band (undo/redo, shot switch, scripting) and re-apply
+        // them cheaply without a skeleton/atlas reload.
+        std::string appliedCharKey;  // spineCharKey() at load time
+        std::string appliedAnim;
+        bool        appliedLooping{false};
+        bool        appliedTalking{false};
+        float       appliedSpeed{1.0f};
+        bool        appliedValid{false};
     };
 
     static std::string spineCharKey(const SpineClip& clip);
@@ -349,6 +371,10 @@ public:
     // ── Per-clip spine CPU state cache ──────────────────────────────
     void evictSpineState(uint64_t clipId);
     void purgeDeadSpineStates(const std::unordered_set<uint64_t>& liveIds);
+    /// Re-apply the clip's animation/looping/talking/speed to its cached
+    /// spine engine if they have drifted (e.g. after undo/redo). Cheap
+    /// no-op when nothing changed; never reloads the skeleton/atlas.
+    void resyncSpineClip(SpineClip* clip);
     [[nodiscard]] const std::unordered_map<uint64_t, std::unique_ptr<SpineCPUState>>&
         spineCache() const { return m_spineCache; }
 
@@ -390,7 +416,8 @@ private:
                                                      std::chrono::high_resolution_clock::time_point perfT0,
                                                      std::chrono::high_resolution_clock::time_point& perfTlayers,
                                                      int& effectLayerCount, int& effectPassCount,
-                                                     int& transitionCount);
+                                                     int& transitionCount,
+                                                     bool isNestedRecursion = false);
 
     // External dependencies (non-owning)
     Timeline*  m_timeline{nullptr};

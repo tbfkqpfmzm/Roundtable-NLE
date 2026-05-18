@@ -409,6 +409,7 @@ std::string ShotPreset::toJson() const
         o << "      \"scale\": " << ch.scale << ",\n";
         o << "      \"rotation\": " << ch.rotation << ",\n";
         o << "      \"flipX\": " << (ch.flipX ? "true" : "false") << ",\n";
+        o << "      \"flipY\": " << (ch.flipY ? "true" : "false") << ",\n";
         o << "      \"opacity\": " << ch.opacity << ",\n";
         o << "      \"cropLeft\": " << ch.cropLeft << ",\n";
         o << "      \"cropRight\": " << ch.cropRight << ",\n";
@@ -536,6 +537,7 @@ std::optional<ShotPreset> ShotPreset::fromJson(const std::string& json)
                     else if (fkey == "scale")         { lex.next(); ch.scale = static_cast<float>(lex.nval); }
                     else if (fkey == "rotation")      { lex.next(); ch.rotation = static_cast<float>(lex.nval); }
                     else if (fkey == "flipX")         { auto vt = lex.next(); ch.flipX = (vt == JTok::True); }
+                    else if (fkey == "flipY")         { auto vt = lex.next(); ch.flipY = (vt == JTok::True); }
                     else if (fkey == "opacity")       { lex.next(); ch.opacity = static_cast<float>(lex.nval); }
                     else if (fkey == "cropLeft")      { lex.next(); ch.cropLeft = static_cast<float>(lex.nval); }
                     else if (fkey == "cropRight")     { lex.next(); ch.cropRight = static_cast<float>(lex.nval); }

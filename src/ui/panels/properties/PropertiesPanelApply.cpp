@@ -28,6 +28,7 @@
 #include "effects/EffectStack.h"
 #include "command/commands/EffectCommands.h"
 
+#include <QCheckBox>
 #include <QFormLayout>
 #include <QFrame>
 #include <QGridLayout>
@@ -35,6 +36,7 @@
 #include <QHBoxLayout>
 #include <QListWidget>
 #include <QPushButton>
+#include <QSignalBlocker>
 #include <QScrollArea>
 #include <QVBoxLayout>
 #include <QComboBox>
@@ -437,6 +439,16 @@ void PropertiesPanel::populateFromClip()
     m_posYSpin->setValue(m_clip->positionY().evaluate(0));
     m_scaleXSpin->setValue(m_clip->scaleX().evaluate(0) * 100.0);
     m_scaleYSpin->setValue(m_clip->scaleY().evaluate(0) * 100.0);
+    // Reflect flip state from the sign of the scale (block signals so
+    // syncing the UI doesn't re-commit a transform / create undo noise).
+    if (m_flipHCheck) {
+        QSignalBlocker b(m_flipHCheck);
+        m_flipHCheck->setChecked(m_clip->scaleX().evaluate(0) < 0.0f);
+    }
+    if (m_flipVCheck) {
+        QSignalBlocker b(m_flipVCheck);
+        m_flipVCheck->setChecked(m_clip->scaleY().evaluate(0) < 0.0f);
+    }
     m_rotationSpin->setValue(m_clip->rotation().evaluate(0));
     m_opacitySpin->setValue(m_clip->opacity().evaluate(0) * 100.0);
 

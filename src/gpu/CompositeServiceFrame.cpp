@@ -59,7 +59,8 @@
 namespace rt {
 
 std::shared_ptr<CachedFrame> CompositeService::compositeFrame(int64_t tick, uint32_t outW, uint32_t outH,
-                                                                bool scrubMode)
+                                                                bool scrubMode,
+                                                                bool isNestedRecursion)
 try
 {
     if (m_shutdown.load(std::memory_order_acquire))
@@ -73,6 +74,9 @@ try
     // (STACK_OVERFLOW in nvoglv64.dll).  Return the last good cached frame
     // instead, keeping the display valid without touching the GPU.
     if (s_modalDialogActive.load(std::memory_order_acquire)) {
+        // Nested recursion: don't fall back to OUTER's last-good frame
+        // for an INNER layer (would render outer content inside itself).
+        if (isNestedRecursion) return nullptr;
         std::lock_guard lg(m_lastCompositeMtx);
         if (m_lastGoodComposite) {
             m_lastGoodComposite->gpuReady     = false;
@@ -99,6 +103,7 @@ try
     auto& depth = compositeDepth();
     constexpr int kMaxCompositeDepth = 2;
     if (depth >= kMaxCompositeDepth) {
+        if (isNestedRecursion) return nullptr;
         std::lock_guard lg(m_lastCompositeMtx);
         return m_lastGoodComposite;
     }
@@ -134,8 +139,16 @@ try
 
     // Check deferred cache invalidation request (set by requestCacheInvalidation
     // from the UI thread via atomic flag, avoiding deadlock).
+    //
+    // Skip during nested-sequence recursion: the OUTER frame already
+    // consumed the flag at its own entry and reset its own state. If the
+    // inner re-consumes the flag (it could read it while still set from a
+    // late UI invalidation), inner would reset the outer's m_lastGoodComposite
+    // and wipe the outer's LRU mid-frame -- producing the "every other frame
+    // glitches to a stale frame" symptom on nested sequences.
     bool postInvalidate = false;
-    if (m_cacheInvalidateRequested.exchange(false, std::memory_order_acquire)) {
+    if (!isNestedRecursion
+            && m_cacheInvalidateRequested.exchange(false, std::memory_order_acquire)) {
         postInvalidate = true;
         spdlog::warn("[LIVE-RELOAD] compositeFrame tick={}: invalidate flag "
                      "consumed — clearLru + reset lastGoodComposite", tick);
@@ -319,8 +332,21 @@ try
     auto perfTgpuUp  = perfT0;
     auto perfTcomp   = perfT0;
 
-    // Composite result LRU cache
-    if (m_engine && (!scrubMode || m_forceFullResolution.load())) {
+    // Composite result LRU cache.
+    //
+    // Skip entirely during nested-sequence recursion.  The LRU is keyed
+    // only by (tick, w, h) and is SHARED between the outer program
+    // composite and the inner nested-sequence composite (same engine,
+    // m_timeline swapped).  The inner composite runs in forced CPU mode
+    // and writes its result (the inner timeline WITHOUT the SequenceClip
+    // transform) into this same LRU.  When innerTick collides with the
+    // outer tick, the outer's checkLru would return that inner-only frame
+    // as the whole program output -- the "nested sequence flickers its
+    // untransformed position every other frame" bug.  The inner must
+    // always freshly composite its own content (it is snapshotted to a
+    // CPU layer by the caller anyway).
+    if (m_engine && !isNestedRecursion
+            && (!scrubMode || m_forceFullResolution.load())) {
         auto cached = m_engine->checkLru(tick, outW, outH);
         if (cached)
             return cached;
@@ -338,6 +364,23 @@ try
     int clipsAtTick = 0;
     layers = buildLayersForFrame(tick, outW, outH, scrubMode, playbackNonBlocking,
                                  clipsAtTick, perfLog, lock, gpuSpineUsedThisFrame);
+
+    // ── Nested-sequence recursion isolation ─────────────────────────────
+    // When this call is an inner SequenceClip composite and it cannot
+    // fully resolve its own layers this tick, return nullptr instead of
+    // falling through to the settle-hold / empty-sentinel paths below.
+    // Those paths return the OUTER's m_lastGoodComposite (outer program
+    // content) or an empty width=0 sentinel; either one used as the
+    // inner-sequence layer paints the program inside itself / blanks the
+    // clip, flickering against correctly-composited frames.  Skipping the
+    // inner layer for this tick (it retries next tick) is the documented
+    // correct behavior — see the isNestedRecursion nullptr fallback after
+    // tryCompositeOnGpu below.
+    if (isNestedRecursion &&
+        ((clipsAtTick > 0 && static_cast<int>(layers.size()) < clipsAtTick) ||
+         layers.empty())) {
+        return nullptr;
+    }
 
     // ── A1: Settle-window fallback (Premiere-style hold) ─────────────────
     // If we resolved FEWER layers than the active clip count, the composite
@@ -504,34 +547,34 @@ try
         auto gpuResult = tryCompositeOnGpu(layers, outW, outH, tick, scrubMode,
                                             perfLog, perfT0, perfTlayers,
                                             effectLayerCount, effectPassCount,
-                                            transitionCount);
+                                            transitionCount, isNestedRecursion);
         if (gpuResult) {
-            // Wire up the A1 settle-window bookkeeping declared in
-            // CompositeService.h.  Without this assignment the settle
-            // check above never had a prior composite to hold, so the
-            // user saw layers building one-by-one on every cold view.
-            // Only bump m_lastFullCompositeAt when the composite was
-            // COMPLETE (resolved layer count covers every active clip);
-            // partial composites still update m_lastGoodComposite so the
-            // pipeline has something to fall back on, but the settle
-            // window stays anchored to the last truly full frame.
-            std::lock_guard lg(m_lastCompositeMtx);
-            const bool wasStale = (m_lastGoodComposite == gpuResult);
-            m_lastGoodComposite     = gpuResult;
-            m_lastGoodCompositeTick = tick;
-            if (postInvalidate) {
-                spdlog::warn("[LIVE-RELOAD] compositeFrame tick={}: stored "
-                             "FRESH composite (gpuView=0x{:X}, {}x{}, "
-                             "sameAsPrev={})",
-                             tick, gpuResult ? gpuResult->gpuImageView : 0,
-                             gpuResult ? gpuResult->width : 0,
-                             gpuResult ? gpuResult->height : 0, wasStale);
-            }
-            if (clipsAtTick == 0 ||
-                static_cast<int>(layers.size()) >= clipsAtTick)
-            {
-                m_lastFullCompositeAt = std::chrono::steady_clock::now();
-                m_lastFullLayerCount  = static_cast<int>(layers.size());
+            // Skip the cache write entirely when this call is a recursive
+            // descent into a nested SequenceClip's inner timeline. The
+            // inner result must NOT replace the outer composite's
+            // m_lastGoodComposite -- the presenter thread reads that
+            // field concurrently, and a swap mid-frame causes the
+            // visible "every other frame is the nested sequence's first
+            // frame" glitch during playback / scrub.
+            if (!isNestedRecursion) {
+                std::lock_guard lg(m_lastCompositeMtx);
+                const bool wasStale = (m_lastGoodComposite == gpuResult);
+                m_lastGoodComposite     = gpuResult;
+                m_lastGoodCompositeTick = tick;
+                if (postInvalidate) {
+                    spdlog::warn("[LIVE-RELOAD] compositeFrame tick={}: stored "
+                                 "FRESH composite (gpuView=0x{:X}, {}x{}, "
+                                 "sameAsPrev={})",
+                                 tick, gpuResult ? gpuResult->gpuImageView : 0,
+                                 gpuResult ? gpuResult->width : 0,
+                                 gpuResult ? gpuResult->height : 0, wasStale);
+                }
+                if (clipsAtTick == 0 ||
+                    static_cast<int>(layers.size()) >= clipsAtTick)
+                {
+                    m_lastFullCompositeAt = std::chrono::steady_clock::now();
+                    m_lastFullLayerCount  = static_cast<int>(layers.size());
+                }
             }
             return gpuResult;
         }
@@ -548,6 +591,14 @@ try
         spdlog::debug("[COMPOSITE] tryCompositeOnGpu returned nullptr — "
                       "returning last-good (counter={})", s_quietLogCounter);
     }
+    // Nested recursion: never fall back to the outer composite's
+    // m_lastGoodComposite -- that frame represents OUTER content. Using
+    // it as the inner-sequence layer paints the outer's last frame
+    // INSIDE itself, which is the visual feedback loop the user sees.
+    // Returning nullptr cleanly skips the inner layer for this frame;
+    // the next composite tick will retry.
+    if (isNestedRecursion)
+        return nullptr;
     {
         std::lock_guard lg(m_lastCompositeMtx);
         if (m_lastGoodComposite) {
@@ -562,12 +613,14 @@ try
 catch (const std::exception& ex)
 {
     spdlog::error("compositeFrame: exception: {}", ex.what());
+    if (isNestedRecursion) return nullptr;
     std::lock_guard lg(m_lastCompositeMtx);
     return m_lastGoodComposite;
 }
 catch (...)
 {
     spdlog::error("compositeFrame: unknown exception");
+    if (isNestedRecursion) return nullptr;
     std::lock_guard lg(m_lastCompositeMtx);
     return m_lastGoodComposite;
 }

@@ -402,6 +402,11 @@ QWidget* ShotComposer::createPropertiesPanel()
     transformGrid->addWidget(m_flipXCheck, tRow, 0, 1, 5);
     ++tRow;
 
+    m_flipYCheck = new QCheckBox("Flip Vertical");
+    // Checkbox styling inherited from panel stylesheet
+    transformGrid->addWidget(m_flipYCheck, tRow, 0, 1, 5);
+    ++tRow;
+
     m_visibleCheck = new QCheckBox("Visible");
     m_visibleCheck->setChecked(true);
     // Checkbox styling inherited from panel stylesheet
@@ -547,6 +552,7 @@ QWidget* ShotComposer::createPropertiesPanel()
     connect(m_animCombo,     QOverload<int>::of(&QComboBox::currentIndexChanged), this, charChanged);
     connect(m_talkingCheck,  &QCheckBox::toggled, this, charChanged);
     connect(m_flipXCheck,    &QCheckBox::toggled, this, charChanged);
+    connect(m_flipYCheck,    &QCheckBox::toggled, this, charChanged);
     connect(m_visibleCheck,  &QCheckBox::toggled, this, charChanged);
     connect(m_cropLeftSpin,  QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, charChanged);
     connect(m_cropRightSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, charChanged);

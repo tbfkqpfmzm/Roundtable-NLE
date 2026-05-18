@@ -19,6 +19,9 @@
 
 #include <spdlog/spdlog.h>
 
+#include <unordered_map>
+#include <unordered_set>
+
 namespace rt {
 
 void TimelinePanel::mouseReleaseEvent(QMouseEvent* event)
@@ -121,7 +124,13 @@ void TimelinePanel::mouseReleaseEvent(QMouseEvent* event)
         spdlog::info("[OVERLAP-DIAG] mouseRelease: {} finals from {} dragSelectedClips, trackDelta={}",
                      finals.size(), m_dragSelectedClips.size(), trackDelta);
 
-        // Restore clips to their original tracks and positions
+        // Restore clips to their original tracks and positions.  The
+        // live-drag preview may have moved each clip between tracks via
+        // Track::removeClip()+addClip(), which silently drops every
+        // transition referencing that clip on its source track.  Once
+        // each clip is back on its original track, re-add the
+        // transitions captured at drag-start so the about-to-run
+        // moveClipToTrack command sees them and can carry them over.
         for (const auto& fp : finals) {
             Track* curTr = nullptr;
             size_t curIdx = SIZE_MAX;
@@ -146,6 +155,29 @@ void TimelinePanel::mouseReleaseEvent(QMouseEvent* event)
                 srcTr->addClip(std::move(clipPtr));
             } else {
                 curTr->moveClip(curIdx, fp.originalIn);
+            }
+        }
+        // Replay transitions onto the source track for each dragged clip
+        // so the upcoming move command can capture them (the live drag
+        // preview removed them when it moved the clip between tracks).
+        for (const auto& dcs : m_dragSelectedClips) {
+            if (dcs.originalTransitions.empty()) continue;
+            Track* origTr = m_timeline->track(dcs.originalTrack);
+            if (!origTr) continue;
+            for (const auto& orig : dcs.originalTransitions) {
+                // Skip if a transition with the same edit point + clip
+                // ids is already present (same-track moves leave them).
+                bool dup = false;
+                for (size_t i = 0; i < origTr->transitionCount(); ++i) {
+                    const Transition* ex = origTr->transition(i);
+                    if (ex && ex->editPointTick == orig.editPointTick
+                           && ex->leftClipId   == orig.leftClipId
+                           && ex->rightClipId  == orig.rightClipId) {
+                        dup = true;
+                        break;
+                    }
+                }
+                if (!dup) origTr->addTransition(orig);
             }
         }
 
@@ -212,6 +244,67 @@ void TimelinePanel::mouseReleaseEvent(QMouseEvent* event)
                     std::make_unique<InsertTrackAtCommand>(m_timeline, newTrackIndex));
             }
 
+            // ── Joint-move transition preservation ───────────────────────
+            // If both endpoints of a two-sided dissolve are in the move
+            // set AND headed to the same destination track, the
+            // per-clip moveClipToTrack path would discard it (one side
+            // moves, dissolve drops; second side has no partner to
+            // re-link).  Pull these "shared" transitions out of the
+            // source track BEFORE the per-clip moves so they survive,
+            // then re-add them on the destination after.  We also need
+            // the delta so the new editPointTick lines up with the
+            // moved clips on the destination.
+            struct SharedTrans {
+                Transition trans;            // original transition data
+                size_t     srcTrack;
+                size_t     dstTrack;
+                int64_t    timeDelta;        // shift applied to editPointTick
+            };
+            std::vector<SharedTrans> sharedTransitions;
+            {
+                // (clipId → finalPos & dstTrack) for every moving clip.
+                std::unordered_map<uint64_t, const FinalPos*> movingById;
+                for (const auto& fp : finals)
+                    movingById.emplace(fp.clipId, &fp);
+
+                // Walk every source track involved in the move, looking
+                // for transitions that fully bridge two moving clips
+                // that share a destination track.
+                std::unordered_set<size_t> srcTracksTouched;
+                for (const auto& fp : finals)
+                    srcTracksTouched.insert(fp.srcTrack);
+                for (size_t srcIdx : srcTracksTouched) {
+                    Track* srcTr = m_timeline->track(srcIdx);
+                    if (!srcTr) continue;
+                    for (size_t ti = srcTr->transitionCount(); ti-- > 0; ) {
+                        const Transition* t = srcTr->transition(ti);
+                        if (!t) continue;
+                        // Both endpoints must reference a moving clip
+                        // (excludes single-sided fades, which the
+                        // existing per-clip path already carries over).
+                        if (t->leftClipId == 0 || t->rightClipId == 0) continue;
+                        auto itL = movingById.find(t->leftClipId);
+                        auto itR = movingById.find(t->rightClipId);
+                        if (itL == movingById.end() || itR == movingById.end())
+                            continue;
+                        if (itL->second->dstTrack != itR->second->dstTrack)
+                            continue;
+                        // The two moving clips travel together — capture
+                        // the dissolve so we can replant it post-move.
+                        SharedTrans s;
+                        s.trans     = *t;
+                        s.srcTrack  = srcIdx;
+                        s.dstTrack  = itL->second->dstTrack;
+                        s.timeDelta = itL->second->finalIn - itL->second->originalIn;
+                        sharedTransitions.push_back(s);
+                        // Yank it out of the source track now so the
+                        // per-clip moveClipToTrack doesn't see it as a
+                        // dangling two-sided transition.
+                        srcTr->removeTransition(ti);
+                    }
+                }
+            }
+
             for (const auto& fp : finals) {
                 std::unique_ptr<Command> cmd;
                 if (fp.srcTrack != fp.dstTrack) {
@@ -225,6 +318,21 @@ void TimelinePanel::mouseReleaseEvent(QMouseEvent* event)
                     cmd->execute();
                     masterCompound->addCommand(std::move(cmd));
                 }
+            }
+
+            // Replant the joint-move transitions on the destination
+            // track, shifted by the move delta.  Clip IDs are preserved
+            // by moveClipToTrack so leftClipId / rightClipId still
+            // resolve to the correct (moved) clips on dst.
+            for (auto& s : sharedTransitions) {
+                Transition replanted = s.trans;
+                replanted.editPointTick += s.timeDelta;
+                Track* dstTr = m_timeline->track(s.dstTrack);
+                if (!dstTr) continue;
+                auto addCmd = std::make_unique<AddTransitionCommand>(
+                    dstTr, 0, 0, replanted);
+                addCmd->execute();
+                masterCompound->addCommand(std::move(addCmd));
             }
 
             for (const auto& fp : finals) {
@@ -355,6 +463,21 @@ void TimelinePanel::mouseReleaseEvent(QMouseEvent* event)
         setCursor(Qt::ArrowCursor);
         for (auto tw : m_trackWidgets)
             tw->setHoverEdgeTick(-1);
+
+        // The snap-indicator (white dashed line) is a transient drag
+        // affordance — it must disappear the moment the drag/roll/trim
+        // ends, not linger until the next mouse press (a snapped
+        // roller/trim otherwise looked like a stuck selection at the cut).
+        setSnapIndicator(-1);
+
+        // NOTE: the edit-point bracket is deliberately NOT cleared here.
+        // A plain edge/seam click (no drag) primes a ClipTrim* drag and
+        // paints the bracket; that bracket IS the persistent "this edit
+        // point is selected — Ctrl+T will add a transition here" visual.
+        // It is already cleared (a) at press-start on the next click and
+        // (b) the moment a trim actually moves (in the drag-move handler),
+        // so clearing it on release would only kill the indicator while
+        // the user is reading it.
 
         // Gap selection is preserved on release so it remains visible.
         // It will be cleared on the next mouse press (when clicking on a

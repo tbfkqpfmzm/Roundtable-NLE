@@ -95,6 +95,33 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
             }
             if (!hoveringTransEdge) {
             auto hitRef = hitTestClip(event->position());
+
+            // Edge-halo fallback: when zoomed out, a clip can be only a
+            // few pixels wide, so the cursor sits just outside the clip's
+            // tick range (where hitTestClip returns no match) yet still
+            // within the edge grab zone. Scan the hovered track for any
+            // clip edge within edgeGrabPx of the cursor and treat that as
+            // a hit so the trim cursor still appears.
+            if (!hitRef) {
+                size_t ti = hitTestTrack(event->position().y());
+                if (ti < m_timeline->trackCount()) {
+                    const Track* trk = m_timeline->track(ti);
+                    double pxScan = event->position().x() - headerWidth();
+                    for (size_t ci = 0; ci < trk->clipCount(); ++ci) {
+                        const Clip* c = trk->clip(ci);
+                        if (!c) continue;
+                        double l = m_layoutEngine.timeToPixelX(c->timelineIn());
+                        double r = m_layoutEngine.timeToPixelX(c->timelineOut());
+                        double zone = edgeGrabPx(r - l);
+                        if (std::abs(pxScan - l) < zone
+                                || std::abs(pxScan - r) < zone) {
+                            hitRef = ClipRef{ ti, c->id() };
+                            break;
+                        }
+                    }
+                }
+            }
+
             if (hitRef)
             {
                 // Check edge proximity for trim cursor
@@ -358,6 +385,11 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
     }
     case DragMode::ClipTrimHead:
     {
+        // The edit-point bracket is a static "you clicked this edge"
+        // affordance; once the user actually drags to trim it should
+        // disappear (Premiere hides it during the trim).  Cheap + safe
+        // to call every tick — setEditPointTick early-returns at -1.
+        clearEditPointSelection();
         int64_t newHead = m_dragOriginalIn + tickDelta;
         auto result = m_snapEngine.snap(newHead);
         if (result.didSnap) {
@@ -430,6 +462,8 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
     }
     case DragMode::ClipTrimTail:
     {
+        // See ClipTrimHead: hide the edit-point bracket once trimming.
+        clearEditPointSelection();
         int64_t newTail = m_dragOriginalIn + m_dragOriginalDuration + tickDelta;
         auto result = m_snapEngine.snap(newTail);
         if (result.didSnap) {
@@ -541,6 +575,21 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
                 rc->setTimelineIn(newEditPoint);
                 rc->setDuration(rightNewDur);
                 rc->setSourceIn(m_rollRightOrigSrcIn + rightSrcDelta);
+
+                // Live-update any transition anchored to this edit point
+                // (cross-dissolve between L/R, or single-sided fade on
+                // either side) so the user sees the transition slide
+                // along with the seam — not stay at the original tick
+                // until the drag is committed.
+                for (auto& t : rollTrack->transitions()) {
+                    const bool touchesLeft  = (t.leftClipId  == m_rollLeftClipId);
+                    const bool touchesRight = (t.rightClipId == m_rollRightClipId);
+                    const bool leftFadeOut  = touchesLeft  && t.rightClipId == 0;
+                    const bool rightFadeIn  = touchesRight && t.leftClipId  == 0;
+                    const bool dissolve     = touchesLeft  && touchesRight;
+                    if (dissolve || leftFadeOut || rightFadeIn)
+                        t.editPointTick = newEditPoint;
+                }
             }
         }
         onScrollChanged();
@@ -582,7 +631,9 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
             }
 
             // Record original positions of ALL selected clips
-            // (used by both ClipMove and multi-clip trim).
+            // (used by both ClipMove and multi-clip trim).  Also snapshot
+            // any transitions referencing each clip — see mouse-press
+            // path for rationale (live-drag drops them on cross-track).
             m_dragSelectedClips.clear();
             m_dragTargetTrack = m_dragClipRef.trackIndex;
             for (const auto& sel : m_selection.clips()) {
@@ -594,6 +645,11 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
                     dcs.ref = sel;
                     dcs.originalIn = selTrack->clip(si)->timelineIn();
                     dcs.originalTrack = sel.trackIndex;
+                    for (const auto& t : selTrack->transitions()) {
+                        if (t.leftClipId == sel.clipId
+                         || t.rightClipId == sel.clipId)
+                            dcs.originalTransitions.push_back(t);
+                    }
                     m_dragSelectedClips.push_back(dcs);
                 }
             }

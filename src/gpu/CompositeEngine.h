@@ -92,7 +92,8 @@ public:
         std::chrono::high_resolution_clock::time_point& perfTgpuUp,
         std::chrono::high_resolution_clock::time_point& perfTcomp,
         int& effectLayerCount, int& effectPassCount,
-        int& transitionCount);
+        int& transitionCount,
+        bool allowLruInsert = true);
 
     // ── GPU state ───────────────────────────────────────────────────────
     [[nodiscard]] bool isGpuAvailable() const noexcept;
@@ -221,7 +222,8 @@ private:
         std::chrono::high_resolution_clock::time_point& perfTgpuUp,
         std::chrono::high_resolution_clock::time_point& perfTcomp,
         int& effectLayerCount, int& effectPassCount,
-        int& transitionCount);
+        int& transitionCount,
+        bool allowLruInsert = true);
 
     // Composite result LRU
     static constexpr size_t kCacheSize = 8;

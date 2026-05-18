@@ -110,6 +110,12 @@ std::vector<uint8_t> ProjectSerializer::serialize(const Project& project) const
                 sec.writeI64(t->offset);
                 sec.writeF32(t->param1);
                 sec.writeF32(t->param2);
+                // v16+: clip linkage + edit-point position. Without these
+                // the transition collapses to tick 0 on reload and is
+                // effectively lost.
+                sec.writeU64(t->leftClipId);
+                sec.writeU64(t->rightClipId);
+                sec.writeI64(t->editPointTick);
             }
         }
 
@@ -174,6 +180,10 @@ std::vector<uint8_t> ProjectSerializer::serialize(const Project& project) const
                     sec.writeI64(t->offset);
                     sec.writeF32(t->param1);
                     sec.writeF32(t->param2);
+                    // v16+: clip linkage + edit-point position
+                    sec.writeU64(t->leftClipId);
+                    sec.writeU64(t->rightClipId);
+                    sec.writeI64(t->editPointTick);
                 }
             }
 
@@ -442,6 +452,12 @@ std::unique_ptr<Project> ProjectSerializer::deserialize(const std::vector<uint8_
                         t.offset   = sr.readI64();
                         t.param1   = sr.readF32();
                         t.param2   = sr.readF32();
+                        if (version >= 16)
+                        {
+                            t.leftClipId    = sr.readU64();
+                            t.rightClipId   = sr.readU64();
+                            t.editPointTick = sr.readI64();
+                        }
                         track->addTransition(t);
                     }
                 }
@@ -543,6 +559,12 @@ std::unique_ptr<Project> ProjectSerializer::deserialize(const std::vector<uint8_
                         t.offset   = sr.readI64();
                         t.param1   = sr.readF32();
                         t.param2   = sr.readF32();
+                        if (version >= 17)  // v17+: Sequences section correctly writes clip-link fields
+                        {
+                            t.leftClipId    = sr.readU64();
+                            t.rightClipId   = sr.readU64();
+                            t.editPointTick = sr.readI64();
+                        }
                         track->addTransition(t);
                     }
                 }

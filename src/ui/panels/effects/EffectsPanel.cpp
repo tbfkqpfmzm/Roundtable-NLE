@@ -366,7 +366,9 @@ void EffectsPanel::populateBrowser()
                                  EffectType::ChromaKey, EffectType::Transform2D,
                                  EffectType::Vignette, EffectType::LUT,
                                  EffectType::Letterbox, EffectType::ColorGrading,
-                                 EffectType::OtsLeft, EffectType::OtsRight } },
+                                 EffectType::OtsLeft, EffectType::OtsRight,
+                                 EffectType::FlipHorizontal,
+                                 EffectType::FlipVertical } },
         { "Video Transitions", {} },   // populated separately below
         { "Legacy",            {} },
     };

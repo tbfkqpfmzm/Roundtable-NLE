@@ -32,8 +32,11 @@
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QCheckBox>
 #include <QListWidget>
 #include <QPushButton>
+
+#include <cmath>
 #include <QScrollArea>
 #include <QVBoxLayout>
 #include <QComboBox>
@@ -375,6 +378,15 @@ void PropertiesPanel::setupTransformSection(QWidget* container)
     grid->addWidget(makeAxisLabel("H"),    row, 3);
     grid->addWidget(m_scaleYSpin,          row, 4);
     ++row;
+
+    // ── Flip (negates the corresponding scale axis) ─────────────────
+    m_flipHCheck = new QCheckBox(tr("Flip Horizontal"), m_transformSection);
+    m_flipHCheck->setToolTip(tr("Mirror the clip left/right (negative horizontal scale)"));
+    m_flipVCheck = new QCheckBox(tr("Flip Vertical"), m_transformSection);
+    m_flipVCheck->setToolTip(tr("Mirror the clip top/bottom (negative vertical scale)"));
+    grid->addWidget(m_flipHCheck, row, 0, 1, 2);
+    grid->addWidget(m_flipVCheck, row, 2, 1, 3);
+    ++row;
     grid->addWidget(makeSeparator(), row, 0, 1, 5);
     ++row;
 
@@ -480,6 +492,61 @@ void PropertiesPanel::setupTransformSection(QWidget* container)
     connectTransform(m_tfCropRightSpin);
     connectTransform(m_tfCropTopSpin);
     connectTransform(m_tfCropBottomSpin);
+
+    // Flip checkboxes drive the sign of the corresponding scale track.
+    // A flip = negative scale on that axis (the compositor already treats
+    // negative scaleX/Y as a mirror).  NOTE: do NOT route this through
+    // applyTransform() — that path uses pushWithoutExecute() and reads the
+    // OLD value from each spinbox's scrubStartValue(), which is only set
+    // during a scrub-drag.  A checkbox toggle never scrubs, so the new
+    // value would never be applied and an undo would restore a stale
+    // scrubStartValue() of 0 → scale 0 → the clip vanishes.  Instead we
+    // snapshot the whole scale KeyframeTrack and run a real execute-style
+    // undoable command (same pattern as applySpeed()).
+    auto applyFlip = [this](bool vertical, bool on) {
+        if (!m_clip) return;
+        auto* clip = m_clip;
+        KeyframeTrack<float>& track = vertical ? clip->scaleY()
+                                               : clip->scaleX();
+        KeyframeTrack<float> before = track;
+        KeyframeTrack<float> after  = track;
+        // Force the target sign on the default value + every keyframe so a
+        // keyframed scale still flips uniformly across the whole clip.
+        auto withSign = [on](float v) {
+            float m = std::abs(v);
+            return on ? -m : m;
+        };
+        after.setDefaultValue(withSign(after.defaultValue()));
+        for (size_t i = 0; i < after.keyframeCount(); ++i)
+            after.keyframe(i).value = withSign(after.keyframe(i).value);
+
+        if (before.defaultValue() == after.defaultValue()
+            && before.keyframeCount() == 0)
+            return; // no-op (already in the requested state)
+
+        if (!m_commandStack) {
+            track = after;
+            populateFromClip();
+            emit propertyChanged();
+            return;
+        }
+        m_commandStack->execute(std::make_unique<LambdaCommand>(
+            vertical ? "Flip Vertical" : "Flip Horizontal",
+            [clip, vertical, after, this]() {
+                (vertical ? clip->scaleY() : clip->scaleX()) = after;
+                populateFromClip();
+                emit propertyChanged();
+            },
+            [clip, vertical, before, this]() {
+                (vertical ? clip->scaleY() : clip->scaleX()) = before;
+                populateFromClip();
+                emit propertyChanged();
+            }));
+    };
+    connect(m_flipHCheck, &QCheckBox::toggled, this,
+            [applyFlip](bool on) { applyFlip(false, on); });
+    connect(m_flipVCheck, &QCheckBox::toggled, this,
+            [applyFlip](bool on) { applyFlip(true, on); });
 
     container->layout()->addWidget(m_transformSection);
 }

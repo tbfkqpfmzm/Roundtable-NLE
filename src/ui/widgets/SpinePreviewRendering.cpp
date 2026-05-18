@@ -195,7 +195,7 @@ void rasteriseBatches(const SpineRenderData& meshData,
                       const std::vector<QImage>& textures,
                       uint32_t* bufPixels, int bufStride, int ww, int wh,
                       float offsetX, float offsetY, float scale,
-                      bool flipX, float layerOpacity)
+                      bool flipX, bool flipY, float layerOpacity)
 {
     for (const auto& batch : meshData.batches) {
         const QImage* tex = nullptr;
@@ -228,12 +228,13 @@ void rasteriseBatches(const SpineRenderData& meshData,
             if (v0.a < 0.004f) continue;
 
             float xMul = flipX ? -scale : scale;
+            float yMul = flipY ? -scale : scale;
             float sx0 = v0.x * xMul + offsetX;
-            float sy0 = static_cast<float>(wh) - (v0.y * scale + offsetY);
+            float sy0 = static_cast<float>(wh) - (v0.y * yMul + offsetY);
             float sx1 = v1.x * xMul + offsetX;
-            float sy1 = static_cast<float>(wh) - (v1.y * scale + offsetY);
+            float sy1 = static_cast<float>(wh) - (v1.y * yMul + offsetY);
             float sx2 = v2.x * xMul + offsetX;
-            float sy2 = static_cast<float>(wh) - (v2.y * scale + offsetY);
+            float sy2 = static_cast<float>(wh) - (v2.y * yMul + offsetY);
 
             int minX = std::max(0, static_cast<int>(std::floor(std::min({sx0, sx1, sx2}))));
             int maxX = std::min(ww - 1, static_cast<int>(std::ceil(std::max({sx0, sx1, sx2}))));
@@ -382,7 +383,7 @@ void SpinePreviewWidget::renderSingleEngine(QPainter& painter)
     int bufStride = m_backBuffer.bytesPerLine() / 4;
 
     rasteriseBatches(meshData, m_textures, bufPixels, bufStride,
-                     ww, wh, offsetX, offsetY, scale, false, 1.0f);
+                     ww, wh, offsetX, offsetY, scale, false, false, 1.0f);
 
     painter.drawImage(0, 0, m_backBuffer);
 }
@@ -432,6 +433,7 @@ void SpinePreviewWidget::renderMultiLayer(QPainter& painter)
         const std::vector<QImage>* textures;
         float offsetX, offsetY, charScale;
         bool  flipX;
+        bool  flipY;
         float opacity;
         int   zOrder;  // position in the layer stack
         bool  hasCrop{false};
@@ -466,7 +468,7 @@ void SpinePreviewWidget::renderMultiLayer(QPainter& painter)
                     auto& job = charJobs[0];
                     rasteriseBatches(job.meshData, *job.textures, bufPixels, bufStride,
                                      ww, wh, job.offsetX, job.offsetY, job.charScale,
-                                     job.flipX, job.opacity);
+                                     job.flipX, job.flipY, job.opacity);
                 } else {
                     // Rasterise each job into its own buffer, then composite with clip
                     std::vector<QImage> layerBuffers(charJobs.size());
@@ -483,7 +485,7 @@ void SpinePreviewWidget::renderMultiLayer(QPainter& painter)
                                 int stride = layerBuffers[ji].bytesPerLine() / 4;
                                 rasteriseBatches(job.meshData, *job.textures, px, stride,
                                                  ww, wh, job.offsetX, job.offsetY, job.charScale,
-                                                 job.flipX, job.opacity);
+                                                 job.flipX, job.flipY, job.opacity);
                             }));
                     }
                     for (auto& f : futures) f.get();
@@ -599,15 +601,20 @@ void SpinePreviewWidget::renderMultiLayer(QPainter& painter)
                 bgPainter.save();
                 bgPainter.translate(centerX, centerY);
                 bgPainter.rotate(static_cast<double>(layer.rotation));
-                if (layer.flipX) {
-                    bgPainter.scale(-1.0, 1.0);
+                if (layer.flipX || layer.flipY) {
+                    bgPainter.scale(layer.flipX ? -1.0 : 1.0,
+                                    layer.flipY ? -1.0 : 1.0);
                 }
                 bgPainter.drawImage(-displayW / 2, -displayH / 2, drawImg);
                 bgPainter.restore();
-            } else if (layer.flipX) {
+            } else if (layer.flipX || layer.flipY) {
                 bgPainter.save();
-                bgPainter.translate(bgX + displayW, bgY);
-                bgPainter.scale(-1.0, 1.0);
+                // Translate to the far edge of each flipped axis so the
+                // mirrored image still lands in the same screen rect.
+                bgPainter.translate(bgX + (layer.flipX ? displayW : 0),
+                                    bgY + (layer.flipY ? displayH : 0));
+                bgPainter.scale(layer.flipX ? -1.0 : 1.0,
+                                layer.flipY ? -1.0 : 1.0);
                 bgPainter.drawImage(0, 0, drawImg);
                 bgPainter.restore();
             } else {
@@ -652,11 +659,12 @@ void SpinePreviewWidget::renderMultiLayer(QPainter& painter)
 
         // posX/posY are normalized 0â€“1 (0.5 = center of canvas)
         float xMul = layer.flipX ? -charScale : charScale;
+        float yMul = layer.flipY ? -charScale : charScale;
         float screenCenterX = canvasOriginX + layer.posX * canvasW;
         float screenCenterY = canvasOriginY + layer.posY * canvasH;
 
         float offsetX = screenCenterX - spCenterX * xMul;
-        float offsetY = static_cast<float>(wh) - screenCenterY - spCenterY * charScale;
+        float offsetY = static_cast<float>(wh) - screenCenterY - spCenterY * yMul;
 
         // Compute crop clip rect if needed
         bool hasCrop = (layer.cropLeft > 0.01f || layer.cropRight > 0.01f ||
@@ -677,7 +685,7 @@ void SpinePreviewWidget::renderMultiLayer(QPainter& painter)
         charJobs.push_back({
             std::move(meshData), &layer.textures,
             offsetX, offsetY, charScale,
-            layer.flipX, layer.opacity, layerZOrder,
+            layer.flipX, layer.flipY, layer.opacity, layerZOrder,
             hasCrop, cropRect, layer.blur,
             layerScreenRect(layer)
         });
@@ -698,7 +706,7 @@ void SpinePreviewWidget::renderMultiLayer(QPainter& painter)
             auto& job = charJobs[0];
             rasteriseBatches(job.meshData, *job.textures, bufPixels, bufStride,
                              ww, wh, job.offsetX, job.offsetY, job.charScale,
-                             job.flipX, job.opacity);
+                             job.flipX, job.flipY, job.opacity);
         } else {
             std::vector<QImage> layerBuffers(charJobs.size());
             std::vector<std::future<void>> futures;
@@ -714,7 +722,7 @@ void SpinePreviewWidget::renderMultiLayer(QPainter& painter)
                         int stride = layerBuffers[ji].bytesPerLine() / 4;
                         rasteriseBatches(job.meshData, *job.textures, px, stride,
                                          ww, wh, job.offsetX, job.offsetY, job.charScale,
-                                         job.flipX, job.opacity);
+                                         job.flipX, job.flipY, job.opacity);
                     }));
             }
             for (auto& f : futures) f.get();

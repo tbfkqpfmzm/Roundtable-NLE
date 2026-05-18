@@ -42,6 +42,7 @@ struct PreviewCharLayer
     float scale    = 1.0f;   ///< Scale multiplier
     float rotation = 0.0f;   ///< Rotation in degrees
     bool  flipX    = false;  ///< Horizontal flip
+    bool  flipY    = false;  ///< Vertical flip
     float opacity  = 1.0f;   ///< Opacity (0–1)
     bool  visible  = true;
     int   layerIndex = -1;   ///< Index in ShotPreset::layerOrder() (for selection)

@@ -81,7 +81,8 @@ GpuUploadResult GpuUploadManager::uploadLayer(
     // reuse the cached GPU texture.
     if (m_texCache && layer.frame && layer.frame->mediaId != 0) {
         auto hit = m_texCache->get(
-            layer.frame->mediaId, layer.frame->frameNumber);
+            layer.frame->mediaId, layer.frame->frameNumber,
+            static_cast<uint8_t>(layer.frame->tier));
         if (hit.found &&
             hit.width  == layer.frame->width &&
             hit.height == layer.frame->height)
@@ -90,7 +91,8 @@ GpuUploadResult GpuUploadManager::uploadLayer(
             // Also record the pin in the current slot's tracker so that
             // only this slot's pins are released on recycle — other
             // in-flight slots' pins remain intact.
-            recordPin(layer.frame->mediaId, layer.frame->frameNumber);
+            recordPin(layer.frame->mediaId, layer.frame->frameNumber,
+                      static_cast<uint8_t>(layer.frame->tier));
 
             result.descriptor = hit.descriptor;
             result.success    = true;
@@ -181,6 +183,7 @@ GpuUploadResult GpuUploadManager::uploadLayer(
 
         // Transfer ownership to the GPU texture cache.
         m_texCache->put(layer.frame->mediaId, layer.frame->frameNumber,
+                        static_cast<uint8_t>(layer.frame->tier),
                         std::move(cacheTex), static_cast<size_t>(dataSize),
                         layer.isPacked, layer.isPMA,
                         layer.frame->isLoopFrame);
@@ -189,7 +192,8 @@ GpuUploadResult GpuUploadManager::uploadLayer(
         // evicted during subsequent put() calls in the same frame (e.g.
         // for later layers) that might trigger LRU eviction.  The pin
         // is tracked per-slot and released when the slot recycles.
-        recordPin(layer.frame->mediaId, layer.frame->frameNumber);
+        recordPin(layer.frame->mediaId, layer.frame->frameNumber,
+                  static_cast<uint8_t>(layer.frame->tier));
 
         result.descriptor = uploadedDescInfo;
         result.success    = true;
@@ -334,7 +338,7 @@ bool GpuUploadManager::uploadMask(
 
 // ── Per-slot pin tracking ──────────────────────────────────────────────
 
-void GpuUploadManager::recordPin(uint64_t mediaId, int64_t frameNumber)
+void GpuUploadManager::recordPin(uint64_t mediaId, int64_t frameNumber, uint8_t tier)
 {
     if (!m_texCache) return;
 
@@ -350,15 +354,15 @@ void GpuUploadManager::recordPin(uint64_t mediaId, int64_t frameNumber)
         auto& pins = m_slotPins[m_currentSubmissionSlot];
         if (pins.size() >= kMaxPinsPerSlot) {
             auto& oldest = pins.front();
-            m_texCache->unpin(oldest.first, oldest.second);
+            m_texCache->unpin(oldest.mediaId, oldest.frameNumber, oldest.tier);
             pins.erase(pins.begin());
         }
-        m_texCache->pin(mediaId, frameNumber);
-        pins.emplace_back(mediaId, frameNumber);
+        m_texCache->pin(mediaId, frameNumber, tier);
+        pins.push_back({mediaId, frameNumber, tier});
     } else {
         // No slot context — just pin without tracking.  This path is
         // exercised only by tests / non-composite uploads.
-        m_texCache->pin(mediaId, frameNumber);
+        m_texCache->pin(mediaId, frameNumber, tier);
     }
 }
 
@@ -369,8 +373,8 @@ void GpuUploadManager::releaseSlotPins(int slotIndex)
         m_slotPins[slotIndex].clear();
         return;
     }
-    for (const auto& [mediaId, frameNo] : m_slotPins[slotIndex]) {
-        m_texCache->unpin(mediaId, frameNo);
+    for (const auto& pk : m_slotPins[slotIndex]) {
+        m_texCache->unpin(pk.mediaId, pk.frameNumber, pk.tier);
     }
     m_slotPins[slotIndex].clear();
 }

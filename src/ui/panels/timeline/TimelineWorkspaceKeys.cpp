@@ -15,6 +15,7 @@
 
 #include "command/CommandStack.h"
 #include "command/commands/MarkerCommands.h"
+#include "command/commands/TransitionCmds.h"
 #include "media/MediaPool.h"
 #include "media/PlaybackController.h"
 #include "timeline/EditOperations.h"
@@ -209,6 +210,24 @@ void TimelineWorkspace::keyPressEvent(QKeyEvent* event)
                     }
                 }
                 event->accept(); return;
+            }
+
+            // Check for selected transition — delete it
+            size_t transTrack = m_timelinePanel->selectedTransitionTrack();
+            size_t transIndex = m_timelinePanel->selectedTransitionIndex();
+            if (transTrack < m_timeline->trackCount()) {
+                Track* track = m_timeline->track(transTrack);
+                if (track && transIndex < track->transitionCount()) {
+                    auto cmd = std::make_unique<RemoveTransitionCommand>(track, transIndex);
+                    m_timelinePanel->clearTransitionSelection();
+                    m_commandStack->execute(std::move(cmd));
+                    m_timelinePanel->refreshTrackContents();
+                    invalidateCompositeCache();
+                    updateTransformOverlay();
+                    if (m_programMonitor) m_programMonitor->requestRefresh();
+                    schedulePostEditWork();
+                    event->accept(); return;
+                }
             }
 
             auto cmd = EditOperations::deleteSelection(*m_timeline,

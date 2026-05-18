@@ -21,9 +21,9 @@ GpuTextureCache::~GpuTextureCache()
 // ── Lookup ──────────────────────────────────────────────────────────────────
 
 GpuTextureCache::LookupResult GpuTextureCache::get(
-    uint64_t mediaId, int64_t frameNumber)
+    uint64_t mediaId, int64_t frameNumber, uint8_t tier)
 {
-    CacheKey key{mediaId, frameNumber};
+    CacheKey key{mediaId, frameNumber, tier};
     auto it = m_map.find(key);
     if (it == m_map.end()) {
         ++m_misses;
@@ -65,13 +65,13 @@ GpuTextureCache::LookupResult GpuTextureCache::get(
 
 // ── Insert ──────────────────────────────────────────────────────────────────
 
-void GpuTextureCache::put(uint64_t mediaId, int64_t frameNumber,
+void GpuTextureCache::put(uint64_t mediaId, int64_t frameNumber, uint8_t tier,
                           std::unique_ptr<Texture> tex, size_t textureBytes,
                           bool isPacked, bool isPMA, bool isLoopFrame)
 {
     if (!tex) return;
 
-    CacheKey key{mediaId, frameNumber};
+    CacheKey key{mediaId, frameNumber, tier};
 
     // If already cached, keep the existing entry (first decode wins).
     // Replacing here causes visible flicker when NVDEC and the SW decoder
@@ -106,7 +106,7 @@ void GpuTextureCache::put(uint64_t mediaId, int64_t frameNumber,
     m_map.emplace(key, std::move(entry));
 }
 
-void GpuTextureCache::putShared(uint64_t mediaId, int64_t frameNumber,
+void GpuTextureCache::putShared(uint64_t mediaId, int64_t frameNumber, uint8_t tier,
                                 std::shared_ptr<void> sharedOwner,
                                 VkDescriptorImageInfo descriptor,
                                 uint32_t width, uint32_t height,
@@ -115,7 +115,7 @@ void GpuTextureCache::putShared(uint64_t mediaId, int64_t frameNumber,
 {
     if (!sharedOwner) return;
 
-    CacheKey key{mediaId, frameNumber};
+    CacheKey key{mediaId, frameNumber, tier};
 
     // If already cached, skip (don't replace existing entries)
     auto existing = m_map.find(key);
@@ -171,18 +171,18 @@ void GpuTextureCache::setBudget(size_t bytes)
 
 // ── Pinning ─────────────────────────────────────────────────────────────────
 
-void GpuTextureCache::pin(uint64_t mediaId, int64_t frameNumber)
+void GpuTextureCache::pin(uint64_t mediaId, int64_t frameNumber, uint8_t tier)
 {
-    CacheKey key{mediaId, frameNumber};
+    CacheKey key{mediaId, frameNumber, tier};
     auto it = m_map.find(key);
     if (it != m_map.end()) {
         ++it->second.pinCount;
     }
 }
 
-void GpuTextureCache::unpin(uint64_t mediaId, int64_t frameNumber)
+void GpuTextureCache::unpin(uint64_t mediaId, int64_t frameNumber, uint8_t tier)
 {
-    CacheKey key{mediaId, frameNumber};
+    CacheKey key{mediaId, frameNumber, tier};
     auto it = m_map.find(key);
     if (it != m_map.end() && it->second.pinCount > 0) {
         --it->second.pinCount;

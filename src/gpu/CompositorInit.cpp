@@ -156,6 +156,7 @@ void Compositor::shutdown()
     m_layerParamsBuffer.destroy();
     m_placeholderTexture.destroy();
     m_outputTexture.reset();
+    for (auto& t : m_outputRing) t.reset();
 
     m_layers.clear();
     m_layerCount  = 0;
@@ -189,18 +190,29 @@ bool Compositor::createOutputTexture()
         cfg.concurrentQueueFamilies = {computeFamily, graphicsFamily};
     }
 
-    m_outputTexture = std::make_shared<Texture>();
-    if (!m_outputTexture->create(m_allocator->handle(), m_device->handle(), cfg))
-    {
-        spdlog::error("Compositor: Failed to create output texture");
-        m_outputTexture.reset();
-        return false;
-    }
-
-    // Transition to GENERAL for compute shader writes
+    // Create every slot of the output ring and transition each to GENERAL
+    // for compute-shader writes.  composite() rotates m_outputTexture
+    // through these so consecutive (and nested inner/outer) composites
+    // never share a texture the presenter is still sampling.
     VkCommandBuffer cmd = m_cmdPool->beginSingleTime();
-    m_outputTexture->transitionLayout(cmd, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    for (uint32_t i = 0; i < kOutputRing; ++i)
+    {
+        auto tex = std::make_shared<Texture>();
+        if (!tex->create(m_allocator->handle(), m_device->handle(), cfg))
+        {
+            spdlog::error("Compositor: Failed to create output ring texture {}", i);
+            m_cmdPool->endSingleTime(cmd, m_queue);
+            for (auto& t : m_outputRing) t.reset();
+            m_outputTexture.reset();
+            return false;
+        }
+        tex->transitionLayout(cmd, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+        m_outputRing[i] = std::move(tex);
+    }
     m_cmdPool->endSingleTime(cmd, m_queue);
+
+    m_outputRingIdx = 0;
+    m_outputTexture = m_outputRing[0];
 
     return true;
 }

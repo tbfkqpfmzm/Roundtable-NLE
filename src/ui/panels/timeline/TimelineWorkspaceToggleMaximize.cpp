@@ -1,9 +1,19 @@
 /*
- * TimelineWorkspaceToggleMaximize.cpp — Panel maximize/restore logic extracted
- * from TimelineWorkspace.cpp.
+ * TimelineWorkspaceToggleMaximize.cpp — Panel maximize/restore (tilde/`).
  *
- * Contains: togglePanelMaximize(), helper classes (EdgeEventLogger),
- * and static helper logParentChain().
+ * Premiere-style: pressing ` maximizes the panel under the cursor; pressing
+ * it again reverts to EXACTLY the prior layout.
+ *
+ * Design (deliberately minimal):
+ *   - Maximize never reparents any widget.  It simply hides every sibling
+ *     panel/column so the target dock/panel gets all the space.  This is
+ *     critical because the Program Monitor hosts a native Vulkan surface;
+ *     reparenting it (the old implementation did) destroys + recreates the
+ *     native window and the swapchain, which is why the monitor went blank.
+ *   - Restore re-applies an EXACT visibility snapshot captured at maximize
+ *     time, plus QMainWindow::restoreState() for the inner dock arrangement.
+ *     Panels the user had closed stay closed (the old code force-showed
+ *     every panel/dock unconditionally — the reported bug).
  */
 
 #include "panels/timeline/TimelineWorkspace.h"
@@ -13,439 +23,186 @@
 #include <QApplication>
 #include <QCursor>
 #include <QDockWidget>
-#include <QHBoxLayout>
-#include <QLayout>
+#include <QEvent>
+#include <QEventLoop>
 #include <QMainWindow>
-#include <QMouseEvent>
 #include <QPoint>
-#include <QTimer>
-#include <QVBoxLayout>
 
 #include <spdlog/spdlog.h>
 
 namespace rt {
 
-// --- Panel maximize/restore logic (tilde key) ---
-// Helper: log parent chain
-static void logParentChain(QWidget* w, const char* label) {
-    QStringList chain;
-    QWidget* cur = w;
-    while (cur) {
-        chain << QString::fromUtf8(cur->metaObject()->className()) + ":" + cur->objectName();
-        cur = cur->parentWidget();
-    }
-    spdlog::info("[togglePanelMaximize][{}] Parent chain: {}", label, chain.join(" <- ").toStdString());
+// Walk up to the first QMainWindow ancestor (the dock's owning window —
+// either m_innerMainWindow or one of the edge-column QMainWindows).
+static QMainWindow* ownerMainWindow(QWidget* w)
+{
+    for (QWidget* p = w ? w->parentWidget() : nullptr; p; p = p->parentWidget())
+        if (auto* mw = qobject_cast<QMainWindow*>(p))
+            return mw;
+    return nullptr;
 }
 
-// Event filter for show/hide events
-class EdgeEventLogger : public QObject {
-public:
-    EdgeEventLogger(QObject* parent = nullptr) : QObject(parent) {}
-protected:
-    bool eventFilter(QObject* obj, QEvent* event) override {
-        if (event->type() == QEvent::Show) {
-            spdlog::info("[EdgeEventLogger] SHOW {} {}",
-                         obj->metaObject()->className(), obj->objectName().toStdString());
-        } else if (event->type() == QEvent::Hide) {
-            spdlog::info("[EdgeEventLogger] HIDE {} {}",
-                         obj->metaObject()->className(), obj->objectName().toStdString());
-        }
-        return QObject::eventFilter(obj, event);
-    }
-};
-
-void TimelineWorkspace::togglePanelMaximize() {
-    // --- Force show/raise on edge QMainWindows and their dock widgets ---
-    if (m_edgeSplitter) {
-        for (int i = 0; i < m_edgeSplitter->count(); ++i) {
-            QMainWindow* edgeWin = qobject_cast<QMainWindow*>(m_edgeSplitter->widget(i));
-            if (edgeWin && edgeWin != m_innerMainWindow) {
-                // Install event logger
-                static EdgeEventLogger* logger = nullptr;
-                if (!logger) logger = new EdgeEventLogger(this);
-                edgeWin->installEventFilter(logger);
-                for (QDockWidget* dock : edgeWin->findChildren<QDockWidget*>()) {
-                    dock->installEventFilter(logger);
-                }
-                edgeWin->show();
-                edgeWin->raise();
-                for (QDockWidget* dock : edgeWin->findChildren<QDockWidget*>()) {
-                    dock->show();
-                    dock->raise();
-                }
-            }
-        }
-    }
-
-    // --- QTimer::singleShot to re-show edge columns after event loop ---
-    if (m_edgeSplitter) {
-        QTimer::singleShot(0, this, [this]() {
-            for (int i = 0; i < m_edgeSplitter->count(); ++i) {
-                QMainWindow* edgeWin = qobject_cast<QMainWindow*>(m_edgeSplitter->widget(i));
-                if (edgeWin && edgeWin != m_innerMainWindow) {
-                    edgeWin->show();
-                    edgeWin->raise();
-                    for (QDockWidget* dock : edgeWin->findChildren<QDockWidget*>()) {
-                        dock->show();
-                        dock->raise();
-                    }
-                    QRect geom = edgeWin->geometry();
-                    spdlog::info("[togglePanelMaximize][QTimer] Edge QMainWindow '%s' geom=[%d,%d %dx%d] visible=%s", 
-                        edgeWin->objectName().toStdString().c_str(),
-                        geom.x(), geom.y(), geom.width(), geom.height(),
-                        edgeWin->isVisible() ? "true" : "false");
-                    logParentChain(edgeWin, "QTimer1");
-                    for (QDockWidget* dock : edgeWin->findChildren<QDockWidget*>()) {
-                        logParentChain(dock, "QTimer1-Dock");
-                    }
-                }
-            }
-            // --- Double-deferred workaround ---
-            QTimer::singleShot(0, this, [this]() {
-                for (int i = 0; i < m_edgeSplitter->count(); ++i) {
-                    QMainWindow* edgeWin = qobject_cast<QMainWindow*>(m_edgeSplitter->widget(i));
-                    if (edgeWin && edgeWin != m_innerMainWindow) {
-                        edgeWin->show();
-                        edgeWin->raise();
-                        for (QDockWidget* dock : edgeWin->findChildren<QDockWidget*>()) {
-                            dock->show();
-                            dock->raise();
-                        }
-                        QRect geom = edgeWin->geometry();
-                        spdlog::info("[togglePanelMaximize][QTimer2] Edge QMainWindow '%s' geom=[%d,%d %dx%d] visible=%s", 
-                            edgeWin->objectName().toStdString().c_str(),
-                            geom.x(), geom.y(), geom.width(), geom.height(),
-                            edgeWin->isVisible() ? "true" : "false");
-                        logParentChain(edgeWin, "QTimer2");
-                        for (QDockWidget* dock : edgeWin->findChildren<QDockWidget*>()) {
-                            logParentChain(dock, "QTimer2-Dock");
-                        }
-                    }
-                }
-                // Log focus widget
-                QWidget* fw = QApplication::focusWidget();
-                if (fw) {
-                    spdlog::info("[togglePanelMaximize][QTimer2] Focus widget: %s %s",
-                                 fw->metaObject()->className(), fw->objectName().toStdString().c_str());
-                    logParentChain(fw, "FocusWidget");
-                }
-            });
-        });
-    }
-
-    // --- Re-log splitter child widget widths after forced show/raise ---
-    if (m_edgeSplitter) {
-        QStringList widgetInfo;
-        for (int i = 0; i < m_edgeSplitter->count(); ++i) {
-            QWidget* w = m_edgeSplitter->widget(i);
-            if (w) {
-                widgetInfo << QString("%1: width=%2 visible=%3").arg(w->objectName(), QString::number(w->width()), w->isVisible() ? "true" : "false");
-            }
-        }
-        spdlog::info("[togglePanelMaximize] (after force show) Splitter widget widths: {}", widgetInfo.join(" | ").toStdString());
-    }
-
-    // --- Log splitter child widget widths after restore ---
-    if (m_edgeSplitter) {
-        QStringList widgetInfo;
-        for (int i = 0; i < m_edgeSplitter->count(); ++i) {
-            QWidget* w = m_edgeSplitter->widget(i);
-            if (w) {
-                widgetInfo << QString("%1: width=%2 visible=%3").arg(w->objectName(), QString::number(w->width()), w->isVisible() ? "true" : "false");
-            }
-        }
-        spdlog::info("[togglePanelMaximize] Splitter widget widths after restore: {}", widgetInfo.join(" | ").toStdString());
-    }
-
-    // --- Log dock widget areas and geometry after restore ---
-    for (auto it = m_dockWidgets.begin(); it != m_dockWidgets.end(); ++it) {
-        QDockWidget* dock = it.value();
-        if (dock) {
-            QMainWindow* parentWin = nullptr;
-            QWidget* parent = dock->parentWidget();
-            while (parent) {
-                parentWin = qobject_cast<QMainWindow*>(parent);
-                if (parentWin) break;
-                parent = parent->parentWidget();
-            }
-            Qt::DockWidgetArea area = Qt::NoDockWidgetArea;
-            if (parentWin) {
-                area = parentWin->dockWidgetArea(dock);
-            }
-            QRect geom = dock->geometry();
-            spdlog::info("[togglePanelMaximize] Dock '%s' area=%d geom=[%d,%d %dx%d] visible=%s parentWin=%s", 
-                dock->objectName().toStdString().c_str(),
-                static_cast<int>(area),
-                geom.x(), geom.y(), geom.width(), geom.height(),
-                dock->isVisible() ? "true" : "false",
-                parentWin ? parentWin->objectName().toStdString().c_str() : "null");
-        }
-    }
-
-    // --- Log edge QMainWindow geometry and visibility ---
-    if (m_edgeSplitter) {
-        for (int i = 0; i < m_edgeSplitter->count(); ++i) {
-            QMainWindow* edgeWin = qobject_cast<QMainWindow*>(m_edgeSplitter->widget(i));
-            if (edgeWin && edgeWin != m_innerMainWindow) {
-                QRect geom = edgeWin->geometry();
-                spdlog::info("[togglePanelMaximize] Edge QMainWindow '%s' geom=[%d,%d %dx%d] visible=%s", 
-                    edgeWin->objectName().toStdString().c_str(),
-                    geom.x(), geom.y(), geom.width(), geom.height(),
-                    edgeWin->isVisible() ? "true" : "false");
-            }
-        }
-    }
-
+void TimelineWorkspace::togglePanelMaximize()
+{
     if (!m_panelsBuilt || !m_innerMainWindow)
         return;
 
-    static QByteArray s_savedDockState;
-    static QList<int> s_savedSplitterSizes;
-    static QWidget* s_maximizedPanel = nullptr;
-    static QWidget* s_originalParent = nullptr;
-    static QLayout* s_originalLayout = nullptr;
-    static int s_originalIndex = -1;
-    static QMainWindow* s_originalMainWindow = nullptr;
-    static int s_originalSplitterIndex = -1;
-    static Qt::DockWidgetArea s_originalDockArea = Qt::NoDockWidgetArea;
-
+    // ──────────────────────────────────────────────────────────────────
+    // RESTORE — revert to precisely the pre-maximize layout
+    // ──────────────────────────────────────────────────────────────────
     if (m_panelMaximized) {
-        // --- RESTORE ---
-        if (s_maximizedPanel && s_originalParent) {
-            if (this->layout())
-                this->layout()->removeWidget(s_maximizedPanel);
-            QDockWidget* dock = qobject_cast<QDockWidget*>(s_maximizedPanel);
-            if (dock && s_originalMainWindow) {
-                // Restore to correct QMainWindow (edge or central)
-                Qt::DockWidgetArea restoreArea = s_originalDockArea;
-                if (restoreArea == Qt::NoDockWidgetArea)
-                    restoreArea = Qt::LeftDockWidgetArea;
-                s_originalMainWindow->addDockWidget(restoreArea, dock);
-                // If edge splitter, reinsert QMainWindow at correct index
-                if (m_edgeSplitter && s_originalMainWindow != m_innerMainWindow && s_originalSplitterIndex >= 0) {
-                    int idx = m_edgeSplitter->indexOf(s_originalMainWindow);
-                    if (idx != -1 && idx != s_originalSplitterIndex) {
-                        m_edgeSplitter->widget(idx)->setParent(nullptr);
-                        m_edgeSplitter->insertWidget(s_originalSplitterIndex, s_originalMainWindow);
-                    } else if (idx == -1) {
-                        m_edgeSplitter->insertWidget(s_originalSplitterIndex, s_originalMainWindow);
-                    }
-                    s_originalMainWindow->show();
-                }
-                // --- Ensure all edge columns are present and visible ---
-                if (m_edgeSplitter) {
-                    for (int i = 0; i < m_edgeSplitter->count(); ++i) {
-                        QMainWindow* edgeWin = qobject_cast<QMainWindow*>(m_edgeSplitter->widget(i));
-                        if (edgeWin && edgeWin != m_innerMainWindow) {
-                            edgeWin->show();
-                        }
-                    }
-                }
-            } else if (!dock && s_originalLayout && s_originalIndex >= 0) {
-                QBoxLayout* box = qobject_cast<QBoxLayout*>(s_originalLayout);
-                if (box) {
-                    box->insertWidget(s_originalIndex, s_maximizedPanel);
-                } else {
-                    s_originalLayout->addWidget(s_maximizedPanel);
-                }
-                s_maximizedPanel->setParent(s_originalParent);
-            } else {
-                s_maximizedPanel->setParent(s_originalParent);
-            }
-            s_maximizedPanel->show();
-            // --- Ensure all edge columns are present and visible (for non-dock panels too) ---
-            if (m_edgeSplitter) {
-                for (int i = 0; i < m_edgeSplitter->count(); ++i) {
-                    QMainWindow* edgeWin = qobject_cast<QMainWindow*>(m_edgeSplitter->widget(i));
-                    if (edgeWin && edgeWin != m_innerMainWindow) {
-                        edgeWin->show();
-                    }
-                }
-            }
-        }
-        // Restore dock state AFTER reparenting
-        if (!s_savedDockState.isEmpty())
-            m_innerMainWindow->restoreState(s_savedDockState, 4);
+        // ORDER MATTERS.  QMainWindow::restoreState() distributes dock
+        // sizes against the inner window's CURRENT size.  While maximized
+        // the edge columns are hidden, so the inner window is at its wide
+        // full-workspace size.  We must put the columns + splitter back
+        // FIRST so the inner window regains its pre-maximize dimensions,
+        // then restoreState() so dock proportions are computed against the
+        // correct width (otherwise panels come back wider/larger/moved).
 
-        // --- Ensure all splitter widgets are visible BEFORE restoring sizes ---
-        if (m_edgeSplitter) {
-            for (int i = 0; i < m_edgeSplitter->count(); ++i) {
-                QWidget* w = m_edgeSplitter->widget(i);
-                if (w) w->show();
-            }
-        }
+        // 1. Edge column (QMainWindow) + central visibility.
+        for (auto& [win, vis] : m_edgeVisBeforeMax)
+            if (win) win->setVisible(vis);
+        if (m_centralBeforeMax)
+            m_centralBeforeMax->setVisible(m_centralVisBeforeMax);
 
-        // Debug: log splitter sizes before restore
-        if (m_edgeSplitter) {
-            QList<int> beforeSizes = m_edgeSplitter->sizes();
-            QStringList beforeStrs;
-            for (int sz : beforeSizes) beforeStrs << QString::number(sz);
-            spdlog::info("[togglePanelMaximize] Splitter sizes before restore: [{}]", beforeStrs.join(", ").toStdString());
-        }
+        // 2. Splitter pane geometry (saveState/restoreState is far more
+        //    reliable than setSizes() across hidden/shown panes).
+        if (m_edgeSplitter && !m_edgeSplitterStateBeforeMax.isEmpty())
+            m_edgeSplitter->restoreState(m_edgeSplitterStateBeforeMax);
 
-        // Restore splitter sizes AFTER all edge QMainWindows are present and visible
-        if (m_edgeSplitter && !s_savedSplitterSizes.isEmpty()) {
-            m_edgeSplitter->setSizes(s_savedSplitterSizes);
-            m_edgeSplitter->update();
-            QApplication::processEvents();
-        }
+        // 3. Flush pending layout so the inner QMainWindow is back at its
+        //    pre-maximize size BEFORE its dock state is restored.
+        QApplication::sendPostedEvents(nullptr, QEvent::LayoutRequest);
+        QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 
-        // Debug: log splitter sizes after restore
-        if (m_edgeSplitter) {
-            QList<int> afterSizes = m_edgeSplitter->sizes();
-            QStringList afterStrs;
-            for (int sz : afterSizes) afterStrs << QString::number(sz);
-            spdlog::info("[togglePanelMaximize] Splitter sizes after restore: [{}]", afterStrs.join(", ").toStdString());
-        }
+        // 4. Dock arrangement (areas, sizes, tabs, visibility) for EVERY
+        //    dock-hosting window — inner AND each edge column — now
+        //    computed against their correct restored sizes.
+        for (auto& [win, state] : m_dockStatesBeforeMax)
+            if (win && !state.isEmpty())
+                win->restoreState(state, 4);
 
-        // --- Full edge column rebuild: remove and re-insert all edge QMainWindow widgets at their original indices ---
-        if (m_edgeSplitter) {
-            struct EdgeInfo { QMainWindow* win; int idx; };
-            QVector<EdgeInfo> edgeWins;
-            for (int i = 0; i < m_edgeSplitter->count(); ++i) {
-                QMainWindow* edgeWin = qobject_cast<QMainWindow*>(m_edgeSplitter->widget(i));
-                if (edgeWin && edgeWin != m_innerMainWindow) {
-                    edgeWins.append({edgeWin, i});
-                }
-            }
-            for (const EdgeInfo& info : edgeWins) {
-                info.win->setParent(nullptr);
-            }
-            for (const EdgeInfo& info : edgeWins) {
-                m_edgeSplitter->insertWidget(info.idx, info.win);
-                info.win->show();
-                info.win->raise();
-                for (QDockWidget* dock : info.win->findChildren<QDockWidget*>()) {
-                    dock->show();
-                    dock->raise();
-                }
-                spdlog::info("[togglePanelMaximize][rebuild] Re-inserted and showed Edge QMainWindow '%s' at index %d",
-                             info.win->objectName().toStdString().c_str(), info.idx);
-            }
-            if (!s_savedSplitterSizes.isEmpty()) {
-                m_edgeSplitter->setSizes(s_savedSplitterSizes);
-                m_edgeSplitter->update();
-                QApplication::processEvents();
-            }
-        }
+        // 5. Exact per-dock visibility.  Fixes docks that live in edge
+        //    columns AND guarantees panels the user had CLOSED are not
+        //    force-shown.
+        for (auto& [dock, vis] : m_dockVisBeforeMax)
+            if (dock) dock->setVisible(vis);
 
-        // Show all dock widgets after dock state restore
-        for (auto it = m_dockWidgets.begin(); it != m_dockWidgets.end(); ++it) {
-            QDockWidget* dock = it.value();
-            if (dock) dock->setVisible(true);
-        }
-        for (QObject* child : this->children()) {
-            QWidget* w = qobject_cast<QWidget*>(child);
-            if (w) w->setVisible(true);
-        }
         m_panelMaximized = false;
-        m_maximizedDock = nullptr;
-        s_maximizedPanel = nullptr;
-        s_originalParent = nullptr;
-        s_originalLayout = nullptr;
-        s_originalIndex = -1;
-        s_originalMainWindow = nullptr;
-        s_originalSplitterIndex = -1;
+        m_maximizedWidget = nullptr;
+        m_maximizedDock   = nullptr;
+        m_dockVisBeforeMax.clear();
+        m_edgeVisBeforeMax.clear();
+        m_dockStatesBeforeMax.clear();
+        m_edgeSplitterStateBeforeMax.clear();
+        m_centralBeforeMax = nullptr;
+        spdlog::info("[togglePanelMaximize] restored prior layout");
         return;
-    } else {
-        // --- MAXIMIZE ---
-        if (m_panelMaximized) {
-            return;
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // MAXIMIZE — pick the panel under the cursor (then focus fallback)
+    // ──────────────────────────────────────────────────────────────────
+    QWidget* target = nullptr;
+    const QPoint gm = QCursor::pos();
+
+    for (auto it = m_dockWidgets.begin(); it != m_dockWidgets.end(); ++it) {
+        QDockWidget* dock = it.value();
+        if (dock && dock->isVisible() &&
+            dock->rect().contains(dock->mapFromGlobal(gm))) {
+            target = dock;
+            break;
         }
-        QWidget* targetWidget = nullptr;
-        QPoint globalMouse = QCursor::pos();
-        // 1. Try QDockWidget under mouse
+    }
+    if (!target && m_timelinePanel && m_timelinePanel->isVisible() &&
+        m_timelinePanel->rect().contains(m_timelinePanel->mapFromGlobal(gm)))
+        target = m_timelinePanel;
+    if (!target) {
+        QWidget* fw = QApplication::focusWidget();
         for (auto it = m_dockWidgets.begin(); it != m_dockWidgets.end(); ++it) {
             QDockWidget* dock = it.value();
-            if (dock && dock->isVisible() && dock->rect().contains(dock->mapFromGlobal(globalMouse))) {
-                targetWidget = dock;
+            if (dock && dock->isVisible() && fw && dock->isAncestorOf(fw)) {
+                target = dock;
                 break;
             }
         }
-        // 2. Try TimelinePanel under mouse
-        if (!targetWidget && m_timelinePanel && m_timelinePanel->isVisible() && m_timelinePanel->rect().contains(m_timelinePanel->mapFromGlobal(globalMouse))) {
-            targetWidget = m_timelinePanel;
-        }
-        // 3. Try focused dock
-        if (!targetWidget) {
-            QWidget* fw = QApplication::focusWidget();
-            for (auto it = m_dockWidgets.begin(); it != m_dockWidgets.end(); ++it) {
-                QDockWidget* dock = it.value();
-                if (dock && dock->isAncestorOf(fw)) {
-                    targetWidget = dock;
-                    break;
-                }
-            }
-        }
-        // 4. Try focused TimelinePanel
-        if (!targetWidget && m_timelinePanel && m_timelinePanel->isAncestorOf(QApplication::focusWidget())) {
-            targetWidget = m_timelinePanel;
-        }
-        if (!targetWidget)
-            return;
-
-        s_savedDockState = m_innerMainWindow->saveState(4);
-        m_dockStateBeforeMaximize = s_savedDockState;
-        if (m_edgeSplitter)
-            s_savedSplitterSizes = m_edgeSplitter->sizes();
-
-        s_maximizedPanel = targetWidget;
-        s_originalParent = targetWidget->parentWidget();
-        s_originalLayout = s_originalParent ? s_originalParent->layout() : nullptr;
-        s_originalIndex = -1;
-        s_originalMainWindow = nullptr;
-        s_originalSplitterIndex = -1;
-        QDockWidget* dock = qobject_cast<QDockWidget*>(targetWidget);
-        if (dock) {
-            QWidget* parent = dock->parentWidget();
-            QMainWindow* mainWin = nullptr;
-            while (parent) {
-                mainWin = qobject_cast<QMainWindow*>(parent);
-                if (mainWin) break;
-                parent = parent->parentWidget();
-            }
-            if (mainWin) {
-                s_originalMainWindow = mainWin;
-                if (mainWin == m_innerMainWindow) {
-                    s_originalDockArea = m_innerMainWindow->dockWidgetArea(dock);
-                } else if (m_edgeSplitter) {
-                    for (int i = 0; i < m_edgeSplitter->count(); ++i) {
-                        if (m_edgeSplitter->widget(i) == mainWin) {
-                            s_originalSplitterIndex = i;
-                            break;
-                        }
-                    }
-                    s_originalDockArea = mainWin->dockWidgetArea(dock);
-                }
-            }
-        }
-        if (s_originalLayout) {
-            for (int i = 0; i < s_originalLayout->count(); ++i) {
-                if (s_originalLayout->itemAt(i) && s_originalLayout->itemAt(i)->widget() == targetWidget) {
-                    s_originalIndex = i;
-                    break;
-                }
-            }
-            s_originalLayout->removeWidget(targetWidget);
-        }
-        targetWidget->setParent(this);
-        for (QObject* child : this->children()) {
-            QWidget* w = qobject_cast<QWidget*>(child);
-            if (w && w != targetWidget)
-                w->setVisible(false);
-        }
-        QVBoxLayout* layout = qobject_cast<QVBoxLayout*>(this->layout());
-        if (!layout) {
-            layout = new QVBoxLayout(this);
-            layout->setContentsMargins(0, 0, 0, 0);
-            setLayout(layout);
-        }
-        layout->addWidget(targetWidget);
-        targetWidget->show();
-
-        m_maximizedDock = qobject_cast<QDockWidget*>(targetWidget);
-        m_panelMaximized = true;
+        if (!target && m_timelinePanel && m_timelinePanel->isVisible() &&
+            fw && m_timelinePanel->isAncestorOf(fw))
+            target = m_timelinePanel;
     }
+    if (!target)
+        return;
+
+    QDockWidget* targetDock = qobject_cast<QDockWidget*>(target);
+    QMainWindow* targetOwner = ownerMainWindow(targetDock ? static_cast<QWidget*>(targetDock)
+                                                          : target);
+
+    // ── Snapshot the exact current state for a faithful restore ────────
+    m_dockStateBeforeMaximize = m_innerMainWindow->saveState(4);
+
+    m_dockVisBeforeMax.clear();
+    for (auto it = m_dockWidgets.begin(); it != m_dockWidgets.end(); ++it)
+        if (it.value())
+            m_dockVisBeforeMax[it.value()] = it.value()->isVisible();
+
+    // Capture saveState() for EVERY dock-hosting window: the inner window
+    // AND each edge-column QMainWindow (each owns the heights of its own
+    // stacked panels — restoring only the inner one left the leftmost
+    // column's bottom panel taller than the original).
+    m_dockStatesBeforeMax.clear();
+    m_dockStatesBeforeMax.push_back({m_innerMainWindow,
+                                     m_innerMainWindow->saveState(4)});
+
+    m_edgeVisBeforeMax.clear();
+    if (m_edgeSplitter) {
+        for (int i = 0; i < m_edgeSplitter->count(); ++i)
+            if (auto* win = qobject_cast<QMainWindow*>(m_edgeSplitter->widget(i))) {
+                m_edgeVisBeforeMax.push_back({win, win->isVisible()});
+                if (win != m_innerMainWindow)
+                    m_dockStatesBeforeMax.push_back({win, win->saveState(4)});
+            }
+        m_edgeSplitterStateBeforeMax = m_edgeSplitter->saveState();
+    }
+
+    m_centralBeforeMax    = m_innerMainWindow->centralWidget();
+    m_centralVisBeforeMax = m_centralBeforeMax ? m_centralBeforeMax->isVisible()
+                                               : true;
+
+    // ── Hide everything except the target (no reparenting) ─────────────
+    // Sibling docks.
+    for (auto it = m_dockWidgets.begin(); it != m_dockWidgets.end(); ++it) {
+        QDockWidget* dock = it.value();
+        if (dock && dock != targetDock)
+            dock->setVisible(false);
+    }
+
+    // Inner central widget: keep it only when the maximized panel IS it
+    // (the timeline panel lives inside the central container).
+    if (m_centralBeforeMax) {
+        const bool targetInCentral =
+            (target == m_centralBeforeMax) ||
+            m_centralBeforeMax->isAncestorOf(target);
+        m_centralBeforeMax->setVisible(targetInCentral);
+    }
+
+    // Splitter columns: keep only the one that owns the target so it
+    // fills the whole workspace; hide the rest.
+    for (auto& [win, vis] : m_edgeVisBeforeMax)
+        if (win)
+            win->setVisible(win == targetOwner);
+
+    if (targetDock) {
+        targetDock->setVisible(true);
+        targetDock->raise();
+    } else {
+        target->setVisible(true);
+    }
+
+    m_maximizedWidget = target;
+    m_maximizedDock   = targetDock;
+    m_panelMaximized  = true;
+    spdlog::info("[togglePanelMaximize] maximized '{}'",
+                 target->objectName().toStdString());
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

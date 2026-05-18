@@ -164,12 +164,16 @@ void TimelinePanel::setSnapIndicator(int64_t tick)
             tw->setSnapIndicatorTick(tick);
 }
 
-void TimelinePanel::setEditPointSelection(size_t trackIndex, int64_t tick)
+void TimelinePanel::setEditPointSelection(size_t trackIndex, int64_t tick,
+                                          EditPointSide side)
 {
     for (size_t i = 0; i < m_trackWidgets.size(); ++i) {
         auto* tw = m_trackWidgets[i].data();
         if (!tw) continue;
-        tw->setEditPointTick(i == trackIndex ? tick : -1);
+        if (i == trackIndex)
+            tw->setEditPointTick(tick, side);
+        else
+            tw->setEditPointTick(-1);
     }
 }
 

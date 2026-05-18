@@ -146,8 +146,9 @@ void AudioSync::placeDefaultShotVisuals(Timeline* timeline,
                     clip->positionX().setDefaultValue((character->posX - 0.5f) * outputWidth);
                     clip->positionY().setDefaultValue((character->posY - 0.5f) * outputHeight);
                     const float chScaleX = character->flipX ? -character->scale : character->scale;
+                    const float chScaleY = character->flipY ? -character->scale : character->scale;
                     clip->scaleX().setDefaultValue(chScaleX * kCharacterFit);
-                    clip->scaleY().setDefaultValue(character->scale * kCharacterFit);
+                    clip->scaleY().setDefaultValue(chScaleY * kCharacterFit);
                     clip->opacity().setDefaultValue(character->opacity);
                     if (character->cropLeft > 0 || character->cropRight > 0 ||
                         character->cropTop > 0 || character->cropBottom > 0)
@@ -175,7 +176,7 @@ void AudioSync::placeDefaultShotVisuals(Timeline* timeline,
                     clip->positionX().setDefaultValue((character->posX - 0.5f) * outputWidth);
                     clip->positionY().setDefaultValue((character->posY - 0.5f) * outputHeight);
                     clip->scaleX().setDefaultValue(character->flipX ? -character->scale : character->scale);
-                    clip->scaleY().setDefaultValue(character->scale);
+                    clip->scaleY().setDefaultValue(character->flipY ? -character->scale : character->scale);
                     clip->opacity().setDefaultValue(character->opacity);
                     if (character->cropLeft > 0 || character->cropRight > 0 ||
                         character->cropTop > 0 || character->cropBottom > 0)

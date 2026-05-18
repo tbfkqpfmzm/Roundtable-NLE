@@ -20,6 +20,8 @@
 
 #include "timeline/TimelineLayoutEngine.h"
 #include "timeline/EditOperations.h"
+#include "timeline/Transition.h"  // for DragClipState::originalTransitions
+#include "widgets/TimelineTrackWidget.h"  // for EditPointSide enum used below
 
 #include <atomic>
 #include <memory>
@@ -208,6 +210,19 @@ public:
 
     /// Clear the gap selection and update track widgets.
     void clearGapSelection();
+
+    /// Get the selected transition track/index (SIZE_MAX = none selected).
+    [[nodiscard]] size_t selectedTransitionTrack() const noexcept { return m_selectedTransitionTrack; }
+    [[nodiscard]] size_t selectedTransitionIndex() const noexcept { return m_selectedTransitionIndex; }
+
+    /// Clear the transition selection and update track widgets.
+    void clearTransitionSelection();
+
+    /// Clear the Premiere-style edit-point bracket from every track widget.
+    /// Public so external actions (e.g. Ctrl+T add-transition) can wipe the
+    /// bracket the instant the edit completes instead of waiting for the
+    /// next mouse press.
+    void clearEditPointSelection();
 
     /// Get the snap engine.
     [[nodiscard]] const SnapEngine& snapEngine() const { return m_snapEngine; }
@@ -484,10 +499,17 @@ private:
     ClickedEdge m_lastClickedEdge;
 
     // Multi-clip drag state: stores each selected clip's original position
+    // and the transitions on its source track that reference it. The
+    // live-drag preview moves clips by removeClip()+addClip(), which drops
+    // transitions referencing the moved clip on the source track. We
+    // capture them at drag-start so the mouse-release restore pass can
+    // put them back on the original track before the actual move command
+    // runs (otherwise moveClipToTrack has no transitions to carry over).
     struct DragClipState {
         ClipRef ref;
         int64_t originalIn{0};
         size_t  originalTrack{0};
+        std::vector<Transition> originalTransitions; // refs originalTrack, ref.clipId
     };
     std::vector<DragClipState> m_dragSelectedClips;
     size_t m_dragTargetTrack{SIZE_MAX};  // track under cursor during drag
@@ -574,11 +596,13 @@ private:
     void updateCursorForTool();
     void wireShortcuts();
 
-    /// Premiere-style "between clips" edit-point selection. Setting on a
-    /// specific track paints facing brackets at the seam; clearing wipes
-    /// the visual from every track. Cheap: just updates per-track ticks.
-    void setEditPointSelection(size_t trackIndex, int64_t tick);
-    void clearEditPointSelection();
+    /// Premiere-style edit-point selection. Setting on a specific track
+    /// paints brackets at the given tick. The `side` parameter controls
+    /// whether both brackets (touching seam) or a single bracket (outer
+    /// edge of an isolated clip) is drawn. Clearing wipes the visual
+    /// from every track. Cheap: just updates per-track ticks.
+    void setEditPointSelection(size_t trackIndex, int64_t tick,
+                               EditPointSide side = EditPointSide::Both);
 
     /// Update snap indicator line across all track widgets and ruler.
     void setSnapIndicator(int64_t tick);

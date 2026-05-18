@@ -172,6 +172,7 @@ void ShotComposer::updatePreview()
             layer.cropTop      = ch->cropTop;
             layer.cropBottom   = ch->cropBottom;
             layer.flipX        = ch->flipX;
+            layer.flipY        = ch->flipY;
             layer.rotation     = ch->rotation;
             layer.blur         = ch->blur;
 
@@ -306,6 +307,7 @@ void ShotComposer::updatePreview()
         layer.scale       = ch->scale;
         layer.rotation    = ch->rotation;
         layer.flipX       = ch->flipX;
+        layer.flipY       = ch->flipY;
         layer.opacity     = ch->opacity;
         layer.visible     = ch->visible;
         layer.layerIndex  = i;

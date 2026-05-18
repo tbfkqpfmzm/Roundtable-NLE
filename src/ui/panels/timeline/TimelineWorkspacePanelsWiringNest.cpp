@@ -158,7 +158,10 @@ void TimelineWorkspace::wireNestSignals()
                 emit m_timelinePanel->selectionChanged();
                 invalidateCompositeCache();
                 if (m_programMonitor) m_programMonitor->requestRefresh();
-                if (m_projectBin) m_projectBin->refreshSequences();
+                if (m_projectBin) {
+                    m_projectBin->refreshSequences();
+                    emit m_projectBin->sequencesChanged();
+                }
             };
 
             m_commandStack->execute(std::make_unique<LambdaCommand>(
@@ -395,7 +398,19 @@ void TimelineWorkspace::wireNestSignals()
                             } else {
                                 seqClip->setDuration(dur);
                             }
+                            // Link the video sequence clip to its audio
+                            // mirror via groupId so clicking either selects
+                            // BOTH (Premiere-style linked A/V) and dragging
+                            // moves them together. Without this, the audio
+                            // mirror sits at the original tick as a phantom
+                            // snap target -- the snap engine pulls the
+                            // dragged video clip back to its starting
+                            // position because its edge "snaps" to the
+                            // audio mirror's edge at the original spot.
+                            // The clip's own id is unique and non-zero, so
+                            // it's a safe group key.
                             *clipId = seqClip->id();
+                            seqClip->setGroupId(*clipId);
                             track->addClip(std::move(seqClip));
 
                             *overlapCmd2 = EditOperations::resolveOverlaps(
@@ -455,7 +470,14 @@ void TimelineWorkspace::wireNestSignals()
                                 } else {
                                     aClip->setDuration(dur);
                                 }
+                                // Link the audio mirror to its video sibling
+                                // via the shared groupId (see comment on the
+                                // video clip above). If the video drop was
+                                // skipped (audio-only drag), fall back to
+                                // this clip's own id so it's still well-
+                                // formed even without a sibling.
                                 *audioClipId = aClip->id();
+                                aClip->setGroupId(*clipId != 0 ? *clipId : *audioClipId);
                                 aTrack->addClip(std::move(aClip));
                                 *audioTkIdx = aIdx;
 

@@ -226,6 +226,7 @@ public:
     [[nodiscard]] QComboBox*      animCombo()       const noexcept { return m_animCombo; }
     [[nodiscard]] QCheckBox*      talkingCheck()      const noexcept { return m_talkingCheck; }
     [[nodiscard]] QCheckBox*      flipXCheck()        const noexcept { return m_flipXCheck; }
+    [[nodiscard]] QCheckBox*      flipYCheck()        const noexcept { return m_flipYCheck; }
     [[nodiscard]] QCheckBox*      visibleCheck()      const noexcept { return m_visibleCheck; }
 
     // Background properties
@@ -368,6 +369,7 @@ private:
         float rotation  = 0.0f;
         float opacity   = 1.0f;
         bool  flipX     = false;
+        bool  flipY     = false;
         bool  visible   = true;
         float cropLeft  = 0.0f;
         float cropRight = 0.0f;
@@ -453,6 +455,7 @@ private:
     QComboBox*      m_animCombo       = nullptr;
     QCheckBox*      m_talkingCheck    = nullptr;
     QCheckBox*      m_flipXCheck      = nullptr;
+    QCheckBox*      m_flipYCheck      = nullptr;
     QCheckBox*      m_visibleCheck    = nullptr;
 
     // Crop

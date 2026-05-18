@@ -39,7 +39,7 @@ public:
 
     // ── Lookup / Insert ─────────────────────────────────────────────────
 
-    /// Look up a texture by (mediaId, frameNumber).
+    /// Look up a texture by (mediaId, frameNumber, tier).
     /// Returns the descriptor info if cached, or a zeroed struct if not.
     /// Promotes the entry in the LRU on hit.
     struct LookupResult {
@@ -51,11 +51,11 @@ public:
         bool                  isPMA{false};    ///< True if texture is premultiplied-alpha
     };
 
-    [[nodiscard]] LookupResult get(uint64_t mediaId, int64_t frameNumber);
+    [[nodiscard]] LookupResult get(uint64_t mediaId, int64_t frameNumber, uint8_t tier);
 
     /// Insert a texture — takes ownership of `tex`.
     /// Evicts old entries if VRAM budget is exceeded.
-    void put(uint64_t mediaId, int64_t frameNumber,
+    void put(uint64_t mediaId, int64_t frameNumber, uint8_t tier,
              std::unique_ptr<Texture> tex, size_t textureBytes,
              bool isPacked = false, bool isPMA = false,
              bool isLoopFrame = false);
@@ -64,7 +64,7 @@ public:
     /// frames where the CachedFrame (FrameCache) and GpuTexCache co-own
     /// the GPU texture.  This allows dirty-tracking cache hits to skip
     /// the entire decode + FrameCache lookup path.
-    void putShared(uint64_t mediaId, int64_t frameNumber,
+    void putShared(uint64_t mediaId, int64_t frameNumber, uint8_t tier,
                    std::shared_ptr<void> sharedOwner,
                    VkDescriptorImageInfo descriptor,
                    uint32_t width, uint32_t height,
@@ -78,10 +78,10 @@ public:
     /// Call during command buffer recording to protect textures that are
     /// still referenced by in-flight GPU work.  After the fence signals,
     /// unpin() or unpinAll() to release the pin.
-    void pin(uint64_t mediaId, int64_t frameNumber);
+    void pin(uint64_t mediaId, int64_t frameNumber, uint8_t tier);
 
     /// Unpin a previously pinned texture.
-    void unpin(uint64_t mediaId, int64_t frameNumber);
+    void unpin(uint64_t mediaId, int64_t frameNumber, uint8_t tier);
 
     /// Unpin ALL entries (safe to call after fence signals since the GPU
     /// is done with all previously-submitted work).
@@ -130,9 +130,10 @@ private:
     struct CacheKey {
         uint64_t mediaId;
         int64_t  frameNumber;
+        uint8_t  tier{0};
 
         bool operator==(const CacheKey& o) const noexcept {
-            return mediaId == o.mediaId && frameNumber == o.frameNumber;
+            return mediaId == o.mediaId && frameNumber == o.frameNumber && tier == o.tier;
         }
     };
 
@@ -140,6 +141,7 @@ private:
         size_t operator()(const CacheKey& k) const noexcept {
             size_t h = std::hash<uint64_t>{}(k.mediaId);
             h ^= std::hash<int64_t>{}(k.frameNumber) + 0x9e3779b9 + (h << 6) + (h >> 2);
+            h ^= std::hash<uint8_t>{}(k.tier) + 0x9e3779b9 + (h << 6) + (h >> 2);
             return h;
         }
     };

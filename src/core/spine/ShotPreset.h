@@ -99,6 +99,7 @@ struct CharacterState
     float           scale       = 1.0f;     ///< Scale multiplier
     float           rotation    = 0.0f;     ///< Rotation in degrees
     bool            flipX       = false;    ///< Horizontal flip
+    bool            flipY       = false;    ///< Vertical flip
     float           opacity     = 1.0f;     ///< Opacity (0–1)
 
     // Crop (0.0 = no crop, 0.5 = crop 50% from that side)

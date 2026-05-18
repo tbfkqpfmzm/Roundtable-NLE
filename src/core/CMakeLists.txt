@@ -105,6 +105,7 @@ add_library(roundtable_core STATIC
     effects/LUT.cpp
     effects/ColorGrading.cpp
     effects/Ots.cpp
+    effects/Flip.cpp
     effects/SimpleEffects.cpp
 
     # Commands (effects)

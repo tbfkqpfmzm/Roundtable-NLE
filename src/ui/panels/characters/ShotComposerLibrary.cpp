@@ -369,6 +369,7 @@ void ShotComposer::showCharacterProperties(const CharacterState& ch)
     m_animCombo->setCurrentText(QString::fromStdString(ch.animation));
     m_talkingCheck->setChecked(ch.isTalking);
     m_flipXCheck->setChecked(ch.flipX);
+    m_flipYCheck->setChecked(ch.flipY);
     m_visibleCheck->setChecked(ch.visible);
 
     // Hide Spine-specific controls for video characters
@@ -498,6 +499,7 @@ void ShotComposer::onCharacterPropertyChanged()
     ch->animation = m_animCombo->currentText().toStdString();
     ch->isTalking = m_talkingCheck->isChecked();
     ch->flipX     = m_flipXCheck->isChecked();
+    ch->flipY     = m_flipYCheck->isChecked();
     ch->visible   = m_visibleCheck->isChecked();
 
     ch->cropLeft   = static_cast<float>(m_cropLeftSpin->value());

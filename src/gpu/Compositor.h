@@ -30,8 +30,10 @@
 
 #include <glm/glm.hpp>
 
+#include <array>
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -304,6 +306,17 @@ public:
 
 private:
     bool createOutputTexture();
+    /// Rotate m_outputTexture to the next slot in the output ring.  Called
+    /// at the start of every composite() so each composited frame writes
+    /// into its OWN texture instead of a single shared one.  The previous
+    /// slot stays alive as long as a CachedFrame holds it via
+    /// gpuTextureOwner (the presenter), so the producer can keep
+    /// compositing the next frame(s) without overwriting the texture the
+    /// presenter is still sampling.  This is what makes the existing
+    /// gpuTextureOwner frame-isolation design actually work, and it also
+    /// isolates the inner-vs-outer nested-sequence composites (they land
+    /// on different ring slots within the same frame).
+    void advanceOutputRing();
     bool createComputePipeline();
     bool createDescriptorResources();
     bool createTimestampQueries();
@@ -321,9 +334,23 @@ private:
     CompositorConfig m_config;
     bool             m_initialized{false};
 
-    // Output storage image — shared_ptr so CachedFrame references
-    // (via gpuTextureOwner) can keep the old texture alive after
-    // resize reassigns this pointer.
+    // Output storage image RING.  Each composite() advances to the next
+    // slot so a freshly composited frame never overwrites a texture the
+    // presenter (or the LRU / m_lastGoodComposite / a nested inner
+    // readback) may still be referencing via gpuTextureOwner.  Single
+    // shared output was the root cause of the nested-sequence flicker:
+    // the presenter zero-copy-displayed it while the next frame's inner
+    // composite stomped it.  Size must exceed the max number of output
+    // frames simultaneously in flight (presenter last+current, the
+    // in-progress outer, and a nested inner readback) — 6 gives margin.
+    static constexpr uint32_t kOutputRing = 6;
+    std::array<std::shared_ptr<Texture>, kOutputRing> m_outputRing;
+    uint32_t m_outputRingIdx{0};
+
+    // Alias to m_outputRing[m_outputRingIdx]: the slot the most recent
+    // composite() wrote.  All output accessors / readback read this, so
+    // the ring is transparent to callers.  shared_ptr so CachedFrame
+    // references keep a slot alive after the ring rotates past it.
     std::shared_ptr<Texture> m_outputTexture;
 
     // Compute pipeline

@@ -173,9 +173,70 @@ CompositeService::getOrCreateSpineState(SpineClip* clip)
         }
     }
 
+    // Record the clip settings the engine was just configured with so a
+    // later out-of-band clip mutation (undo/redo, shot switch) can be
+    // detected and reconciled without a full skeleton reload.
+    state->appliedCharKey = spineCharKey(*clip);
+    state->appliedAnim    = clip->animationName();
+    state->appliedLooping = clip->isLooping();
+    state->appliedTalking = clip->isTalking();
+    state->appliedSpeed   = clip->animationSpeed();
+    state->appliedValid   = true;
+
     auto* ptr = state.get();
     m_spineCache.emplace(cid, std::move(state));
     return ptr;
+}
+
+void CompositeService::resyncSpineClip(SpineClip* clip)
+{
+    if (!clip) return;
+    auto it = m_spineCache.find(clip->id());
+    if (it == m_spineCache.end() || !it->second) return;
+
+    auto& st = *it->second;
+    if (!st.engine.isLoaded()) return;
+
+    // Character/outfit/stance changed → the loaded skeleton+atlas itself is
+    // wrong (not just the animation track). Evict and rebuild the engine
+    // from the now-current identity, exactly like an interactive edit.
+    if (st.appliedValid && st.appliedCharKey != spineCharKey(*clip)) {
+        evictSpineState(clip->id());        // invalidates `it`
+        getOrCreateSpineState(clip);        // reloads + records fresh signature
+        return;
+    }
+
+    // Only touch the engine when a clip-driven setting actually drifted —
+    // this is the hot path after every undo/redo.
+    const bool needsApply =
+        !st.appliedValid ||
+        st.appliedAnim    != clip->animationName() ||
+        st.appliedLooping != clip->isLooping() ||
+        st.appliedTalking != clip->isTalking() ||
+        st.appliedSpeed   != clip->animationSpeed();
+    if (!needsApply) return;
+
+    // Re-apply settings (cheap: just retargets the AnimationState tracks,
+    // no skeleton/atlas reload). Mirrors SpineEngine::loadFromClip().
+    if (!clip->animationName().empty())
+        st.engine.animation().setBodyAnimation(clip->animationName(),
+                                                clip->isLooping());
+    st.engine.animation().setSpeed(clip->animationSpeed());
+    if (clip->isTalking())
+        st.engine.animation().startTalking();
+    else
+        st.engine.animation().stopTalking();
+
+    st.appliedAnim    = clip->animationName();
+    st.appliedLooping = clip->isLooping();
+    st.appliedTalking = clip->isTalking();
+    st.appliedSpeed   = clip->animationSpeed();
+    st.appliedValid   = true;
+
+    // Drop the per-clip CPU frame cache so the next paint re-rasterizes
+    // with the corrected pose (GPU path re-evaluates every composite).
+    st.cachedFrame.reset();
+    st.cachedTick = -1;
 }
 
 // Ã¢â€â‚¬Ã¢â€â‚¬ Non-blocking spine state accessor Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬

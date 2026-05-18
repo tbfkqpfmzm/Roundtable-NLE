@@ -142,10 +142,11 @@ void TimelineTrackWidget::setHoverEdgeTick(int64_t tick)
     update();
 }
 
-void TimelineTrackWidget::setEditPointTick(int64_t tick)
+void TimelineTrackWidget::setEditPointTick(int64_t tick, EditPointSide side)
 {
-    if (m_editPointTick == tick) return;
+    if (m_editPointTick == tick && m_editPointSide == side) return;
     m_editPointTick = tick;
+    m_editPointSide = side;
     update();
 }
 
@@ -514,8 +515,10 @@ void TimelineTrackWidget::paintEvent(QPaintEvent* event)
         }
     }
 
-    // ── "Between clips" edit-point selection (Premiere-style facing
-    //    brackets at a connected cut) ─────────────────────────────────────
+    // ── Edit-point selection (Premiere-style brackets at a clip edge) ─────
+    // Both:     facing brackets at a connected seam between touching clips.
+    // HeadOnly: single right-opening bracket on a clip's head (no left nb).
+    // TailOnly: single left-opening bracket on a clip's tail (no right nb).
     if (m_editPointTick >= 0)
     {
         double cutX = m_engine->timeToPixelX(m_editPointTick);
@@ -531,18 +534,29 @@ void TimelineTrackWidget::paintEvent(QPaintEvent* event)
             painter.setPen(QPen(col, pen));
             painter.setBrush(Qt::NoBrush);
 
-            // Left bracket (belongs to the LEFT clip's tail) — opens →
-            painter.drawLine(QPointF(cutX - armW, topY),
-                             QPointF(cutX,        topY));
-            painter.drawLine(QPointF(cutX,        topY),
-                             QPointF(cutX,        botY));
-            painter.drawLine(QPointF(cutX - armW, botY),
-                             QPointF(cutX,        botY));
-            // Right bracket (belongs to the RIGHT clip's head) — opens ←
-            painter.drawLine(QPointF(cutX,        topY),
-                             QPointF(cutX + armW, topY));
-            painter.drawLine(QPointF(cutX,        botY),
-                             QPointF(cutX + armW, botY));
+            const bool drawLeftBracket =
+                m_editPointSide != EditPointSide::HeadOnly; // omit on head-only
+            const bool drawRightBracket =
+                m_editPointSide != EditPointSide::TailOnly; // omit on tail-only
+
+            if (drawLeftBracket) {
+                // Left bracket (belongs to the LEFT clip's tail) — opens →
+                painter.drawLine(QPointF(cutX - armW, topY),
+                                 QPointF(cutX,        topY));
+                painter.drawLine(QPointF(cutX,        topY),
+                                 QPointF(cutX,        botY));
+                painter.drawLine(QPointF(cutX - armW, botY),
+                                 QPointF(cutX,        botY));
+            }
+            if (drawRightBracket) {
+                // Right bracket (belongs to the RIGHT clip's head) — opens ←
+                painter.drawLine(QPointF(cutX,        topY),
+                                 QPointF(cutX + armW, topY));
+                painter.drawLine(QPointF(cutX,        topY),
+                                 QPointF(cutX,        botY));
+                painter.drawLine(QPointF(cutX,        botY),
+                                 QPointF(cutX + armW, botY));
+            }
 
             // Thin highlight line right at the seam for clarity
             QColor seam = col; seam.setAlpha(140);
