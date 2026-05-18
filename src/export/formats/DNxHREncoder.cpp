@@ -90,7 +90,7 @@ bool DNxHREncoder::initCodec(const EncoderConfig& config)
     m_packet = av_packet_alloc();
 
     t_swsCtx.reset(sws_getContext(
-        m_codecCtx->width, m_codecCtx->height, AV_PIX_FMT_RGBA,
+        m_codecCtx->width, m_codecCtx->height, AV_PIX_FMT_BGRA,
         m_codecCtx->width, m_codecCtx->height, m_codecCtx->pix_fmt,
         SWS_BILINEAR, nullptr, nullptr, nullptr));
 

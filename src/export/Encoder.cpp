@@ -15,10 +15,45 @@
 #ifdef ROUNDTABLE_HAS_FFMPEG
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavutil/hwcontext.h>
 }
 #endif
 
 namespace rt {
+
+int Encoder::attachCudaHwFrames(AVCodecContext* codecCtx,
+                                AVBufferRef* hwDeviceCtx,
+                                int width, int height) noexcept
+{
+#ifdef ROUNDTABLE_HAS_FFMPEG
+    if (!codecCtx || !hwDeviceCtx || width <= 0 || height <= 0)
+        return AVERROR(EINVAL);
+
+    AVBufferRef* framesRef = av_hwframe_ctx_alloc(hwDeviceCtx);
+    if (!framesRef)
+        return AVERROR(ENOMEM);
+
+    auto* fctx = reinterpret_cast<AVHWFramesContext*>(framesRef->data);
+    fctx->format            = AV_PIX_FMT_CUDA;
+    fctx->sw_format         = AV_PIX_FMT_YUV420P;  // matches the swscale output
+    fctx->width             = width;
+    fctx->height            = height;
+    fctx->initial_pool_size = 20;  // headroom for lookahead + B-frame reorder
+
+    int err = av_hwframe_ctx_init(framesRef);
+    if (err < 0) {
+        av_buffer_unref(&framesRef);
+        return err;
+    }
+
+    codecCtx->hw_frames_ctx = av_buffer_ref(framesRef);
+    av_buffer_unref(&framesRef);
+    return codecCtx->hw_frames_ctx ? 0 : AVERROR(ENOMEM);
+#else
+    (void)codecCtx; (void)hwDeviceCtx; (void)width; (void)height;
+    return -1;
+#endif
+}
 
 HardwareAccel Encoder::detectBestHardware(EncoderCodec codec) noexcept
 {

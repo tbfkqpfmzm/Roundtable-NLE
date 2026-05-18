@@ -53,7 +53,7 @@ struct FrameRendererConfig
 /// Result of rendering a single frame.
 struct RenderedFrame
 {
-    std::vector<uint8_t> pixels;       ///< RGBA pixels (empty if gpuOnly)
+    std::vector<uint8_t> pixels;       ///< BGRA pixels (empty if gpuOnly)
     uint32_t             width{0};
     uint32_t             height{0};
     int64_t              frameIndex{0};

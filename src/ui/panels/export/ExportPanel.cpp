@@ -134,15 +134,29 @@ void ExportPanel::setProject(Project* project)
         QString seqName = QString::fromStdString(project->timeline()->name());
         QString projName = QString::fromStdString(project->name());
         if (!seqName.isEmpty()) {
-            // Build a default path inside the project's directory
-            std::filesystem::path projDir = project->filePath().parent_path();
-            if (!projDir.empty()) {
-                QString defaultPath = QString::fromStdString((projDir / (seqName + ".mp4").toStdString()).string());
-                m_outputPath->setText(defaultPath);
+            // Prefer the last-used export directory (if it still exists)
+            // over the project directory — this is what the user expects
+            // and runs before showEvent(), which would otherwise be
+            // blocked by the field already holding the project default.
+            QSettings settings(QStringLiteral("RoundtableMedia"),
+                               QStringLiteral("RoundtableNLE"));
+            QString lastDir =
+                settings.value(QStringLiteral("export/lastOutputDir")).toString();
+
+            if (!lastDir.isEmpty() && QDir(lastDir).exists()) {
+                m_outputPath->setText(lastDir + QStringLiteral("/")
+                                      + seqName + QStringLiteral(".mp4"));
             } else {
-                // No project path yet — just show a placeholder hint
-                m_outputPath->setPlaceholderText(
-                    tr("e.g. %1.mp4").arg(seqName));
+                // Fall back to a path inside the project's directory
+                std::filesystem::path projDir = project->filePath().parent_path();
+                if (!projDir.empty()) {
+                    QString defaultPath = QString::fromStdString((projDir / (seqName + ".mp4").toStdString()).string());
+                    m_outputPath->setText(defaultPath);
+                } else {
+                    // No project path yet — just show a placeholder hint
+                    m_outputPath->setPlaceholderText(
+                        tr("e.g. %1.mp4").arg(seqName));
+                }
             }
         }
     }

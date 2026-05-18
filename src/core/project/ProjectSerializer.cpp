@@ -24,6 +24,53 @@
 
 namespace rt {
 
+namespace {
+
+// Re-link a track's transitions to its clips by timeline geometry.
+//
+// readClip() regenerates clip IDs on load (the global ID counter is process-
+// wide and never reset), so the leftClipId/rightClipId stored in each
+// transition no longer point at the reloaded clips. The render path looks
+// up the two source clips by those IDs to blend them, so a stale ID makes
+// the transition silently disappear. This also corrupts on resave (the new
+// clip IDs get written while the transition still references the old ones),
+// which is why transitions vanished after switching projects but came back
+// on a fresh launch (where the counter happened to realign).
+//
+// The transition's editPointTick is an absolute timeline position that is
+// always saved faithfully, so re-derive the linkage from it: the left clip
+// is the one ending exactly at the edit point, the right clip the one
+// starting exactly at it. Single-sided fades (leftClipId==0 / rightClipId==0)
+// keep their zero side untouched. Only an exact, unambiguous boundary match
+// relinks a side — if nothing lines up (e.g. an oddly re-anchored edit
+// point) the saved ID is left as-is so we never mislink.
+void relinkTransitionsByGeometry(Track& track)
+{
+    for (Transition& t : track.transitions()) {
+        const bool wantLeft  = (t.leftClipId  != 0);
+        const bool wantRight = (t.rightClipId != 0);
+        if (!wantLeft && !wantRight)
+            continue;
+
+        uint64_t leftId = 0;   int leftHits  = 0;
+        uint64_t rightId = 0;  int rightHits = 0;
+        for (size_t i = 0; i < track.clipCount(); ++i) {
+            const Clip* c = track.clip(i);
+            if (!c) continue;
+            if (wantLeft && c->timelineOut() == t.editPointTick) {
+                leftId = c->id(); ++leftHits;
+            }
+            if (wantRight && c->timelineIn() == t.editPointTick) {
+                rightId = c->id(); ++rightHits;
+            }
+        }
+        if (wantLeft  && leftHits  == 1) t.leftClipId  = leftId;
+        if (wantRight && rightHits == 1) t.rightClipId = rightId;
+    }
+}
+
+} // namespace
+
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Serialize
@@ -474,6 +521,8 @@ std::unique_ptr<Project> ProjectSerializer::deserialize(const std::vector<uint8_
                         }
                         track->addTransition(t);
                     }
+
+                    relinkTransitionsByGeometry(*track);
                 }
 
                 // Ensure video tracks are always above audio tracks,
@@ -590,6 +639,8 @@ std::unique_ptr<Project> ProjectSerializer::deserialize(const std::vector<uint8_
                         }
                         track->addTransition(t);
                     }
+
+                    relinkTransitionsByGeometry(*track);
                 }
 
                 tl->sortTracksByType();

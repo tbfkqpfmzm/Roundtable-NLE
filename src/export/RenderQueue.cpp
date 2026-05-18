@@ -382,19 +382,6 @@ void RenderQueue::processJob(ExportJob& job, Timeline* timeline, Compositor* com
         EncodedPacket        pkt;
     };
 
-    // Helper: convert BGRA pixels to RGBA (encoder expects RGBA)
-    auto convertBgraToRgba = [](const uint8_t* src, size_t nBytes) -> std::vector<uint8_t> {
-        std::vector<uint8_t> dst(nBytes);
-        uint8_t* d = dst.data();
-        for (size_t i = 0; i < nBytes; i += 4) {
-            d[i]     = src[i + 2]; // R ← B
-            d[i + 1] = src[i + 1]; // G
-            d[i + 2] = src[i];     // B ← R
-            d[i + 3] = src[i + 3]; // A
-        }
-        return dst;
-    };
-
     // Helper: create an OwnedPacket from an EncodedPacket by deep-copying storage
     auto makeOwnedPacket = [](const EncodedPacket& pkt) -> OwnedPacket {
         OwnedPacket op;
@@ -461,9 +448,12 @@ void RenderQueue::processJob(ExportJob& job, Timeline* timeline, Compositor* com
         }
 
         {
-        // Render frame
-        // rgbaPixels MUST live at this scope — encodePixels points into it!
-        std::vector<uint8_t> rgbaPixels;
+        // Render frame. Composited frames are BGRA; the encoder's swscale
+        // converts BGRA→YUV420P directly (SIMD), so we pass the buffer
+        // straight through — no per-frame CPU channel-swap + 4K alloc.
+        // The holders below MUST outlive the encodeFrame() call.
+        std::shared_ptr<CachedFrame> cframe;
+        RenderedFrame rendered;
         const uint8_t* encodePixels = nullptr;
 
         if (useCallback) {
@@ -478,7 +468,7 @@ void RenderQueue::processJob(ExportJob& job, Timeline* timeline, Compositor* com
                 nextTick = static_cast<int64_t>(
                     static_cast<double>(f + 1) * 48000.0 * frCfg.fpsDen / frCfg.fpsNum);
             }
-            auto cframe = m_frameRenderCb(tick, nextTick, frCfg.outputWidth, frCfg.outputHeight, true);
+            cframe = m_frameRenderCb(tick, nextTick, frCfg.outputWidth, frCfg.outputHeight, true);
             // Frame callback MUST have populated CPU pixels on the main
             // thread before returning (the callback does ensurePixels
             // inside the BlockingQueuedConnection dispatch).  We do NOT
@@ -489,16 +479,14 @@ void RenderQueue::processJob(ExportJob& job, Timeline* timeline, Compositor* com
                 updateProgress(f);
                 continue;
             }
-            rgbaPixels = convertBgraToRgba(cframe->pixels.data(), cframe->pixels.size());
-            encodePixels = rgbaPixels.data();
+            encodePixels = cframe->pixels.data();
         } else {
-            auto rendered = renderer.renderFrame(*timeline, f);
+            rendered = renderer.renderFrame(*timeline, f);
             if (!rendered.isValid() || rendered.pixels.empty()) {
                 updateProgress(f);
                 continue;
             }
-            rgbaPixels = convertBgraToRgba(rendered.pixels.data(), rendered.pixels.size());
-            encodePixels = rgbaPixels.data();
+            encodePixels = rendered.pixels.data();
         }
 
         // Encode frame

@@ -103,7 +103,16 @@ bool H264Encoder::initCodec(const EncoderConfig& config)
                     // conform or reject the clip.
                     av_opt_set(m_codecCtx->priv_data, "profile", "high", 0);
 
-                    ret = avcodec_open2(m_codecCtx, nvenc, nullptr);
+                    // NVENC with CUDA input needs an explicit hw_frames_ctx
+                    // BEFORE open; without it open returns EINVAL (-22) and
+                    // we silently fall to the slow software-upload path.
+                    int hwfErr = attachCudaHwFrames(
+                        m_codecCtx, m_hwDeviceCtx,
+                        static_cast<int>(config.width),
+                        static_cast<int>(config.height));
+                    ret = (hwfErr < 0)
+                              ? hwfErr
+                              : avcodec_open2(m_codecCtx, nvenc, nullptr);
                     if (ret >= 0 && m_codecCtx->hw_frames_ctx) {
                         // SUCCESS ─ NVENC with CUDA hardware frames
                         m_hwAccel = true;
@@ -258,7 +267,7 @@ bool H264Encoder::initCodec(const EncoderConfig& config)
     int swsW = m_codecCtx->width;
     int swsH = m_codecCtx->height;
     t_swsCtx.reset(sws_getContext(
-        swsW, swsH, AV_PIX_FMT_RGBA,
+        swsW, swsH, AV_PIX_FMT_BGRA,
         swsW, swsH, AV_PIX_FMT_YUV420P,
         SWS_BILINEAR, nullptr, nullptr, nullptr));
     if (!t_swsCtx) {

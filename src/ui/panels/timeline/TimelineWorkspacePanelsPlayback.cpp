@@ -149,6 +149,12 @@ void TimelineWorkspace::wirePlaybackSignals()
                 m_timelineTimecode->setText(QString::fromStdString(tc));
             }
         }
+        // Keyboard transport (arrow keys, Home/End, edit-point nav) and any
+        // other controller-driven seek while paused must re-composite the
+        // Program Monitor — same mechanism the ruler-scrub path uses. During
+        // playback the monitor is driven by its own pipeline, so skip it.
+        if (!playing && m_programMonitor)
+            m_programMonitor->notifyScrub();
         scheduleAudioPlaybackWindowRefresh();
     };
 

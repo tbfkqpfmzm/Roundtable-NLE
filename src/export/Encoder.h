@@ -147,9 +147,10 @@ public:
     /// Returns true on success.
     virtual bool init(const EncoderConfig& config) = 0;
 
-    /// Encode a single frame (RGBA pixels, top-down, row-major).
+    /// Encode a single frame (BGRA pixels, top-down, row-major — the
+    /// compositor's native layout; swscale converts BGRA→YUV directly).
     /// Returns true if an encoded packet is produced (may be delayed).
-    virtual bool encodeFrame(const uint8_t* rgbaPixels,
+    virtual bool encodeFrame(const uint8_t* bgraPixels,
                              int64_t frameIndex) = 0;
 
     /// Flush remaining buffered frames. Call after the last frame.
@@ -219,6 +220,19 @@ protected:
     /// Sets ep.size and clears ep.ownsData (the encoder owns the buffer
     /// until the next sendFrame()/flush()).
     void retainPacketData(EncodedPacket& ep, const uint8_t* data, int size);
+
+    /// Allocate + initialize a CUDA AVHWFramesContext (sw_format
+    /// YUV420P, the format produced by the RGBA→YUV swscale) and assign
+    /// it to codecCtx->hw_frames_ctx. NVENC with AV_PIX_FMT_CUDA input
+    /// REQUIRES this before avcodec_open2 — setting only hw_device_ctx
+    /// makes open fail with EINVAL (-22), silently degrading every
+    /// export to the slow CPU-convert + per-frame-upload path.
+    /// Returns 0 on success, a negative AVERROR on failure (caller
+    /// should fall back to the software-input path). codecCtx is left
+    /// untouched on failure.
+    static int attachCudaHwFrames(AVCodecContext* codecCtx,
+                                  AVBufferRef* hwDeviceCtx,
+                                  int width, int height) noexcept;
 };
 
 } // namespace rt

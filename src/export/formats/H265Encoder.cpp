@@ -76,7 +76,15 @@ bool H265Encoder::initCodec(const EncoderConfig& config)
                     av_opt_set(m_codecCtx->priv_data, "tune", "hq", 0);
                     av_opt_set(m_codecCtx->priv_data, "rc", "constqp", 0);
                     av_opt_set_int(m_codecCtx->priv_data, "qp", config.crf, 0);
-                    ret = avcodec_open2(m_codecCtx, nvenc, nullptr);
+                    // NVENC CUDA input needs an explicit hw_frames_ctx
+                    // before open, else EINVAL (-22) → slow upload path.
+                    int hwfErr = attachCudaHwFrames(
+                        m_codecCtx, m_hwDeviceCtx,
+                        static_cast<int>(config.width),
+                        static_cast<int>(config.height));
+                    ret = (hwfErr < 0)
+                              ? hwfErr
+                              : avcodec_open2(m_codecCtx, nvenc, nullptr);
                     if (ret >= 0 && m_codecCtx->hw_frames_ctx) {
                         m_hwAccel = true;
                         spdlog::info("H265Encoder: NVENC with CUDA HW frames");
@@ -183,7 +191,7 @@ bool H265Encoder::initCodec(const EncoderConfig& config)
     m_packet = av_packet_alloc();
 
     t_swsCtx.reset(sws_getContext(
-        m_codecCtx->width, m_codecCtx->height, AV_PIX_FMT_RGBA,
+        m_codecCtx->width, m_codecCtx->height, AV_PIX_FMT_BGRA,
         m_codecCtx->width, m_codecCtx->height, AV_PIX_FMT_YUV420P,
         SWS_BILINEAR, nullptr, nullptr, nullptr));
 
