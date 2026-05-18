@@ -90,11 +90,17 @@ size_t TimelinePanel::computeReorderInsertionIndex(const QPoint& globalMousePos)
 
     // Headers are laid out top-to-bottom inside m_trackHeaderArea with a
     // leading stretch.  Find the closest gap (before/after each header).
+    // Skip the V/A divider row — it isn't a real track, so an insertion
+    // index pointing AT the divider would put a reordered track on the
+    // wrong side of the V/A split.
     int bestIdx = 0;
     int bestDist = std::numeric_limits<int>::max();
     for (size_t i = 0; i < m_trackHeaders.size(); ++i) {
         auto hdr = m_trackHeaders[i];
         if (!hdr) continue;
+        const Track* t = (m_timeline && i < m_timeline->trackCount())
+                             ? m_timeline->track(i) : nullptr;
+        if (t && t->isDivider()) continue;
         int top    = hdr->y();
         int bottom = hdr->y() + hdr->height();
         int mid    = (top + bottom) / 2;

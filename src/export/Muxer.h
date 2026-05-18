@@ -14,6 +14,7 @@
 
 struct AVFormatContext;
 struct AVStream;
+struct AVCodecContext;
 
 namespace rt {
 
@@ -50,6 +51,12 @@ struct MuxerConfig
     int      videoFpsNum{30};
     int      videoFpsDen{1};
     int      videoCodecId{0};        // AV_CODEC_ID_H264, etc.
+
+    // The encoder's opened AVCodecContext. When set, the muxer copies
+    // full codec params + extradata (SPS/PPS, hvcC, AV1 seq header) into
+    // the stream so MP4/MOV files have a valid decoder config box.
+    // Must outlive the muxFile()/writeHeader() call.
+    AVCodecContext* videoCodecContext{nullptr};
 
     // Audio stream info
     uint32_t audioSampleRate{48000};

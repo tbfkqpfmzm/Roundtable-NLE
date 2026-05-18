@@ -96,10 +96,32 @@ bool Muxer::open(const MuxerConfig& config, bool deferHeader)
     m_videoStream->r_frame_rate   = {config.videoFpsNum, config.videoFpsDen};
 
     auto* vpar = m_videoStream->codecpar;
-    vpar->codec_type = AVMEDIA_TYPE_VIDEO;
-    vpar->codec_id   = vcodec ? vcodec->id : AV_CODEC_ID_H264;
-    vpar->width      = static_cast<int>(config.videoWidth);
-    vpar->height     = static_cast<int>(config.videoHeight);
+
+    if (config.videoCodecContext) {
+        // Copy the full opened codec context — crucially this brings
+        // extradata (SPS/PPS / hvcC / AV1 seq header), pixel format,
+        // profile/level, color metadata and sample aspect ratio into
+        // the container. Without this the file plays in lenient
+        // demuxers (VLC) but is rejected by strict editors and players.
+        int pret = avcodec_parameters_from_context(vpar, config.videoCodecContext);
+        if (pret < 0) {
+            m_lastError = "Muxer: Failed to copy codec parameters from encoder";
+            spdlog::error("{}", m_lastError);
+            avformat_free_context(m_fmtCtx); m_fmtCtx = nullptr;
+            return false;
+        }
+        if (config.videoCodecContext->extradata_size <= 0)
+            spdlog::warn("Muxer: encoder produced no extradata — strict "
+                         "players may still reject the file (check that "
+                         "AV_CODEC_FLAG_GLOBAL_HEADER was set before open)");
+    } else {
+        // Fallback: minimal params (e.g. smart-render passthrough with
+        // no live encoder context available).
+        vpar->codec_type = AVMEDIA_TYPE_VIDEO;
+        vpar->codec_id   = vcodec ? vcodec->id : AV_CODEC_ID_H264;
+        vpar->width      = static_cast<int>(config.videoWidth);
+        vpar->height     = static_cast<int>(config.videoHeight);
+    }
 
     // Add audio stream if enabled
     if (config.hasAudio) {
@@ -403,50 +425,22 @@ bool Muxer::muxFile(const std::filesystem::path& outputPath,
     // Open with deferred header so we can set up audio codec params first
     if (!mux.open(cfg, /*deferHeader=*/cfg.hasAudio)) return false;
 
-    // ── Set up AAC encoder BEFORE writing the header ─────────────────────
-    AVCodecContext* actx = nullptr;
-    int             frameSize = 0;
-
+    // ── Set up the persistent AAC encoder BEFORE writing the header ──────
+    // initAudioEncoder() copies codec params (incl. extradata) onto the
+    // audio stream, so the deferred header is written with correct params.
+    // This is the same encoder that does the actual audio encoding below —
+    // no throwaway context.
     if (cfg.hasAudio && mux.m_audioStream && audioResult) {
-        const AVCodec* acodec = avcodec_find_encoder(AV_CODEC_ID_AAC);
-        if (!acodec) {
-            spdlog::error("Muxer: AAC encoder not found");
-            cfg.hasAudio = false;  // fall through to video-only
-        } else {
-            actx = avcodec_alloc_context3(acodec);
-            if (!actx) {
-                spdlog::error("Muxer: Failed to alloc AAC context");
-                cfg.hasAudio = false;
-            } else {
-                actx->sample_fmt   = AV_SAMPLE_FMT_FLTP;
-                actx->sample_rate  = static_cast<int>(audioResult->sampleRate);
-                actx->bit_rate     = cfg.audioBitrate > 0 ? cfg.audioBitrate : 192000;
-                av_channel_layout_default(&actx->ch_layout, audioResult->channels);
-                actx->time_base    = {1, actx->sample_rate};
-
-                if (mux.m_fmtCtx->oformat->flags & AVFMT_GLOBALHEADER)
-                    actx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-
-                if (avcodec_open2(actx, acodec, nullptr) < 0) {
-                    spdlog::error("Muxer: Failed to open AAC encoder");
-                    avcodec_free_context(&actx);
-                    actx = nullptr;
-                    cfg.hasAudio = false;
-                } else {
-                    // Copy codec params (incl. extradata) to stream BEFORE header write
-                    avcodec_parameters_from_context(mux.m_audioStream->codecpar, actx);
-                    frameSize = actx->frame_size;
-                }
-            }
+        mux.initAudioEncoder(audioResult->sampleRate, audioResult->channels);
+        if (!mux.m_audioEnc) {
+            spdlog::warn("Muxer: Could not init AAC encoder, writing video-only");
+            cfg.hasAudio = false;
         }
     }
 
     // Now write the header with proper codec params
     if (!mux.m_headerWritten) {
-        if (!mux.writeHeader()) {
-            if (actx) avcodec_free_context(&actx);
-            return false;
-        }
+        if (!mux.writeHeader()) return false;
     }
 
     // ── Write video packets ──────────────────────────────────────────────
@@ -458,21 +452,13 @@ bool Muxer::muxFile(const std::filesystem::path& outputPath,
         }
     }
 
-    // ── Encode + write audio via instance methods ────────────────────────
-    if (cfg.hasAudio && mux.m_audioStream && audioResult) {
-        // Pre-init the persistent AAC encoder so codec params are set
-        // on the audio stream before writing the header.
-        mux.initAudioEncoder(audioResult->sampleRate, audioResult->channels);
-
-        if (mux.m_audioEnc) {
-            if (!mux.writeAudioData(audioResult->samples.data(),
-                                     audioResult->totalFrames,
-                                     audioResult->sampleRate,
-                                     audioResult->channels)) {
-                spdlog::warn("Muxer: Audio encoding had errors but video is intact");
-            }
-        } else {
-            spdlog::warn("Muxer: Could not init AAC encoder, skipping audio");
+    // ── Encode + write audio (encoder already initialized above) ─────────
+    if (cfg.hasAudio && mux.m_audioEnc && audioResult) {
+        if (!mux.writeAudioData(audioResult->samples.data(),
+                                 audioResult->totalFrames,
+                                 audioResult->sampleRate,
+                                 audioResult->channels)) {
+            spdlog::warn("Muxer: Audio encoding had errors but video is intact");
         }
     }
 

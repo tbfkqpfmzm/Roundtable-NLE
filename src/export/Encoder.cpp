@@ -12,7 +12,50 @@
 
 #include <spdlog/spdlog.h>
 
+#ifdef ROUNDTABLE_HAS_FFMPEG
+extern "C" {
+#include <libavcodec/avcodec.h>
+}
+#endif
+
 namespace rt {
+
+HardwareAccel Encoder::detectBestHardware(EncoderCodec codec) noexcept
+{
+#ifdef ROUNDTABLE_HAS_FFMPEG
+    const char* nvenc = nullptr;
+    const char* qsv   = nullptr;
+    const char* amf   = nullptr;
+    switch (codec) {
+        case EncoderCodec::H264: nvenc = "h264_nvenc"; qsv = "h264_qsv"; amf = "h264_amf"; break;
+        case EncoderCodec::H265: nvenc = "hevc_nvenc"; qsv = "hevc_qsv"; amf = "hevc_amf"; break;
+        case EncoderCodec::AV1:  nvenc = "av1_nvenc";  qsv = "av1_qsv";  amf = "av1_amf";  break;
+        default:
+            // ProRes / DNxHR / ImageSequence have no hardware path.
+            return HardwareAccel::None;
+    }
+    auto have = [](const char* n) {
+        return n && avcodec_find_encoder_by_name(n) != nullptr;
+    };
+    if (have(nvenc)) { spdlog::info("detectBestHardware: NVENC ({})", nvenc); return HardwareAccel::NVENC; }
+    if (have(qsv))   { spdlog::info("detectBestHardware: QSV ({})", qsv);   return HardwareAccel::QSV;   }
+    if (have(amf))   { spdlog::info("detectBestHardware: AMF ({})", amf);   return HardwareAccel::AMF;   }
+    spdlog::info("detectBestHardware: no hardware encoder for codec {} — using CPU",
+                 static_cast<int>(codec));
+#else
+    (void)codec;
+#endif
+    return HardwareAccel::None;
+}
+
+void Encoder::retainPacketData(EncodedPacket& ep, const uint8_t* data, int size)
+{
+    auto& buf = m_pktStore.emplace_back();
+    if (data && size > 0) buf.assign(data, data + size);
+    ep.data     = buf.data();
+    ep.size     = size;
+    ep.ownsData = false;  // owned by m_pktStore, freed on next send/flush
+}
 
 const char* encoderCodecName(EncoderCodec codec) noexcept
 {

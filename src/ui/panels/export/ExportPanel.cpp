@@ -262,7 +262,9 @@ void ExportPanel::showEvent(QShowEvent* event)
     // project-directory default so the user's last export location is preserved.
     QSettings settings(QStringLiteral("RoundtableMedia"), QStringLiteral("RoundtableNLE"));
     QString lastDir = settings.value(QStringLiteral("export/lastOutputDir")).toString();
-    if (!lastDir.isEmpty() && m_outputPath && m_timeline) {
+    // Only restore it if the directory still exists on disk (it may have
+    // been on a removed drive or deleted since the last session).
+    if (!lastDir.isEmpty() && QDir(lastDir).exists() && m_outputPath && m_timeline) {
         QString seqName = QString::fromStdString(m_timeline->name());
         if (!seqName.isEmpty()) {
             QString preferredPath = lastDir + QStringLiteral("/") + seqName + QStringLiteral(".mp4");
@@ -764,6 +766,15 @@ void ExportPanel::onCrfChanged(int value)
     m_crfLabel->setText(label);
 }
 
+void ExportPanel::rememberExportDir(const std::string& outputPath)
+{
+    if (outputPath.empty()) return;
+    QString dir = QFileInfo(QString::fromStdString(outputPath)).absolutePath();
+    if (dir.isEmpty()) return;
+    QSettings settings(QStringLiteral("RoundtableMedia"), QStringLiteral("RoundtableNLE"));
+    settings.setValue(QStringLiteral("export/lastOutputDir"), dir);
+}
+
 void ExportPanel::onBrowseOutput()
 {
     // Use the CURRENT output path text as the starting point, so the dialog
@@ -787,7 +798,9 @@ void ExportPanel::onBrowseOutput()
             defaultName = QStringLiteral("export");
 
         QString lastDir = settings.value(QStringLiteral("export/lastOutputDir")).toString();
-        defaultPath = lastDir.isEmpty() ? defaultName : lastDir + QStringLiteral("/") + defaultName;
+        defaultPath = (lastDir.isEmpty() || !QDir(lastDir).exists())
+                          ? defaultName
+                          : lastDir + QStringLiteral("/") + defaultName;
     }
 
     QString filter = tr("Video Files (*.mp4 *.mov *.mkv *.webm *.avi);;All Files (*)");
@@ -812,8 +825,15 @@ ExportJobConfig ExportPanel::buildJobConfig() const
     cfg.encoderConfig.height = cfg.outputHeight;
     cfg.encoderConfig.codec  = static_cast<EncoderCodec>(
         m_codecCombo->currentData().toInt());
-    cfg.encoderConfig.hwAccel = static_cast<HardwareAccel>(
-        m_accelCombo->currentData().toInt());
+    // Index 0 is the "Auto" item — resolve it to whatever hardware
+    // encoder is actually available rather than blindly assuming NVENC.
+    if (m_accelCombo->currentIndex() == 0) {
+        cfg.encoderConfig.hwAccel =
+            Encoder::detectBestHardware(cfg.encoderConfig.codec);
+    } else {
+        cfg.encoderConfig.hwAccel = static_cast<HardwareAccel>(
+            m_accelCombo->currentData().toInt());
+    }
     // Map quality slider (0-100) â†’ CRF value
     // 100 = Best (CRF 14), 75 = High (CRF 18), 50 = Medium (CRF 23),
     // 25 = Low (CRF 28), 0 = Lowest (CRF 35)
@@ -928,6 +948,7 @@ void ExportPanel::onStartExport()
         return;
 
     auto config = buildJobConfig();
+    rememberExportDir(config.outputPath.string());
     uint32_t jobId = m_renderQueue->addJob(config);
     m_activeJobId = jobId;
 
@@ -1436,6 +1457,7 @@ void ExportPanel::onAddToQueue()
     }
 
     auto config = buildJobConfig();
+    rememberExportDir(config.outputPath.string());
     uint32_t jobId = m_renderQueue->addJob(config);
 
     // Show job in list

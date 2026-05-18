@@ -67,10 +67,15 @@ void AudioSync::placeDefaultShotVisuals(Timeline* timeline,
             if (visible) ++visibleCount;
         }
 
+        // Real video tracks only — dividers are TrackType::Video but cannot
+        // hold clips, so counting them would target the divider for placement
+        // and Track::addClip would silently drop the clip.
         std::vector<size_t> videoIndices;
-        for (size_t trackIndex = 0; trackIndex < timeline->trackCount(); ++trackIndex)
-            if (timeline->track(trackIndex)->type() == TrackType::Video)
+        for (size_t trackIndex = 0; trackIndex < timeline->trackCount(); ++trackIndex) {
+            Track* tk = timeline->track(trackIndex);
+            if (tk && tk->type() == TrackType::Video && !tk->isDivider())
                 videoIndices.push_back(trackIndex);
+        }
 
         while (static_cast<int>(videoIndices.size()) < visibleCount) {
             Track* track = timeline->addVideoTrack("");

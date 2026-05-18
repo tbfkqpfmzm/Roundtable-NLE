@@ -174,6 +174,10 @@ private:
 
     void setupUI();
 
+    /// Persist the directory of `outputPath` as the last-used export
+    /// location so future exports default there.
+    void rememberExportDir(const std::string& outputPath);
+
     /// Check for offline media in the timeline. Returns false if the user
     /// decides to cancel the export when warned about offline clips.
     bool checkOfflineMedia();

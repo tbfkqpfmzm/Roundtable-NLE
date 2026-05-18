@@ -227,11 +227,15 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
                 if (srcTr) dragType = srcTr->type();
             }
 
-            // Find first/last track indices of each type
+            // Find first/last track indices of each type. Skip divider rows
+            // — they're TrackType::Video but not real video tracks, so
+            // including them in lastVideoIdx misclassifies the V/A boundary.
             size_t firstVideoIdx = SIZE_MAX, lastVideoIdx = SIZE_MAX;
             size_t firstAudioIdx = SIZE_MAX, lastAudioIdx = SIZE_MAX;
             for (size_t i = 0; i < m_timeline->trackCount(); ++i) {
-                if (m_timeline->track(i)->type() == TrackType::Video) {
+                Track* t = m_timeline->track(i);
+                if (!t || t->isDivider()) continue;
+                if (t->type() == TrackType::Video) {
                     if (firstVideoIdx == SIZE_MAX) firstVideoIdx = i;
                     lastVideoIdx = i;
                 } else {
@@ -314,7 +318,13 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
             Track* srcTr = m_timeline->track(dcs.ref.trackIndex);
             if (!srcTr) continue;
             Track* dstTr = m_timeline->track(dstTrack);
-            if (!dstTr || dstTr->type() != srcTr->type())
+            // Dividers are TrackType::Video but reject clips. A plain type
+            // check would let the live preview "move" the clip to the divider
+            // row, where Track::addClip silently drops it (returns nullptr
+            // after std::move has already consumed the unique_ptr — the clip
+            // is permanently lost). Reject the divider so the clip stays on
+            // its current track for this drag tick.
+            if (!dstTr || dstTr->isDivider() || dstTr->type() != srcTr->type())
                 dstTrack = dcs.ref.trackIndex;
 
             size_t curTrack = dcs.ref.trackIndex;

@@ -114,7 +114,11 @@ void TimelinePanel::mouseReleaseEvent(QMouseEvent* event)
 
             Track* origTr = m_timeline->track(dcs.originalTrack);
             if (!origTr) continue;
-            if (m_timeline->track(dstTrack)->type() != origTr->type())
+            Track* dstTr = m_timeline->track(dstTrack);
+            // Dividers are TrackType::Video but reject clips — a plain type
+            // check would land the move on the divider row and Track::addClip
+            // would silently drop the clip. Fall back to the source track.
+            if (!dstTr || dstTr->isDivider() || dstTr->type() != origTr->type())
                 dstTrack = dcs.originalTrack;
 
             if (curPos != dcs.originalIn || dstTrack != dcs.originalTrack)
@@ -368,6 +372,18 @@ void TimelinePanel::mouseReleaseEvent(QMouseEvent* event)
         m_dragTargetTrack = SIZE_MAX;
         m_ghostTrackVisible = false;
         if (m_ghostOverlay) m_ghostOverlay->hide();
+
+        // Clear per-widget drag state on every track. Drag-move set
+        // m_draggedSet + m_ghostDragActive on the source track's widget so
+        // its paintEvent could hide the live preview; if we don't clear it
+        // here a subsequent reuse (e.g. after a ghost-track drop the source
+        // widget gets repointed to the new top track) keeps skipping the
+        // clip in both paint passes and the clip stays invisible.
+        for (auto& tw : m_trackWidgets) {
+            if (!tw) continue;
+            tw->setDraggedClips({});
+            tw->setGhostDragActive(false);
+        }
 
         if (didMove) {
             // Always do a full rebuild after a ghost-track drop.

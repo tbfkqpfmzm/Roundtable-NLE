@@ -540,9 +540,11 @@ void RenderQueue::processJob(ExportJob& job, Timeline* timeline, Compositor* com
         audioResult = mixdown.mix(*timeline, job.config.audioConfig);
     }
 
-    // Mux video+audio into container file
-    encoder->shutdown();
-
+    // Mux video+audio into container file.
+    // NOTE: the encoder is intentionally kept alive (NOT shut down) until
+    // after muxing so the muxer can copy its extradata (SPS/PPS, hvcC,
+    // AV1 seq header) into the container. Shutting it down here would free
+    // the AVCodecContext and produce a file that only plays in VLC.
     MuxerConfig mCfg;
     mCfg.outputPath     = job.config.outputPath;
     mCfg.format         = static_cast<ContainerFormat>(job.config.containerFormat);
@@ -556,6 +558,9 @@ void RenderQueue::processJob(ExportJob& job, Timeline* timeline, Compositor* com
     // Map encoder codec to AVCodecID for the container header.
     // Without this the muxer falls back to H264, which is wrong for H265/AV1.
     mCfg.videoCodecId = encoder ? encoder->avCodecId() : 0;
+    // Hand the opened codec context to the muxer so it can copy
+    // extradata + full codec params into the container's stream.
+    mCfg.videoCodecContext = encoder ? encoder->avCodecContext() : nullptr;
     spdlog::info("RndQ[{}]: mux config fps={}/{} codecId={}", job.id,
                  mCfg.videoFpsNum, mCfg.videoFpsDen, mCfg.videoCodecId);
 
@@ -578,7 +583,12 @@ void RenderQueue::processJob(ExportJob& job, Timeline* timeline, Compositor* com
     muxPackets.reserve(allPackets.size());
     for (const auto& op : allPackets)
         muxPackets.push_back(op.pkt);
-    if (!Muxer::muxFile(job.config.outputPath, muxPackets, audioPtr, mCfg)) {
+    bool muxOk = Muxer::muxFile(job.config.outputPath, muxPackets, audioPtr, mCfg);
+
+    // Safe to release the encoder now that the muxer has read its params.
+    encoder->shutdown();
+
+    if (!muxOk) {
         spdlog::error("RenderQueue: Muxing failed for job {}", job.id);
         job.status = JobStatus::Failed;
         job.error  = "Muxing failed — output file not written";

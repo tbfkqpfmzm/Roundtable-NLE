@@ -54,6 +54,19 @@ void TimelineTrackWidget::setLayoutEngine(const TimelineLayoutEngine* engine)
 
 void TimelineTrackWidget::setTrack(const Track* track, size_t trackIndex)
 {
+    // If the widget is being repointed to a different Track (e.g. after
+    // rebuildTracks reused this widget for a different row), drag state
+    // from the previous track no longer applies. Without clearing it, a
+    // widget that was the drag source can be reassigned to the freshly-
+    // created top track after a ghost-track drop and keep skipping the
+    // moved clip in its paintEvent — the clip stays invisible even though
+    // the program monitor renders it (it's in the data model on the new
+    // track). Clearing here is safe because an in-progress drag re-applies
+    // the state on every drag-move tick.
+    if (m_track != track) {
+        m_draggedSet.clear();
+        m_ghostDragActive = false;
+    }
     m_track = track;
     m_trackIndex = trackIndex;
     update();

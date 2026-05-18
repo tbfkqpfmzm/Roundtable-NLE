@@ -60,6 +60,10 @@ bool AV1Encoder::initCodec(const EncoderConfig& config)
                     m_codecCtx->pix_fmt     = AV_PIX_FMT_CUDA;
                     m_codecCtx->gop_size    = config.gopSize > 0 ? config.gopSize : config.fpsNum * 2;
                     m_codecCtx->hw_device_ctx = av_buffer_ref(m_hwDeviceCtx);
+
+                    // AV1 sequence header goes in the container, not inline.
+                    m_codecCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+
                     if (config.bitrateMbps > 0) {
                         m_codecCtx->bit_rate = static_cast<int64_t>(config.bitrateMbps) * 1000000;
                     }
@@ -95,6 +99,10 @@ bool AV1Encoder::initCodec(const EncoderConfig& config)
                     m_codecCtx->framerate   = {config.fpsNum, config.fpsDen};
                     m_codecCtx->pix_fmt     = AV_PIX_FMT_YUV420P;
                     m_codecCtx->gop_size    = config.gopSize > 0 ? config.gopSize : config.fpsNum * 2;
+
+                    // AV1 sequence header goes in the container, not inline.
+                    m_codecCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+
                     if (config.bitrateMbps > 0) {
                         m_codecCtx->bit_rate = static_cast<int64_t>(config.bitrateMbps) * 1000000;
                     }
@@ -138,6 +146,10 @@ bool AV1Encoder::initCodec(const EncoderConfig& config)
         m_codecCtx->framerate   = {config.fpsNum, config.fpsDen};
         m_codecCtx->pix_fmt     = AV_PIX_FMT_YUV420P;
         m_codecCtx->gop_size    = config.gopSize > 0 ? config.gopSize : config.fpsNum * 2;
+
+        // AV1 sequence header goes in the container, not inline.
+        m_codecCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+
         if (config.bitrateMbps > 0) {
             m_codecCtx->bit_rate = static_cast<int64_t>(config.bitrateMbps) * 1000000;
         }
@@ -244,19 +256,19 @@ bool AV1Encoder::encodeFrame(const uint8_t* rgbaPixels, int64_t frameIndex)
 bool AV1Encoder::sendFrame(AVFrame* frame)
 {
     m_pendingPackets.clear();
+    m_pktStore.clear();  // invalidates prior m_lastPacket/pending (already consumed)
     if (avcodec_send_frame(m_codecCtx, frame) < 0) { m_lastError = "send error"; return false; }
 
     bool gotOne = false;
     while (true) {
         if (avcodec_receive_packet(m_codecCtx, m_packet) != 0) break;
         EncodedPacket ep;
-        ep.data       = m_packet->data;
-        ep.size       = m_packet->size;
         ep.pts        = m_packet->pts;
         ep.dts        = m_packet->dts;
         ep.duration   = (m_packet->duration > 0) ? m_packet->duration : 1;
         ep.isKeyframe = (m_packet->flags & AV_PKT_FLAG_KEY) != 0;
-        ep.ownsData   = false;
+        retainPacketData(ep, m_packet->data, m_packet->size);
+        av_packet_unref(m_packet);
         if (!gotOne) { m_lastPacket = ep; gotOne = true; }
         else { m_pendingPackets.push_back(ep); }
         ++m_framesEncoded;
@@ -268,17 +280,17 @@ int AV1Encoder::flush()
 {
     if (!m_initialized) return 0;
     m_flushedPackets.clear();
+    m_pktStore.clear();  // prior packets already consumed by the caller
     avcodec_send_frame(m_codecCtx, nullptr);
     int count = 0;
     while (avcodec_receive_packet(m_codecCtx, m_packet) == 0) {
         EncodedPacket ep;
-        ep.data       = m_packet->data;
-        ep.size       = m_packet->size;
         ep.pts        = m_packet->pts;
         ep.dts        = m_packet->dts;
         ep.duration   = (m_packet->duration > 0) ? m_packet->duration : 1;
         ep.isKeyframe = (m_packet->flags & AV_PKT_FLAG_KEY) != 0;
-        ep.ownsData   = false;
+        retainPacketData(ep, m_packet->data, m_packet->size);
+        av_packet_unref(m_packet);
         m_flushedPackets.push_back(ep);
         ++count; ++m_framesEncoded;
     }

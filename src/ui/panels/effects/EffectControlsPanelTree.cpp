@@ -57,11 +57,22 @@ void EffectControlsPanel::clearPropertyTree()
     m_selectedEffectIndex = -1;
     m_effectHeaders.clear();
 
-    // Remove all widgets from m_propLayout
+    // Remove all widgets from m_propLayout.
+    //
+    // Do NOT call setParent(nullptr) here. On Windows, reparenting a QWidget
+    // to nullptr immediately makes it a top-level widget — Qt realises its
+    // native HWND, and the OS briefly shows it as a tiny blank window at the
+    // Win32 default position. deleteLater() then destroys it on the next
+    // event-loop tick, but the window has already flashed on-screen. After
+    // a property-heavy refresh (e.g. undo of a ghost-track-drop that had a
+    // clip selected) this produces a storm of blank popup windows.
+    //
+    // takeAt() has already removed the widget from the layout; hiding it
+    // suppresses paint until deleteLater() runs.
     while (m_propLayout->count() > 0) {
         auto* item = m_propLayout->takeAt(0);
         if (item->widget()) {
-            item->widget()->setParent(nullptr);
+            item->widget()->hide();
             item->widget()->deleteLater();
         }
         delete item;

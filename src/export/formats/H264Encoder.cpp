@@ -76,6 +76,11 @@ bool H264Encoder::initCodec(const EncoderConfig& config)
                     m_codecCtx->max_b_frames = 2;
                     m_codecCtx->hw_device_ctx = av_buffer_ref(m_hwDeviceCtx);
 
+                    // MP4/MOV/MKV need SPS/PPS in the avcC box, not inline.
+                    // Without this flag the file plays in VLC but breaks in
+                    // strict editors (Premiere, Resolve, QuickTime, browsers).
+                    m_codecCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+
                     if (config.bitrateMbps > 0) {
                         m_codecCtx->bit_rate     = static_cast<int64_t>(config.bitrateMbps) * 1000000;
                         m_codecCtx->rc_max_rate  = config.maxBitrateMbps > 0
@@ -92,6 +97,11 @@ bool H264Encoder::initCodec(const EncoderConfig& config)
                     av_opt_set(m_codecCtx->priv_data, "tune", "hq", 0);
                     av_opt_set(m_codecCtx->priv_data, "rc", "constqp", 0);
                     av_opt_set_int(m_codecCtx->priv_data, "qp", config.crf, 0);
+                    // High profile: required for 4:2:0 8-bit at 4K/high
+                    // resolutions. Main profile (the prior default) is
+                    // non-standard for 4K and makes editors/browsers
+                    // conform or reject the clip.
+                    av_opt_set(m_codecCtx->priv_data, "profile", "high", 0);
 
                     ret = avcodec_open2(m_codecCtx, nvenc, nullptr);
                     if (ret >= 0 && m_codecCtx->hw_frames_ctx) {
@@ -125,6 +135,9 @@ bool H264Encoder::initCodec(const EncoderConfig& config)
                     m_codecCtx->gop_size    = config.gopSize > 0 ? config.gopSize : config.fpsNum * 2;
                     m_codecCtx->max_b_frames = 2;
 
+                    // SPS/PPS go in the container's avcC box, not inline.
+                    m_codecCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+
                     if (config.bitrateMbps > 0) {
                         m_codecCtx->bit_rate     = static_cast<int64_t>(config.bitrateMbps) * 1000000;
                         m_codecCtx->rc_max_rate  = config.maxBitrateMbps > 0
@@ -141,6 +154,7 @@ bool H264Encoder::initCodec(const EncoderConfig& config)
                     av_opt_set(m_codecCtx->priv_data, "tune", "hq", 0);
                     av_opt_set(m_codecCtx->priv_data, "rc", "constqp", 0);
                     av_opt_set_int(m_codecCtx->priv_data, "qp", config.crf, 0);
+                    av_opt_set(m_codecCtx->priv_data, "profile", "high", 0);
 
                     int openRet = avcodec_open2(m_codecCtx, nvenc, nullptr);
                     if (openRet >= 0 && m_codecCtx->pix_fmt == AV_PIX_FMT_YUV420P) {
@@ -190,6 +204,9 @@ bool H264Encoder::initCodec(const EncoderConfig& config)
         m_codecCtx->gop_size    = config.gopSize > 0 ? config.gopSize : config.fpsNum * 2;
         m_codecCtx->max_b_frames = 2;
 
+        // SPS/PPS go in the container's avcC box, not inline.
+        m_codecCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+
         if (config.bitrateMbps > 0) {
             m_codecCtx->bit_rate     = static_cast<int64_t>(config.bitrateMbps) * 1000000;
             m_codecCtx->rc_max_rate  = config.maxBitrateMbps > 0
@@ -209,6 +226,7 @@ bool H264Encoder::initCodec(const EncoderConfig& config)
         };
         int idx = static_cast<int>(config.preset);
         if (idx < 9) av_opt_set(m_codecCtx->priv_data, "preset", presetNames[idx], 0);
+        av_opt_set(m_codecCtx->priv_data, "profile", "high", 0);
         if (config.bitrateMbps == 0)
             av_opt_set_int(m_codecCtx->priv_data, "crf", config.crf, 0);
 
@@ -315,12 +333,15 @@ bool H264Encoder::encodeFrame(const uint8_t* rgbaPixels, int64_t frameIndex)
 bool H264Encoder::sendFrame(AVFrame* frame)
 {
     m_pendingPackets.clear();
+    m_pktStore.clear();  // invalidates prior m_lastPacket/pending (already consumed)
     int ret = avcodec_send_frame(m_codecCtx, frame);
     if (ret < 0) { m_lastError = "H264Encoder: Error sending frame"; return false; }
 
     // Drain ALL available packets from the encoder.  The encoder may
     // produce multiple packets from one send (B-frame reordering) or
-    // may produce none (EAGAIN — needs more frames).
+    // may produce none (EAGAIN — needs more frames).  Each packet's
+    // bytes are copied into m_pktStore via retainPacketData() because
+    // m_packet's buffer is recycled on the next receive.
     bool gotOne = false;
     while (true) {
         ret = avcodec_receive_packet(m_codecCtx, m_packet);
@@ -332,13 +353,12 @@ bool H264Encoder::sendFrame(AVFrame* frame)
         }
 
         EncodedPacket ep;
-        ep.data       = m_packet->data;
-        ep.size       = m_packet->size;
         ep.pts        = m_packet->pts;
         ep.dts        = m_packet->dts;
         ep.duration   = (m_packet->duration > 0) ? m_packet->duration : 1;
         ep.isKeyframe = (m_packet->flags & AV_PKT_FLAG_KEY) != 0;
-        ep.ownsData   = false;
+        retainPacketData(ep, m_packet->data, m_packet->size);
+        av_packet_unref(m_packet);
 
         if (!gotOne) {
             // First packet goes to m_lastPacket for the caller
@@ -356,15 +376,17 @@ int H264Encoder::flush()
 {
     if (!m_initialized) return 0;
     m_flushedPackets.clear();
+    m_pktStore.clear();  // prior packets already consumed by the caller
     avcodec_send_frame(m_codecCtx, nullptr);
 
     int count = 0;
     while (avcodec_receive_packet(m_codecCtx, m_packet) == 0) {
         EncodedPacket ep;
-        ep.data = m_packet->data; ep.size = m_packet->size;
         ep.pts = m_packet->pts; ep.dts = m_packet->dts;
         ep.duration = (m_packet->duration > 0) ? m_packet->duration : 1;
         ep.isKeyframe = (m_packet->flags & AV_PKT_FLAG_KEY) != 0;
+        retainPacketData(ep, m_packet->data, m_packet->size);
+        av_packet_unref(m_packet);
         m_flushedPackets.push_back(ep);
         ++count; ++m_framesEncoded;
     }

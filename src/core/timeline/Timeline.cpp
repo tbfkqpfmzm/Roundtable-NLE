@@ -23,17 +23,23 @@ Track* Timeline::addVideoTrack(const std::string& name)
 {
     std::string trackName = name;
     if (trackName.empty()) {
-        // Count existing video tracks to get the next number
+        // Count existing video tracks to get the next number. Dividers are
+        // TrackType::Video but aren't real tracks — counting them would
+        // produce the wrong "V<N>" name (e.g. "V4" with one divider and two
+        // real video tracks).
         int videoCount = 0;
         for (const auto& t : m_tracks)
-            if (t->type() == TrackType::Video) ++videoCount;
+            if (t->type() == TrackType::Video && !t->isDivider()) ++videoCount;
         trackName = "V" + std::to_string(videoCount + 1);
     }
-    // Insert before the first audio track so video tracks always stay
-    // above audio tracks (Premiere Pro convention).
+    // Insert before the first audio track OR the V/A divider, whichever
+    // comes first. The divider sits between the video and audio sections,
+    // so a new video track must land above it; otherwise it would slot in
+    // between the divider and the audio tracks, putting the divider in the
+    // middle of the video stack instead of at the V/A boundary.
     size_t insertIdx = m_tracks.size();
     for (size_t i = 0; i < m_tracks.size(); ++i) {
-        if (m_tracks[i]->type() == TrackType::Audio) {
+        if (m_tracks[i]->type() == TrackType::Audio || m_tracks[i]->isDivider()) {
             insertIdx = i;
             break;
         }

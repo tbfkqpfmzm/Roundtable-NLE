@@ -230,10 +230,16 @@ int AudioSync::exportToTimeline(Timeline* timeline)
                 if (vis) ++visibleCount;
             }
 
+            // Collect real video track indices. Dividers are TrackType::Video
+            // but reject clips; counting them would mis-size the array and
+            // (worse) target the divider as a clip destination — Track::addClip
+            // returns nullptr for dividers, silently dropping the placed clip.
             std::vector<size_t> videoIndices;
-            for (size_t vi = 0; vi < timeline->trackCount(); ++vi)
-                if (timeline->track(vi)->type() == TrackType::Video)
+            for (size_t vi = 0; vi < timeline->trackCount(); ++vi) {
+                Track* tk = timeline->track(vi);
+                if (tk && tk->type() == TrackType::Video && !tk->isDivider())
                     videoIndices.push_back(vi);
+            }
 
             while (static_cast<int>(videoIndices.size()) < visibleCount) {
                 Track* t = timeline->addVideoTrack("");

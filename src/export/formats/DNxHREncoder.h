@@ -35,6 +35,7 @@ public:
     [[nodiscard]] const std::vector<EncodedPacket>& pendingPackets() const override { return m_pendingPackets; }
     [[nodiscard]] EncoderCodec codec() const noexcept override { return EncoderCodec::DNxHR; }
     [[nodiscard]] int avCodecId() const noexcept override;
+    [[nodiscard]] AVCodecContext* avCodecContext() const noexcept override { return m_codecCtx; }
     [[nodiscard]] bool isInitialized() const noexcept override { return m_initialized; }
     [[nodiscard]] bool isHardwareAccelerated() const noexcept override { return false; }
     [[nodiscard]] const std::string& lastError() const noexcept override { return m_lastError; }

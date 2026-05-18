@@ -68,7 +68,8 @@ public:
 
     // ── Format info ─────────────────────────────────────────────────────
     static constexpr uint8_t  MAGIC[8] = {'R','N','D','T','B','L','v','2'};
-    static constexpr uint32_t FORMAT_VERSION = 17;  // v17 = Sequences section correctly writes v16+ transition fields
+    static constexpr uint32_t FORMAT_VERSION = 18;  // v18 = persist Track.isDivider flag (V/A separator)
+                                                    // v17 = Sequences section correctly writes v16+ transition fields
                                                     // v16 = transition clip-link + edit-point positioning (bug: Sequences section omitted them)
                                                     // v15 = spatial keyframe handles (motion path)
 

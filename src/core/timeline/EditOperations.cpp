@@ -59,6 +59,13 @@ std::unique_ptr<Command> EditOperations::moveClipToTrack(
     Track* srcTrack = timeline.track(fromTrack);
     Track* dstTrack = timeline.track(toTrack);
 
+    // Dividers cannot hold clips (Track::addClip returns nullptr). Without
+    // this guard the AddClipCommand would silently no-op while the paired
+    // RemoveClipCommand still pulls the clip off srcTrack — the clip ends
+    // up destroyed instead of moved.
+    if (!srcTrack || !dstTrack || dstTrack->isDivider())
+        return nullptr;
+
     size_t idx = srcTrack->findClipIndexById(clipId);
     if (idx == srcTrack->clipCount())
         return nullptr;

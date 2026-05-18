@@ -9,6 +9,7 @@
 #pragma once
 
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <string>
 #include <vector>
@@ -180,6 +181,12 @@ public:
     [[nodiscard]] virtual EncoderCodec codec() const noexcept = 0;
     /// Return the FFmpeg AVCodecID for this encoder (or 0 if not available).
     [[nodiscard]] virtual int avCodecId() const noexcept = 0;
+    /// Return the underlying FFmpeg AVCodecContext, or nullptr if not opened.
+    /// The muxer reads this to copy codec params + extradata (SPS/PPS, etc.)
+    /// into the container's stream codecpar so MP4/MOV files have a valid
+    /// avcC/hvcC box. Without this, files only play in lenient demuxers
+    /// (VLC) and fail in strict editors (Premiere, Resolve, browsers).
+    [[nodiscard]] virtual AVCodecContext* avCodecContext() const noexcept { return nullptr; }
     [[nodiscard]] virtual bool isInitialized() const noexcept = 0;
     [[nodiscard]] virtual bool isHardwareAccelerated() const noexcept = 0;
     [[nodiscard]] virtual const std::string& lastError() const noexcept = 0;
@@ -190,6 +197,28 @@ public:
     /// Create an encoder for the given codec. Tries hardware acceleration first.
     static std::unique_ptr<Encoder> create(EncoderCodec codec,
                                             HardwareAccel hwAccel = HardwareAccel::None);
+
+    /// Resolve the "Auto" UI option: returns the best hardware backend
+    /// whose FFmpeg encoder is actually available for `codec` (NVENC →
+    /// QSV → AMF), or None (CPU) if none exist. Codecs with no hardware
+    /// path (ProRes/DNxHR/ImageSequence) always return None.
+    [[nodiscard]] static HardwareAccel detectBestHardware(EncoderCodec codec) noexcept;
+
+protected:
+    // Stable backing store for packet payloads. FFmpeg reuses a single
+    // AVPacket buffer across avcodec_receive_packet() calls, so pointing
+    // an EncodedPacket directly at AVPacket::data dangles as soon as the
+    // next packet is received (B-frame drains, flush). Each subclass
+    // clears this at the start of sendFrame()/flush() and routes every
+    // packet's bytes through retainPacketData() so the data outlives the
+    // drain loop. std::deque is required: pointers to existing elements
+    // stay valid across push_back (std::vector would reallocate).
+    std::deque<std::vector<uint8_t>> m_pktStore;
+
+    /// Copy `size` bytes into stable storage and repoint ep.data at it.
+    /// Sets ep.size and clears ep.ownsData (the encoder owns the buffer
+    /// until the next sendFrame()/flush()).
+    void retainPacketData(EncodedPacket& ep, const uint8_t* data, int size);
 };
 
 } // namespace rt

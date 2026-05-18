@@ -92,6 +92,7 @@ std::vector<uint8_t> ProjectSerializer::serialize(const Project& project) const
             sec.writeU8(track->isSoloed() ? 1 : 0);
             sec.writeF32(track->height());
             sec.writeU8(track->isSyncLocked() ? 1 : 0); // v5+
+            sec.writeU8(track->isDivider() ? 1 : 0);    // v18+
 
             // Clips for this track
             sec.writeU32(static_cast<uint32_t>(track->clipCount()));
@@ -166,6 +167,7 @@ std::vector<uint8_t> ProjectSerializer::serialize(const Project& project) const
                 sec.writeU8(track->isSoloed() ? 1 : 0);
                 sec.writeF32(track->height());
                 sec.writeU8(track->isSyncLocked() ? 1 : 0); // v5+
+                sec.writeU8(track->isDivider() ? 1 : 0);    // v18+
 
                 sec.writeU32(static_cast<uint32_t>(track->clipCount()));
                 for (size_t ci = 0; ci < track->clipCount(); ++ci)
@@ -432,6 +434,18 @@ std::unique_ptr<Project> ProjectSerializer::deserialize(const std::vector<uint8_
                     track->setHeight(height);
                     if (version >= 5)
                         track->setSyncLocked(sr.readU8() != 0);
+                    if (version >= 18) {
+                        track->setDivider(sr.readU8() != 0);
+                    } else if (type == TrackType::Video && height < 15.0f) {
+                        // v17 and older never persisted isDivider; the V/A
+                        // separator was saved as a regular Video track. Auto-
+                        // promote tracks matching the divider signature (Video
+                        // type + short height — real video tracks default to
+                        // 80px). The name check was dropped after we hit cases
+                        // where an older build's auto-rename loop gave the
+                        // unflagged divider a "V<N>" label before saving.
+                        track->setDivider(true);
+                    }
 
                     // Clips
                     uint32_t clipCount = sr.readU32();
@@ -541,6 +555,15 @@ std::unique_ptr<Project> ProjectSerializer::deserialize(const std::vector<uint8_
                     track->setHeight(height);
                     if (version >= 5)
                         track->setSyncLocked(sr.readU8() != 0);
+                    if (version >= 18) {
+                        track->setDivider(sr.readU8() != 0);
+                    } else if (type == TrackType::Video &&
+                               name.empty() &&
+                               height < 15.0f) {
+                        // v17 and older: auto-promote tracks matching the
+                        // divider signature (see Section_Tracks reader above).
+                        track->setDivider(true);
+                    }
 
                     uint32_t clipCount = sr.readU32();
                     for (uint32_t ci = 0; ci < clipCount; ++ci)

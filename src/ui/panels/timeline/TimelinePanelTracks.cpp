@@ -902,38 +902,84 @@ void TimelinePanel::ensureSectionDivider()
     if (!m_timeline) return;
     const size_t n = m_timeline->trackCount();
 
-    // Find the first real audio track and whether a real video track
-    // precedes it. Divider tracks are TrackType::Video+isDivider, so
-    // skip them when classifying sections.
-    size_t firstAudio = SIZE_MAX;
-    bool hasVideo = false;
-    for (size_t i = 0; i < n; ++i) {
-        Track* t = m_timeline->track(i);
-        if (!t || t->isDivider()) continue;
-        if (t->type() == TrackType::Audio) { firstAudio = i; break; }
-        if (t->type() == TrackType::Video) hasVideo = true;
-    }
-    // Need both a video and an audio section to separate.
-    if (firstAudio == SIZE_MAX || !hasVideo) return;
-
     // Dark grey (0xAARRGGBB) — noticeably darker than the empty track
     // background (trackBg ~20,20,26) so the V/A split reads as a recessed
     // separator rather than another track.
     constexpr uint32_t kSepColor = 0xFF0A0A0Cu;
 
-    // If a divider already sits at the boundary, just keep its appearance
-    // in sync (also upgrades dividers created by older builds). Only
-    // touch nameless auto-dividers so a user-named divider is left alone.
-    if (firstAudio > 0) {
-        Track* prev = m_timeline->track(firstAudio - 1);
-        if (prev && prev->isDivider()) {
-            if (prev->name().empty() && prev->color() != kSepColor)
-                prev->setColor(kSepColor);
-            return;
+    // Promote "shadow dividers" — Video tracks that look like dividers
+    // (height < 15px; real video tracks default to 80px) but lost their
+    // isDivider flag, e.g. through an older project file that didn't
+    // persist the flag and was saved after the auto-rename loop gave the
+    // unflagged divider a "V<N>" name. Without this, ensureSectionDivider
+    // adds a brand-new divider elsewhere and the user ends up with two
+    // divider-looking rows.
+    for (size_t i = 0; i < n; ++i) {
+        Track* t = m_timeline->track(i);
+        if (!t || t->isDivider()) continue;
+        if (t->type() == TrackType::Video && t->height() < 15.0f) {
+            t->setDivider(true);
+            t->setName("");
+            t->setColor(kSepColor);
         }
     }
 
-    // Insert a dedicated divider track at the V/A boundary.
+    // Locate the V/A boundary on real tracks (dividers ignored), and find
+    // any existing divider rows.
+    size_t firstAudio = SIZE_MAX;
+    bool hasVideo = false;
+    std::vector<size_t> existingDividers;
+    for (size_t i = 0; i < n; ++i) {
+        Track* t = m_timeline->track(i);
+        if (!t) continue;
+        if (t->isDivider()) {
+            existingDividers.push_back(i);
+            continue;
+        }
+        if (t->type() == TrackType::Audio && firstAudio == SIZE_MAX) firstAudio = i;
+        if (t->type() == TrackType::Video) hasVideo = true;
+    }
+
+    // Need both a video and an audio section to separate. With no audio,
+    // any leftover divider is meaningless — drop it.
+    if (firstAudio == SIZE_MAX || !hasVideo) {
+        for (auto it = existingDividers.rbegin(); it != existingDividers.rend(); ++it)
+            m_timeline->removeTrack(*it);
+        return;
+    }
+
+    // A divider is "correctly placed" only when it sits immediately above
+    // the first real audio track. With ours-above-audio invariant from
+    // Timeline::addVideoTrack, the divider should end up at firstAudio - 1
+    // after every track-modifying operation. Repair otherwise — e.g. an
+    // older codepath inserted new video tracks BELOW the divider, leaving
+    // it stranded above the V-stack instead of between V and A.
+    if (existingDividers.size() == 1 &&
+        firstAudio > 0 &&
+        existingDividers.front() == firstAudio - 1)
+    {
+        Track* d = m_timeline->track(existingDividers.front());
+        if (d && d->name().empty() && d->color() != kSepColor)
+            d->setColor(kSepColor);
+        return;
+    }
+
+    // Drop misplaced / duplicate dividers (back-to-front so indices stay
+    // valid), then re-add a single divider at the correct V/A boundary.
+    for (auto it = existingDividers.rbegin(); it != existingDividers.rend(); ++it)
+        m_timeline->removeTrack(*it);
+
+    // Recompute firstAudio in case removals shifted indices.
+    firstAudio = SIZE_MAX;
+    for (size_t i = 0; i < m_timeline->trackCount(); ++i) {
+        Track* t = m_timeline->track(i);
+        if (t && !t->isDivider() && t->type() == TrackType::Audio) {
+            firstAudio = i;
+            break;
+        }
+    }
+    if (firstAudio == SIZE_MAX) return;
+
     if (Track* d = m_timeline->addDividerTrack(firstAudio)) {
         d->setName("");
         d->setColor(kSepColor);
