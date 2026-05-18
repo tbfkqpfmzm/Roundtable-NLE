@@ -128,6 +128,10 @@ public:
     /// Rebuild the sequence tab bar from the current project.
     void refreshSequenceTabs();
 
+    /// Mark a sequence as open in the tab bar (Premiere Pro style).
+    /// Does nothing if already open.
+    void openSequenceTab(size_t index);
+
     /// Insert a nested sequence clip at the playhead on the first targeted video track.
     void nestSequence(size_t sequenceIndex, const QString& sequenceName);
 
@@ -300,6 +304,13 @@ private:
     // Sequence tab bar (Premiere Pro style — multiple open sequences)
     QTabBar*          m_sequenceTabBar{nullptr};
     bool              m_suppressTabChange{false};
+
+    /// Set of sequence indices currently open as tabs.
+    /// When empty, refreshSequenceTabs() seeds it with all sequences.
+    std::set<size_t>  m_openSequenceTabs;
+
+    /// Tab-index → sequence-index mapping, rebuilt by refreshSequenceTabs().
+    std::vector<size_t> m_tabToSeq;
 
     // Tool buttons (for sync with keyboard shortcuts)
     QToolButton*      m_toolButtons[8]{};  // Selection, Ripple, Rolling, Razor, Slip, Slide, Text, Zoom

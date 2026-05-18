@@ -97,9 +97,13 @@
 #include <QToolBar>
 #include <QToolButton>
 #include <QApplication>
+#include <QAbstractSpinBox>
 #include <QChildEvent>
+#include <QComboBox>
 #include <QCursor>
+#include <QPlainTextEdit>
 #include <QTabBar>
+#include <QTextEdit>
 #include <QMenu>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -121,10 +125,65 @@
 
 namespace rt {
 
+namespace {
+
+// Focus-follows-hover for dock panels. When the mouse enters a widget that
+// lives inside a QDockWidget, focus the dock's content widget so that
+// Qt::WidgetWithChildrenShortcut shortcuts route to the panel under the
+// cursor without requiring a click first (Premiere/Resolve behavior).
+class HoverFocusFilter : public QObject
+{
+public:
+    using QObject::QObject;
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        if (event->type() != QEvent::Enter) return false;
+        auto* w = qobject_cast<QWidget*>(watched);
+        if (!w) return false;
+
+        // Don't retarget mid-drag or while a modal is up.
+        if (QApplication::mouseButtons() != Qt::NoButton) return false;
+        if (QApplication::activeModalWidget()) return false;
+
+        // Don't steal focus from a user actively typing/editing.
+        if (auto* fw = QApplication::focusWidget()) {
+            if (qobject_cast<QLineEdit*>(fw)        ||
+                qobject_cast<QTextEdit*>(fw)        ||
+                qobject_cast<QPlainTextEdit*>(fw)   ||
+                qobject_cast<QAbstractSpinBox*>(fw) ||
+                qobject_cast<QComboBox*>(fw)) {
+                return false;
+            }
+        }
+
+        // Walk up to the enclosing dock; focus its content widget.
+        for (QWidget* p = w; p; p = p->parentWidget()) {
+            if (auto* dock = qobject_cast<QDockWidget*>(p)) {
+                if (auto* content = dock->widget()) {
+                    if (!content->hasFocus())
+                        content->setFocus(Qt::MouseFocusReason);
+                }
+                break;
+            }
+        }
+        return false;  // never consume — let the original target see Enter too
+    }
+};
+
+} // namespace
+
 void TimelineWorkspace::createPanelWidgets()
 {
     const auto& tc = Theme::colors();
     const auto& m  = Theme::metrics();
+
+    // -- Hover-focus filter (focus-follows-hover for dock panels) ---------
+    static bool s_hoverFocusInstalled = false;
+    if (!s_hoverFocusInstalled) {
+        qApp->installEventFilter(new HoverFocusFilter(qApp));
+        s_hoverFocusInstalled = true;
+    }
 
     // -- Floating dock resize filter (Windows only) -----------------------
 #ifdef _WIN32
@@ -702,18 +761,40 @@ void TimelineWorkspace::createPanelWidgets()
     connect(m_sequenceTabBar, &QTabBar::currentChanged, this, [this](int index) {
         if (m_destroying.load(std::memory_order_acquire)) return;
         if (m_suppressTabChange || index < 0) return;
-        emit sequenceTabChanged(static_cast<size_t>(index));
+        if (index >= static_cast<int>(m_tabToSeq.size())) return;
+        emit sequenceTabChanged(m_tabToSeq[static_cast<size_t>(index)]);
     });
-    connect(m_sequenceTabBar, &QTabBar::tabCloseRequested, this, [this](int index) {
+    connect(m_sequenceTabBar, &QTabBar::tabCloseRequested, this, [this](int tabIdx) {
         if (m_destroying.load(std::memory_order_acquire)) return;
-        if (!m_project || m_project->sequenceCount() <= 1) return;
-        emit sequenceTabClosed(static_cast<size_t>(index));
+        if (tabIdx < 0 || tabIdx >= static_cast<int>(m_tabToSeq.size())) return;
+        if (!m_project) return;
+
+        size_t seqIdx = m_tabToSeq[static_cast<size_t>(tabIdx)];
+
+        // Don't close the last open tab
+        if (m_openSequenceTabs.size() <= 1) return;
+
+        // Remove from open set
+        m_openSequenceTabs.erase(seqIdx);
+
+        // If closing the active sequence, switch to the first remaining one.
+        // Don't call setActiveSequence here — let switchSequence() handle
+        // all the timeline/playback/UI wiring.
+        if (m_project->activeSequenceIndex() == seqIdx) {
+            size_t newActive = *m_openSequenceTabs.begin();
+            refreshSequenceTabs();
+            emit sequenceTabChanged(newActive);
+        } else {
+            refreshSequenceTabs();
+        }
     });
     m_sequenceTabBar->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_sequenceTabBar, &QWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
         if (m_destroying.load(std::memory_order_acquire)) return;
         int tabIdx = m_sequenceTabBar->tabAt(pos);
-        if (tabIdx < 0 || !m_project) return;
+        if (tabIdx < 0 || tabIdx >= static_cast<int>(m_tabToSeq.size()) || !m_project) return;
+
+        size_t seqIdx = m_tabToSeq[static_cast<size_t>(tabIdx)];
 
         QMenu menu(m_sequenceTabBar);
         QAction* renameAction = menu.addAction("Rename Sequence...");
@@ -721,17 +802,26 @@ void TimelineWorkspace::createPanelWidgets()
         QAction* dupAction    = menu.addAction("Duplicate Sequence");
         menu.addSeparator();
         QAction* closeAction  = menu.addAction("Close");
-        closeAction->setEnabled(m_project->sequenceCount() > 1);
+        closeAction->setEnabled(m_openSequenceTabs.size() > 1);
 
         QAction* chosen = menu.exec(m_sequenceTabBar->mapToGlobal(pos));
         if (chosen == renameAction) {
-            emit sequenceTabRenameRequested(static_cast<size_t>(tabIdx));
+            emit sequenceTabRenameRequested(seqIdx);
         } else if (chosen == settingsAction) {
-            emit sequenceTabSettingsRequested(static_cast<size_t>(tabIdx));
+            emit sequenceTabSettingsRequested(seqIdx);
         } else if (chosen == dupAction) {
-            emit sequenceTabDuplicateRequested(static_cast<size_t>(tabIdx));
+            emit sequenceTabDuplicateRequested(seqIdx);
         } else if (chosen == closeAction) {
-            emit sequenceTabClosed(static_cast<size_t>(tabIdx));
+            // Don't close the last open tab
+            if (m_openSequenceTabs.size() <= 1) return;
+            m_openSequenceTabs.erase(seqIdx);
+            if (m_project->activeSequenceIndex() == seqIdx) {
+                size_t newActive = *m_openSequenceTabs.begin();
+                refreshSequenceTabs();
+                emit sequenceTabChanged(newActive);
+            } else {
+                refreshSequenceTabs();
+            }
         }
     });
     centerLayout->addWidget(m_sequenceTabBar);

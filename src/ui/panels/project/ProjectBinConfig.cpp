@@ -82,15 +82,14 @@ void ProjectBin::createNewBin()
         return;
 
     // Only create as a sub-bin when a bin is *itself* explicitly selected.
-    // Previously this fell back to the selected item's PARENT bin, which
-    // meant clicking any sequence inside a sub-bin would silently make the
-    // new bin a sub-sub-bin of that folder — even with Ctrl+B. Now an
-    // ambiguous selection (a clip/sequence sitting in some bin) creates
-    // at the root.
+    // We use selectedItems() instead of currentItem() because currentItem()
+    // can persist from a previous click even after the user clicks empty
+    // space — causing new bins to silently nest inside the last-focused bin.
     QTreeWidgetItem* targetParentBin = nullptr;
-    if (auto* selected = m_listWidget ? m_listWidget->currentItem() : nullptr) {
-        if (selected->data(0, Qt::UserRole + 2).toBool())
-            targetParentBin = selected;
+    if (m_listWidget) {
+        const auto& sel = m_listWidget->selectedItems();
+        if (sel.size() == 1 && sel.first()->data(0, Qt::UserRole + 2).toBool())
+            targetParentBin = sel.first();
     }
 
     auto* binItem = projectBinCreateBinItem(name);

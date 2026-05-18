@@ -18,6 +18,7 @@
 
 #include <QFileInfo>
 #include <QLineEdit>
+#include <QTimer>
 #include <QTreeWidgetItem>
 #include <QHeaderView>
 
@@ -105,11 +106,16 @@ void ProjectBin::onItemDoubleClicked(int index, const std::filesystem::path& fil
                 openBinTab(binPath, gridItem.folderName);
                 return;
             }
-            // Sequence — try to open it
+            // Sequence — try to open it. Defer via QTimer::singleShot so the
+            // double-click event finishes before the page switch + timeline
+            // rebuild run; otherwise the open appears to stall until the user
+            // clicks elsewhere (same fix as onListItemDoubleClicked below).
             if (m_project) {
                 for (size_t si = 0; si < m_project->sequenceCount(); ++si) {
                     if (QString::fromStdString(m_project->sequence(si)->name()) == gridItem.folderName) {
-                        emit sequenceOpened(si);
+                        QTimer::singleShot(0, this, [this, si]() {
+                            emit sequenceOpened(si);
+                        });
                         return;
                     }
                 }
@@ -149,10 +155,17 @@ void ProjectBin::onListItemDoubleClicked(QTreeWidgetItem* item, int /*column*/)
         return;
     }
 
-    // Sequences: open in timeline
+    // Sequences: open in timeline.
+    // Defer via QTimer::singleShot so the double-click event finishes
+    // processing before the page switch (setCurrentPage → Timeline) and
+    // heavy timeline rebuild run. Without this, the QStackedWidget page
+    // change stalls until the next event-loop cycle, making it look like
+    // nothing happened until the user clicks somewhere else.
     if (item->data(0, Qt::UserRole + 3).toBool()) {
         size_t seqIdx = item->data(0, Qt::UserRole + 4).toULongLong();
-        emit sequenceOpened(seqIdx);
+        QTimer::singleShot(0, this, [this, seqIdx]() {
+            emit sequenceOpened(seqIdx);
+        });
         return;
     }
 
@@ -221,11 +234,17 @@ void ProjectBin::onBinTabChanged(int index)
 
     m_iconBinPath = m_binTabPaths[index];
 
-    // Non-root tabs always show icon view for that bin
-    if (index > 0 && m_listView)
-        setListView(false);
-    else if (!m_listView)
-        syncIconView();
+    // Defer the view rebuild so the tab visibly switches first.
+    // syncIconView()/setListView() walk the tree, rebuild grid items, and
+    // kick thumbnail decode — blocking the UI thread. Running on the next
+    // event-loop tick lets the tab indicator paint first.
+    const bool goIconView = (index > 0 && m_listView);
+    QTimer::singleShot(0, this, [this, goIconView]() {
+        if (goIconView)
+            setListView(false);
+        else if (!m_listView)
+            syncIconView();
+    });
 }
 
 void ProjectBin::onBinTabCloseRequested(int index)

@@ -408,7 +408,26 @@ void MainWindow::switchSequence(size_t index)
 {
     if (!m_currentProject) return;
     if (index >= m_currentProject->sequenceCount()) return;
-    if (index == m_currentProject->activeSequenceIndex()) return;
+
+    if (index == m_currentProject->activeSequenceIndex()) {
+        // Already active in the backend — but the tab may still need to be
+        // (re-)added or raised. Happens when:
+        //   - user closed the active sequence's tab: refreshSequenceTabs
+        //     silently switches the backend's active to a remaining open
+        //     sequence, then emits sequenceTabChanged → this function gets
+        //     called with index == new active and used to early-return,
+        //     leaving the timeline panel showing the old sequence.
+        //   - user double-clicks the active sequence in the bin whose tab
+        //     was closed, expecting it to re-appear.
+        // Skip the heavy timeline rebuild (it's already correct) but make
+        // sure the tab bar reflects the current active sequence.
+        if (m_timelineWorkspace) {
+            m_timelineWorkspace->openSequenceTab(index);
+            m_timelineWorkspace->refreshSequenceTabs();
+        }
+        setCurrentPage(Page::Timeline);
+        return;
+    }
 
     // Stop playback before switching
     if (m_playbackController)
@@ -420,41 +439,51 @@ void MainWindow::switchSequence(size_t index)
     // Update MainWindow's own pointer
     m_timeline = newTimeline;
 
-    // Update workspace (TimelinePanel + compositeFrame + loadAudioSources)
-    if (m_timelineWorkspace)
-        m_timelineWorkspace->setTimeline(newTimeline);
-
-    // Update PlaybackController
-    if (m_playbackController)
-        m_playbackController->setTimeline(newTimeline);
-
-    // Update ExportPanel
-    if (m_exportPanel) {
-        m_exportPanel->setTimeline(newTimeline);
-        if (m_currentProject) m_exportPanel->setProject(m_currentProject.get());
-    }
-
-    // Refresh the bin to update the bold/active indicator
-    if (auto* bin = projectBin())
-        bin->refreshSequences();
-
-    // Refresh sequence tab bar to highlight the active tab
-    if (m_timelineWorkspace)
+    // ── Phase 1: lightweight UI updates (paint immediately) ──────────────
+    // Tab bar refresh and page switch are cheap; run them synchronously so
+    // the new tab appears on this frame instead of after the heavy timeline
+    // rebuild blocks the event loop. Without this split, the queued paint
+    // for the tab bar sits behind setTimeline()/rebuildTracks() and only
+    // flushes when something else (e.g. a stray mouse click) re-enters the
+    // event loop — exactly the "click somewhere else to make it appear" bug.
+    if (m_timelineWorkspace) {
+        m_timelineWorkspace->openSequenceTab(index);
         m_timelineWorkspace->refreshSequenceTabs();
-
-    // Rebuild timeline UI
-    if (m_timelineWorkspace && m_timelineWorkspace->timelinePanel())
-        m_timelineWorkspace->timelinePanel()->rebuildTracks();
-
-    // Refresh ProgramMonitor so it shows the new sequence content
-    if (auto* pm = programMonitor())
-        pm->refresh();
-
-    // Switch to Timeline page
+    }
     setCurrentPage(Page::Timeline);
 
-    spdlog::info("MainWindow: switched to sequence {} '{}'",
-                 index, newTimeline->name());
+    // ── Phase 2: heavy work (deferred) ───────────────────────────────────
+    // setTimeline triggers waitForWarm + audio reload, rebuildTracks rebuilds
+    // every track widget, the bin reloads thumbnails. All of this can block
+    // the UI thread for noticeable time; defer it one event-loop tick so the
+    // tab paint from Phase 1 lands first.
+    QTimer::singleShot(0, this, [this, newTimeline]() {
+        if (m_destroying.load(std::memory_order_acquire)) return;
+
+        if (m_timelineWorkspace)
+            m_timelineWorkspace->setTimeline(newTimeline);
+
+        if (m_playbackController)
+            m_playbackController->setTimeline(newTimeline);
+
+        if (m_exportPanel) {
+            m_exportPanel->setTimeline(newTimeline);
+            if (m_currentProject)
+                m_exportPanel->setProject(m_currentProject.get());
+        }
+
+        if (auto* bin = projectBin())
+            bin->refreshSequences();
+
+        if (m_timelineWorkspace && m_timelineWorkspace->timelinePanel())
+            m_timelineWorkspace->timelinePanel()->rebuildTracks();
+
+        if (auto* pm = programMonitor())
+            pm->refresh();
+
+        spdlog::info("MainWindow: switched to sequence '{}'",
+                     newTimeline->name());
+    });
 }
 
 void MainWindow::onSequenceSettingsRequested(size_t seqIdx)

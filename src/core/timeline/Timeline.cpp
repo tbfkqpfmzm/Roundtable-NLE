@@ -293,6 +293,10 @@ std::unique_ptr<Timeline> Timeline::clone() const
         dstTrack->setTargeted(srcTrack->isTargeted());
         dstTrack->setCollapsed(srcTrack->isCollapsed());
         dstTrack->setSyncLocked(srcTrack->isSyncLocked());
+        // Divider tracks are stored as TrackType::Video with isDivider=true.
+        // Without copying this flag the divider clones as a regular V-track,
+        // producing the "extra video layer" seen in duplicated sequences.
+        dstTrack->setDivider(srcTrack->isDivider());
         dstTrack->setHeight(srcTrack->height());
         dstTrack->setColor(srcTrack->color());
         dstTrack->setVolume(srcTrack->volume());

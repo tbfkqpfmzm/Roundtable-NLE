@@ -268,9 +268,11 @@ void LibraryPanel::buildUI()
                 this, [debounce]() { debounce->start(); });
     }
 
-    // Refresh the current folder tab when it becomes visible.
+    // Refresh the current folder tab when it becomes visible. Deferred so the
+    // tab visibly switches before the (synchronous) directory walk / view
+    // rebuild runs on the next event-loop tick.
     connect(m_tabs, &QTabWidget::currentChanged, this, [this](int) {
-        refreshCurrentTab();
+        QTimer::singleShot(0, this, [this]() { refreshCurrentTab(); });
     });
 }
 

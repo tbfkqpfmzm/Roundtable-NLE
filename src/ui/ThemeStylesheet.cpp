@@ -72,9 +72,7 @@ QDockWidget::close-button:hover, QDockWidget::float-button:hover {
 )").arg(t.sizeCaption)
    .arg(rgb(c.dockTitleBg))
    .arg(rgb(c.dockTitleText))
-   .arg(rgb(c.border))
-   .arg(rgba(c.text, 25))
-   .arg(rgba(c.accent, 140));
+   .arg(rgb(c.border));
 
     // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     //  MENU BAR & MENUS
@@ -285,8 +283,8 @@ QTabWidget::pane {
 QSplitter::handle {
     background: %1;
 }
-QSplitter::handle:horizontal { width: 6px; cursor: SplitHCursor; }
-QSplitter::handle:vertical { height: 6px; cursor: SplitVCursor; }
+QSplitter::handle:horizontal { width: 6px; }
+QSplitter::handle:vertical { height: 6px; }
 QSplitter::handle:hover {
     background: %2;
 }
@@ -297,8 +295,6 @@ QMainWindow::separator {
     width: 6px;
     height: 6px;
 }
-QMainWindow::separator:horizontal { cursor: SplitHCursor; }
-QMainWindow::separator:vertical { cursor: SplitVCursor; }
 QMainWindow::separator:hover {
     background: %2;
 }

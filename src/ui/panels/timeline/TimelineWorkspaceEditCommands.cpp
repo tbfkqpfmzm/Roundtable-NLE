@@ -75,21 +75,97 @@ void TimelineWorkspace::syncProgramMonitorInOut()
     }
 }
 
+void TimelineWorkspace::openSequenceTab(size_t index)
+{
+    if (!m_project || index >= m_project->sequenceCount()) return;
+    m_openSequenceTabs.insert(index);
+}
+
 void TimelineWorkspace::refreshSequenceTabs()
 {
     if (!m_sequenceTabBar || !m_project) return;
+
+    // Drop stale entries — indices that no longer exist because their
+    // sequence was removed. Without this, the next sequence created at
+    // a freed index inherits the "open" flag from its predecessor and
+    // gets a tab automatically (user-reported bug after delete+duplicate).
+    for (auto it = m_openSequenceTabs.begin(); it != m_openSequenceTabs.end(); ) {
+        if (*it >= m_project->sequenceCount())
+            it = m_openSequenceTabs.erase(it);
+        else
+            ++it;
+    }
+
+    // Seed the open set with all sequences on first use (project load)
+    if (m_openSequenceTabs.empty()) {
+        for (size_t i = 0; i < m_project->sequenceCount(); ++i)
+            m_openSequenceTabs.insert(i);
+    }
+
+    // Compute the desired tab→sequence list from the open set.
+    std::vector<size_t> desired;
+    desired.reserve(m_openSequenceTabs.size());
+    for (size_t i = 0; i < m_project->sequenceCount(); ++i) {
+        if (m_openSequenceTabs.find(i) != m_openSequenceTabs.end())
+            desired.push_back(i);
+    }
+
+    // Resolve the active sequence (may have been closed → fall back to first open).
+    size_t activeIdx = m_project->activeSequenceIndex();
+    if (m_openSequenceTabs.find(activeIdx) == m_openSequenceTabs.end()) {
+        if (!m_openSequenceTabs.empty()) {
+            activeIdx = *m_openSequenceTabs.begin();
+            m_project->setActiveSequence(activeIdx);
+        }
+    }
+
+    int desiredActiveTab = -1;
+    for (size_t t = 0; t < desired.size(); ++t) {
+        if (desired[t] == activeIdx) { desiredActiveTab = static_cast<int>(t); break; }
+    }
+
+    // Fast path: tab set is already correct — just sync the current tab
+    // (and tab labels in case a sequence was renamed). Avoids the flicker
+    // of tearing down and rebuilding every tab.
+    if (desired == m_tabToSeq) {
+        m_suppressTabChange = true;
+        for (size_t t = 0; t < desired.size(); ++t) {
+            const Timeline* seq = m_project->sequence(desired[t]);
+            QString name = seq ? QString::fromStdString(seq->name())
+                               : QStringLiteral("Sequence");
+            if (m_sequenceTabBar->tabText(static_cast<int>(t)) != name)
+                m_sequenceTabBar->setTabText(static_cast<int>(t), name);
+        }
+        if (desiredActiveTab >= 0 &&
+            desiredActiveTab < m_sequenceTabBar->count() &&
+            m_sequenceTabBar->currentIndex() != desiredActiveTab) {
+            m_sequenceTabBar->setCurrentIndex(desiredActiveTab);
+        }
+        m_suppressTabChange = false;
+        // Force the queued paint to flush now — workaround for a Qt issue
+        // where the tab bar's update from setCurrentIndex sits queued behind
+        // other events until the next mouse-click flushes it.
+        m_sequenceTabBar->repaint();
+        return;
+    }
+
+    // Full rebuild.
     m_suppressTabChange = true;
     while (m_sequenceTabBar->count() > 0)
         m_sequenceTabBar->removeTab(0);
-    for (size_t i = 0; i < m_project->sequenceCount(); ++i) {
+    m_tabToSeq.clear();
+
+    for (size_t i : desired) {
         const Timeline* seq = m_project->sequence(i);
         m_sequenceTabBar->addTab(seq ? QString::fromStdString(seq->name())
                                      : QStringLiteral("Sequence"));
+        m_tabToSeq.push_back(i);
     }
-    int activeIdx = static_cast<int>(m_project->activeSequenceIndex());
-    if (activeIdx < m_sequenceTabBar->count())
-        m_sequenceTabBar->setCurrentIndex(activeIdx);
+
+    if (desiredActiveTab >= 0 && desiredActiveTab < m_sequenceTabBar->count())
+        m_sequenceTabBar->setCurrentIndex(desiredActiveTab);
     m_suppressTabChange = false;
+    m_sequenceTabBar->repaint();
 }
 
 void TimelineWorkspace::nestSequence(size_t sequenceIndex, const QString& sequenceName)

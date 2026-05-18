@@ -138,7 +138,7 @@ void TimelinePanel::setupLayout()
     m_headerSplitter->setHandleWidth(3);
     m_headerSplitter->setStyleSheet(QStringLiteral(
         "QSplitter { background: #16161e; }"
-        "QSplitter::handle { background: #000000; cursor: SplitHCursor; }"));
+        "QSplitter::handle { background: #000000; }"));
 
     // Keep header spacer and scroll spacer in sync with the splitter.
     // Spacer must cover header width + handle so ruler aligns with viewport.
