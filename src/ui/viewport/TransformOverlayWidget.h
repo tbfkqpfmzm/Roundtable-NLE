@@ -64,12 +64,18 @@ public:
     /// the on-screen content rect so the editor's text matches the rendered
     /// text size exactly. Commit (Enter / focus out) emits
     /// inlineTextCommitted(); Esc cancels.
+    /// `horizontalStretch` accounts for anisotropic layer scaling: the
+    /// renderer applies painter.scale(scaleX, scaleY) so glyph height ∝
+    /// scaleY (baked into fontSizeRef at the call site) and glyph width
+    /// ∝ scaleX. Pass scaleX / scaleY so the editor matches; 1.0 = normal
+    /// width, 2.0 = glyphs twice as wide as tall.
     void beginInlineTextEdit(const QString& initial,
                              const QString& fontFamily,
                              float fontSizeRef,
                              int fontWeight,
                              bool italic,
-                             const QColor& textColor);
+                             const QColor& textColor,
+                             float horizontalStretch = 1.0f);
 
     /// True while the in-place text editor is shown.
     [[nodiscard]] bool isInlineTextEditing() const noexcept;
@@ -275,6 +281,12 @@ private:
     // selected text layer's bounding box). Owned via Qt parent.
     class QLineEdit* m_inlineTextEdit{nullptr};
     bool             m_committingInlineText{false};
+    /// Screen-space center the inline editor should stay anchored to as
+    /// the text grows/shrinks during typing. Updated in beginInlineTextEdit
+    /// from the transform box centroid; consumed by the textChanged
+    /// handler to resize symmetrically rather than scroll the text.
+    QPoint           m_inlineEditCenter{0, 0};
+    int              m_inlineEditHeight{32};
 
     // Mask overlay data (non-owning pointer to clip's masks vector)
     std::vector<OpacityMask>* m_masks{nullptr};

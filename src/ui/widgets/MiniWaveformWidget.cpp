@@ -764,8 +764,12 @@ void MiniWaveformWidget::wheelEvent(QWheelEvent* event)
         m_viewStart = newStart;
         m_viewEnd   = newEnd;
         update();
-    } else if (shiftHeld) {
-        // Shift + wheel: horizontal scroll (pan left/right)
+    } else {
+        // Plain (or Shift) wheel: horizontal scroll (pan left/right).
+        // Wheel up scrolls the view left, matching the convention for
+        // timeline tools.  Plain wheel intentionally takes over from the
+        // outer card list scroll while the cursor is over the waveform.
+        (void)shiftHeld;
         event->accept();
 
         double viewDur = m_viewEnd - m_viewStart;
@@ -781,8 +785,6 @@ void MiniWaveformWidget::wheelEvent(QWheelEvent* event)
         if (m_viewEnd > dur) { m_viewStart -= (m_viewEnd - dur); m_viewEnd = dur; }
         m_viewStart = std::max(0.0, m_viewStart);
         update();
-    } else {
-        QWidget::wheelEvent(event);  // default vertical scroll
     }
 }
 

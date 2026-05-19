@@ -231,8 +231,25 @@ bool App::init()
     // Initialize early so subsystems can use GPU resources.
     // Surface is VK_NULL_HANDLE for now — the VulkanViewport will create
     // its own surface later and the device already picks a present queue.
-    if (!GpuContext::get().init()) {
-        spdlog::warn("App: GPU context failed — falling back to software compositor");
+    //
+    // Skip GPU init when running in --capture-workspace mode — the capture
+    // only needs dock widgets arranged, no rendering.  GPU init can hang
+    // during headless capture (driver timeout, missing display, etc.).
+    {
+        bool capturing = false;
+        for (const auto& arg : QCoreApplication::arguments()) {
+            if (arg == QStringLiteral("--capture-workspace")) {
+                capturing = true;
+                break;
+            }
+        }
+        if (!capturing) {
+            if (!GpuContext::get().init()) {
+                spdlog::warn("App: GPU context failed — falling back to software compositor");
+            }
+        } else {
+            spdlog::info("App: skipping GPU init (--capture-workspace mode)");
+        }
     }
 
     // System-adaptive FrameCache budget has been applied by

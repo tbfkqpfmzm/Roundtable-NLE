@@ -76,7 +76,7 @@ void PropertiesPanel::applySpineOutfit()
             namespace fs = std::filesystem;
             auto p = fs::path(oldPath);
             // Walk up from the file to find the format directory
-            // Path: .../Converted/{fmtDir}/{char}/{outfit}/{anim}.ext
+            // Path: .../converted/{fmtDir}/{char}/{outfit}/{anim}.ext
             if (p.parent_path().has_parent_path() && p.parent_path().parent_path().has_parent_path()) {
                 auto candidate = p.parent_path().parent_path().parent_path().filename().string();
                 if (candidate == "H264_Green" || candidate == "H264_Blue" ||
@@ -84,7 +84,7 @@ void PropertiesPanel::applySpineOutfit()
                     fmtDir = candidate;
             }
         }
-        std::string base = "assets/Converted/" + fmtDir + "/"
+        std::string base = "assets/converted/" + fmtDir + "/"
             + vc->characterName() + "/" + newOutfit + "/";
         std::string newMute = base + animName + ext;
         std::string newTalk = base + animName + "_talk" + ext;
@@ -184,7 +184,7 @@ void PropertiesPanel::applySpineAnimation()
                     fmtDir = candidate;
             }
         }
-        std::string base = "assets/Converted/" + fmtDir + "/"
+        std::string base = "assets/converted/" + fmtDir + "/"
             + vc->characterName() + "/" + outfit + "/";
         std::string newMute = base + newAnim + ext;
         std::string newTalk = base + newAnim + "_talk" + ext;

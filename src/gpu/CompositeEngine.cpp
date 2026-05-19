@@ -1252,6 +1252,25 @@ std::shared_ptr<CachedFrame> CompositeEngine::compositeViaRenderGraph(
                     result->pixels = std::move(victim.frame->pixels);
                 }
             }
+            // Wait for the just-submitted composite + recordReadback to
+            // finish on the GPU before reading staging memory.  Without
+            // this, mapAndCopyReadback races the DMA into staging and
+            // returns a mix of the new frame's pixels and whatever the
+            // previous frame left behind — visible at cuts as "top of the
+            // previous frame leaking into the next one" because the GPU
+            // hasn't yet fully overwritten the staging buffer.  The
+            // lazyReadback path (GPU display mode) is unaffected — it runs
+            // from the FrameProducer after its own fence wait.
+            if (gpuSubmitOk && m_gpuSubmission) {
+                // 5-second timeout — same as other waits in this file;
+                // generous enough to survive a heavy frame, short enough to
+                // surface a wedged device instead of hanging the export.
+                constexpr uint64_t kReadbackWaitNs = 5'000'000'000ull;
+                if (!m_gpuSubmission->waitForCompletion(kReadbackWaitNs)) {
+                    spdlog::warn("[RENDER_GRAPH] readback fence wait timed out — "
+                                 "frame may contain partial/stale pixels");
+                }
+            }
             compositor->mapAndCopyReadback(result->pixels);
         }
 

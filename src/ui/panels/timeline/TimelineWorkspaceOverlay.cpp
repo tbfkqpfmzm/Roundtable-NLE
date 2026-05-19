@@ -630,15 +630,16 @@ void TimelineWorkspace::updateTransformOverlay()
                 QString text = QString::fromStdString(tl->text());
                 if (tl->allCaps()) text = text.toUpper();
 
-                // Output dimensions — use the project output resolution.
-                // The renderer always renders GraphicClip at full project res
-                // then downscales, so text proportions are identical at all
-                // display resolutions.  The overlay measures at the same
-                // reference resolution to match.
-                uint32_t outW = m_programMonitor ? m_programMonitor->outputWidth()  : 1920;
-                uint32_t outH = m_programMonitor ? m_programMonitor->outputHeight() : 1080;
-                if (outW == 0) outW = 1920;
-                if (outH == 0) outH = 1080;
+                // Output dimensions — the project/sequence resolution.
+                // renderGraphicClip() renders at full project res then
+                // downscales and adds posX raw in that space, so the
+                // overlay must measure/place in the SAME space. This is
+                // NOT m_programMonitor->outputWidth() (the preview res,
+                // which can be a 1920 preview of a 4K project — that
+                // mismatch drifted the box from the text proportionally
+                // to distance from center).
+                uint32_t outW = 0, outH = 0;
+                graphicCanvasRes(outW, outH);
 
                 // Use a very large rect so text is never clipped/wrapped by canvas bounds
                 double bigW = static_cast<double>(outW) * 10.0;
@@ -695,11 +696,10 @@ void TimelineWorkspace::updateTransformOverlay()
                 auto* sl = static_cast<ShapeLayer*>(layer);
                 float sw = sl->shapeWidth();
                 float sh = sl->shapeHeight();
-                // Use project output resolution for shapes (resolution-independent)
-                uint32_t outW = m_programMonitor ? m_programMonitor->outputWidth()  : 1920;
-                uint32_t outH = m_programMonitor ? m_programMonitor->outputHeight() : 1080;
-                if (outW == 0) outW = 1920;
-                if (outH == 0) outH = 1080;
+                // Project/sequence resolution — same space renderGraphicClip
+                // composites shapes in (NOT the monitor preview res).
+                uint32_t outW = 0, outH = 0;
+                graphicCanvasRes(outW, outH);
                 // Shapes are centered in the canvas
                 float cx = static_cast<float>(outW) * 0.5f;
                 float cy = static_cast<float>(outH) * 0.5f;
@@ -905,13 +905,16 @@ void TimelineWorkspace::updateTransformOverlay()
             overlay->clearMotionPath();
         }
 
-        // Tell the overlay the sequence resolution so REF-1920 keyframe
-        // values map to widget pixels correctly.
-        if (m_programMonitor) {
-            uint32_t w = m_programMonitor->outputWidth();
-            uint32_t h = m_programMonitor->outputHeight();
-            if (w == 0) w = 1920;
-            if (h == 0) h = 1080;
+        // Tell the overlay the PROJECT/sequence resolution — the same
+        // space renderGraphicClip composites text in (and the same one
+        // the inline text editor scales its font against). Using
+        // ProgramMonitor::outputWidth() here gave the preview resolution,
+        // which can be lower than the project (e.g. 1920 preview of a 4K
+        // project) and made the inline-edit font sized as if the canvas
+        // were 1080-tall — visibly different from the rendered text.
+        {
+            uint32_t w = 0, h = 0;
+            graphicCanvasRes(w, h);
             overlay->setSequenceResolution(w, h);
         }
     }

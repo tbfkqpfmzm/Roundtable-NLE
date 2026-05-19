@@ -643,10 +643,15 @@ void AudioSync::autoTrimClip(size_t clipIdx)
 
     // Only apply if change is meaningful (>20ms)
     if (std::abs(newStart - clip.start) > 0.02 || std::abs(newEnd - clip.end) > 0.02) {
-        clip.start = newStart;
-        clip.end   = newEnd;
+        runClipsMutationWithUndo(
+            "Auto-trim audio clip",
+            [this, clipIdx, newStart, newEnd]() {
+                if (clipIdx >= m_clips.size()) return;
+                m_clips[clipIdx].start = newStart;
+                m_clips[clipIdx].end   = newEnd;
+            },
+            [this]() { populateClipList(); });
         spdlog::info("AudioSync: Auto-trimmed clip {} to {:.3f}-{:.3f}", clipIdx, newStart, newEnd);
-        populateClipList();
     }
 }
 

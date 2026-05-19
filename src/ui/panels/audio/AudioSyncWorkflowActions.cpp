@@ -20,6 +20,7 @@
 #include <QProgressDialog>
 #include <QRegularExpression>
 #include <QSettings>
+#include <QTimer>
 
 #include "Settings.h"
 
@@ -220,7 +221,21 @@ void AudioSync::onAutoSyncClicked()
     m_syncProgress->show();
     QCoreApplication::processEvents();
 
-    runAutoSync();
+    runClipsMutationWithUndo(
+        "Auto-Sync",
+        [this]() { runAutoSync(); },
+        [this]() {
+            // runAutoSync drives its own UI refresh inline.  We still need
+            // a rebuild for the undo/redo path so the cards reflect the
+            // restored m_clips state.  An extra refresh during the
+            // forward call is acceptable (the work happens after sync
+            // completes).
+            QTimer::singleShot(0, this, [this]() {
+                if (m_destroying.load(std::memory_order_acquire)) return;
+                populateCards();
+                updateWorkflowState();
+            });
+        });
 
     if (m_syncProgress) {
         m_syncProgress->setValue(100);

@@ -7,6 +7,8 @@
 
 #include "Theme.h"
 
+#include "command/CommandStack.h"
+#include "command/LambdaCommand.h"
 #include "Encoder.h"
 #include "Muxer.h"
 #include "RenderQueue.h"
@@ -187,6 +189,56 @@ void ExportPanel::setPreviewCallback(PreviewCallback cb)
     m_previewCallback = std::move(cb);
 }
 
+void ExportPanel::applyInOutPointEdit(const std::string& description,
+                                       int64_t newInPoint,
+                                       int64_t newOutPoint,
+                                       int     newRangeComboIdx)
+{
+    if (!m_timeline) return;
+
+    const int64_t oldInPoint  = m_timeline->inPoint();
+    const int64_t oldOutPoint = m_timeline->outPoint();
+    const int     oldRangeIdx = m_rangeCombo ? m_rangeCombo->currentIndex() : 0;
+
+    if (oldInPoint == newInPoint && oldOutPoint == newOutPoint
+        && oldRangeIdx == newRangeComboIdx) {
+        return; // no observable change
+    }
+
+    auto apply = [this](int64_t in, int64_t out, int rangeIdx) {
+        if (m_destroying.load(std::memory_order_acquire)) return;
+        if (!m_timeline) return;
+        if (in < 0 && out < 0) {
+            m_timeline->clearInOutPoints();
+        } else {
+            // setInPoint/setOutPoint accept -1 as "not set", so this also
+            // covers the "only one of them is set" case.
+            if (in >= 0)
+                m_timeline->setInPoint(in);
+            else
+                m_timeline->clearInOutPoints();
+            if (out >= 0)
+                m_timeline->setOutPoint(out);
+        }
+        if (m_rangeCombo)
+            m_rangeCombo->setCurrentIndex(rangeIdx);
+        refreshPreview();
+    };
+
+    apply(newInPoint, newOutPoint, newRangeComboIdx);
+
+    if (m_commandStack) {
+        m_commandStack->pushWithoutExecute(std::make_unique<LambdaCommand>(
+            description,
+            [apply, newInPoint, newOutPoint, newRangeComboIdx]() {
+                apply(newInPoint, newOutPoint, newRangeComboIdx);
+            },
+            [apply, oldInPoint, oldOutPoint, oldRangeIdx]() {
+                apply(oldInPoint, oldOutPoint, oldRangeIdx);
+            }));
+    }
+}
+
 std::shared_ptr<CachedFrame> ExportPanel::pipelineComposite(
     int64_t tick, int64_t nextTick,
     uint32_t w, uint32_t h, bool scrub)
@@ -340,20 +392,20 @@ void ExportPanel::keyPressEvent(QKeyEvent* event)
     case Qt::Key_I:
         // Set In point at current playhead position
         if (m_timeline && m_miniTimeline) {
-            m_timeline->setInPoint(m_miniTimeline->playhead());
-            m_rangeCombo->setCurrentIndex(1); // switch to "In to Out"
-            refreshPreview();
-            spdlog::info("ExportPanel: In point set at tick={}", m_miniTimeline->playhead());
+            const int64_t playhead = m_miniTimeline->playhead();
+            applyInOutPointEdit("Set in point",
+                                playhead, m_timeline->outPoint(), 1);
+            spdlog::info("ExportPanel: In point set at tick={}", playhead);
         }
         event->accept();
         return;
     case Qt::Key_O:
         // Set Out point at current playhead position
         if (m_timeline && m_miniTimeline) {
-            m_timeline->setOutPoint(m_miniTimeline->playhead());
-            m_rangeCombo->setCurrentIndex(1); // switch to "In to Out"
-            refreshPreview();
-            spdlog::info("ExportPanel: Out point set at tick={}", m_miniTimeline->playhead());
+            const int64_t playhead = m_miniTimeline->playhead();
+            applyInOutPointEdit("Set out point",
+                                m_timeline->inPoint(), playhead, 1);
+            spdlog::info("ExportPanel: Out point set at tick={}", playhead);
         }
         event->accept();
         return;
@@ -361,9 +413,7 @@ void ExportPanel::keyPressEvent(QKeyEvent* event)
     case Qt::Key_Backspace:
         // Clear in/out points
         if (m_timeline) {
-            m_timeline->clearInOutPoints();
-            m_rangeCombo->setCurrentIndex(0); // switch back to "Entire Sequence"
-            refreshPreview();
+            applyInOutPointEdit("Clear in/out points", -1, -1, 0);
             spdlog::info("ExportPanel: In/Out points cleared");
         }
         event->accept();
@@ -372,9 +422,7 @@ void ExportPanel::keyPressEvent(QKeyEvent* event)
         if (event->modifiers() == (Qt::ControlModifier | Qt::ShiftModifier)) {
             // Ctrl+Shift+X — clear in/out points
             if (m_timeline) {
-                m_timeline->clearInOutPoints();
-                m_rangeCombo->setCurrentIndex(0);
-                refreshPreview();
+                applyInOutPointEdit("Clear in/out points", -1, -1, 0);
                 spdlog::info("ExportPanel: In/Out points cleared via Ctrl+Shift+X");
             }
             event->accept();
@@ -1436,29 +1484,27 @@ void ExportPanel::updateFileEstimate()
 void ExportPanel::onSetInPoint()
 {
     if (m_timeline && m_miniTimeline) {
-        m_timeline->setInPoint(m_miniTimeline->playhead());
-        m_rangeCombo->setCurrentIndex(1);
-        refreshPreview();
-        spdlog::info("ExportPanel: In point set at tick={} (button)", m_miniTimeline->playhead());
+        const int64_t playhead = m_miniTimeline->playhead();
+        applyInOutPointEdit("Set in point",
+                            playhead, m_timeline->outPoint(), 1);
+        spdlog::info("ExportPanel: In point set at tick={} (button)", playhead);
     }
 }
 
 void ExportPanel::onSetOutPoint()
 {
     if (m_timeline && m_miniTimeline) {
-        m_timeline->setOutPoint(m_miniTimeline->playhead());
-        m_rangeCombo->setCurrentIndex(1);
-        refreshPreview();
-        spdlog::info("ExportPanel: Out point set at tick={} (button)", m_miniTimeline->playhead());
+        const int64_t playhead = m_miniTimeline->playhead();
+        applyInOutPointEdit("Set out point",
+                            m_timeline->inPoint(), playhead, 1);
+        spdlog::info("ExportPanel: Out point set at tick={} (button)", playhead);
     }
 }
 
 void ExportPanel::onClearInOut()
 {
     if (m_timeline) {
-        m_timeline->clearInOutPoints();
-        m_rangeCombo->setCurrentIndex(0);
-        refreshPreview();
+        applyInOutPointEdit("Clear in/out points", -1, -1, 0);
         spdlog::info("ExportPanel: In/Out points cleared (button)");
     }
 }

@@ -5,6 +5,8 @@
 
 #include "panels/audio/AudioSync.h"
 
+#include "command/CommandStack.h"
+#include "command/LambdaCommand.h"
 #include "Theme.h"
 
 #include <QComboBox>
@@ -20,6 +22,7 @@
 #include <QScrollBar>
 #include <QSplitter>
 #include <QStyledItemDelegate>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <spdlog/spdlog.h>
@@ -873,47 +876,67 @@ void AudioSync::setupUi()
     connect(m_syncActionBtn, &QPushButton::clicked, this, &AudioSync::onAutoSyncClicked);
     actionBarLayout->addWidget(m_syncActionBtn);
 
+    // Rebuild routine shared by all bulk action handlers \u2014 defers via
+    // QTimer::singleShot so the clicked widget isn't destroyed mid-signal.
+    auto bulkRebuild = [this]() {
+        QTimer::singleShot(0, this, [this]() {
+            if (m_destroying.load(std::memory_order_acquire)) return;
+            populateCards();
+            updateWorkflowState();
+        });
+    };
+
     m_confirmAllActionBtn = makeActionBtn(
         "\u2713  Confirm All", c.successBtnBg, c.successBtnHover, c.textPrimary);
-    connect(m_confirmAllActionBtn, &QPushButton::clicked, this, [this]() {
-        for (auto& clip : m_clips) {
-            if (clip.matchState == 1)
-                clip.matchState = 2;
-        }
-        populateCards();
-        updateWorkflowState();
+    connect(m_confirmAllActionBtn, &QPushButton::clicked, this, [this, bulkRebuild]() {
+        runClipsMutationWithUndo("Confirm all audio matches",
+            [this]() {
+                for (auto& clip : m_clips) {
+                    if (clip.matchState == 1)
+                        clip.matchState = 2;
+                }
+            },
+            bulkRebuild);
     });
     actionBarLayout->addWidget(m_confirmAllActionBtn);
 
     m_unconfirmAllActionBtn = makeActionBtn(
         "\u21A9  Unconfirm All", c.surface3, c.surface2, c.textPrimary);
-    connect(m_unconfirmAllActionBtn, &QPushButton::clicked, this, [this]() {
-        for (auto& clip : m_clips) {
-            if (clip.matchState == 2)
-                clip.matchState = 1;
-        }
-        populateCards();
-        updateWorkflowState();
+    connect(m_unconfirmAllActionBtn, &QPushButton::clicked, this, [this, bulkRebuild]() {
+        runClipsMutationWithUndo("Unconfirm all audio matches",
+            [this]() {
+                for (auto& clip : m_clips) {
+                    if (clip.matchState == 2)
+                        clip.matchState = 1;
+                }
+            },
+            bulkRebuild);
     });
     actionBarLayout->addWidget(m_unconfirmAllActionBtn);
 
     m_clearActionBtn = makeActionBtn(
         "\u2715  Clear Matches", c.surface3, c.surface2, c.textPrimary);
-    connect(m_clearActionBtn, &QPushButton::clicked, this, [this]() {
-        for (auto& clip : m_clips) {
-            clip.matchState = 0;
-            clip.confidence = 0.0f;
-            clip.scriptLineNumber = -1;
-            clip.scriptSegment.clear();
-        }
-        populateCards();
-        updateWorkflowState();
+    connect(m_clearActionBtn, &QPushButton::clicked, this, [this, bulkRebuild]() {
+        runClipsMutationWithUndo("Clear all audio matches",
+            [this]() {
+                for (auto& clip : m_clips) {
+                    clip.matchState = 0;
+                    clip.confidence = 0.0f;
+                    clip.scriptLineNumber = -1;
+                    clip.scriptSegment.clear();
+                }
+            },
+            bulkRebuild);
     });
     actionBarLayout->addWidget(m_clearActionBtn);
 
     auto* closeGapsBtn = makeActionBtn(
         "\u2194  Close Gaps", c.surface3, c.surface2, c.textPrimary);
-    connect(closeGapsBtn, &QPushButton::clicked, this, &AudioSync::closeInterClipGaps);
+    connect(closeGapsBtn, &QPushButton::clicked, this, [this, bulkRebuild]() {
+        runClipsMutationWithUndo("Close inter-clip gaps",
+            [this]() { closeInterClipGaps(); },
+            bulkRebuild);
+    });
     actionBarLayout->addWidget(closeGapsBtn);
 
     actionBarLayout->addStretch();

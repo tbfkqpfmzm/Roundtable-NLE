@@ -10,7 +10,7 @@
  *   - Staleness detection (re-renders when skeleton files change)
  *
  * Cache layout on disk:
- *   assets/Converted/{FormatDir}/{CharName}/{outfit}/{animName}.ext
+ *   assets/converted/{FormatDir}/{CharName}/{outfit}/{animName}.ext
  *
  * Where FormatDir is one of: H264_Green, H264_Blue, H264_Custom, ProRes
  * and ext is .mp4 (chroma-key formats) or .mov (ProRes).
@@ -93,11 +93,11 @@ class AnimationVideoCache
 public:
     /// Create the cache.
     /// @param cacheDir  Root directory for cached videos
-    ///                  (e.g., "assets/Converted")
+    ///                  (e.g., "assets/converted")
     /// @param assetsDir Root assets directory (containing "characters/")
     /// @param pool      MediaPool for video decode (non-owning)
     explicit AnimationVideoCache(MediaPool* pool = nullptr,
-                                  const std::string& cacheDir = "assets/Converted",
+                                  const std::string& cacheDir = "assets/converted",
                                   const std::string& assetsDir = "assets");
     ~AnimationVideoCache();
 

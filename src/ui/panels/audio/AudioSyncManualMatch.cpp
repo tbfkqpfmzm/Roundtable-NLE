@@ -87,68 +87,52 @@ void AudioSync::openManualMatch(int lineNumber)
     if (dialogResult == QDialog::Accepted) {
         auto result = dialog.result();
 
-        bool found = false;
-        for (auto& clip : m_clips) {
-            if (clip.scriptLineNumber == lineNumber) {
-                clip.sourceFile = result.audioFile;
-                clip.start = result.start;
-                clip.end = result.end;
-                clip.matchState = 2;
-                clip.confidence = 1.0f;
-                found = true;
-                break;
-            }
-        }
+        // Always rebuild the full card set on undo/redo so an added-then-
+        // removed clip cleanly disappears, and an updated clip's
+        // waveform/text both refresh.  The forward path can still use
+        // the lighter targeted-refresh below to avoid jank on accept.
+        auto rebuild = [this]() {
+            QTimer::singleShot(0, this, [this]() {
+                if (m_destroying.load(std::memory_order_acquire)) return;
+                populateCards();
+                updateWorkflowState();
+            });
+        };
 
-        if (!found) {
-            SyncClip newClip;
-            newClip.id = static_cast<int>(m_clips.size());
-            newClip.sourceFile = result.audioFile;
-            newClip.character = character;
-            newClip.start = result.start;
-            newClip.end = result.end;
-            newClip.matchState = 2;
-            newClip.confidence = 1.0f;
-            newClip.scriptLineNumber = lineNumber;
-            newClip.scriptSegment = character + ": " + dialogue;
-            m_clips.push_back(std::move(newClip));
-        }
-
-        spdlog::info("AudioSync: Manual match for line {} -> {}  {:.3f}-{:.3f}",
-                     lineNumber, result.audioFile, result.start, result.end);
-
-        if (found) {
-            QTimer::singleShot(0, this, [this, lineNumber]() {
-                for (size_t clipIndex = 0; clipIndex < m_clips.size(); ++clipIndex) {
-                    if (m_clips[clipIndex].scriptLineNumber == lineNumber) {
-                        updateCardMatchStyle(clipIndex);
-                        for (size_t waveIndex = 0; waveIndex < m_cardScriptLineNums.size(); ++waveIndex) {
-                            if (m_cardScriptLineNums[waveIndex] == lineNumber && waveIndex < m_cardWaveforms.size()) {
-                                if (auto waveform = m_cardWaveforms[waveIndex]) {
-                                    auto sampleIt = m_audioSamples.find(m_clips[clipIndex].sourceFile);
-                                    if (sampleIt != m_audioSamples.end()) {
-                                        waveform->setAudioShared(
-                                            &sampleIt->second.samples,
-                                            sampleIt->second.sampleRate,
-                                            m_clips[clipIndex].start,
-                                            m_clips[clipIndex].end);
-                                        waveform->update();
-                                    }
-                                }
-                                break;
-                            }
-                        }
+        runClipsMutationWithUndo(
+            "Manual audio match",
+            [this, lineNumber, result, character, dialogue]() {
+                bool found = false;
+                for (auto& clip : m_clips) {
+                    if (clip.scriptLineNumber == lineNumber) {
+                        clip.sourceFile = result.audioFile;
+                        clip.start = result.start;
+                        clip.end = result.end;
+                        clip.matchState = 2;
+                        clip.confidence = 1.0f;
+                        found = true;
                         break;
                     }
                 }
-                populateLeftList();
-                updateSmartBar();
-            });
-        } else {
-            QTimer::singleShot(0, this, [this]() {
-                populateCards();
-            });
-        }
+
+                if (!found) {
+                    SyncClip newClip;
+                    newClip.id = static_cast<int>(m_clips.size());
+                    newClip.sourceFile = result.audioFile;
+                    newClip.character = character;
+                    newClip.start = result.start;
+                    newClip.end = result.end;
+                    newClip.matchState = 2;
+                    newClip.confidence = 1.0f;
+                    newClip.scriptLineNumber = lineNumber;
+                    newClip.scriptSegment = character + ": " + dialogue;
+                    m_clips.push_back(std::move(newClip));
+                }
+
+                spdlog::info("AudioSync: Manual match for line {} -> {}  {:.3f}-{:.3f}",
+                             lineNumber, result.audioFile, result.start, result.end);
+            },
+            rebuild);
     }
 }
 

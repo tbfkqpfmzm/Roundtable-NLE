@@ -17,6 +17,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QListWidget>
+#include <QPointer>
 #include <QPushButton>
 #include <QScrollBar>
 #include <QTimer>
@@ -583,34 +584,78 @@ void AudioSync::populateCards()
             leftLayout->addWidget(waveform);
 
             // â”€â”€ Right-panel controls â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-            if (matchState == 2) {
-                // Already confirmed â€” show status label instead of button
-                auto* confirmedLabel = new QLabel(QStringLiteral("\u2713  CONFIRMED"));
-                confirmedLabel->setFixedHeight(36);
-                confirmedLabel->setAlignment(Qt::AlignCenter);
-                confirmedLabel->setStyleSheet(
-                    QString("QLabel { background: %1; color: %2; font-weight: bold; "
-                    "font-size: 13px; border: 2px solid %3; border-radius: %4px; }")
-                        .arg(Theme::hex(_tc.success), Theme::hex(_tc.textBright),
-                             Theme::hex(_tc.success), _radM));
-                rightLayout->addWidget(confirmedLabel);
-            } else {
-                auto* confirmBtn = new QPushButton(QStringLiteral("\u2713  CONFIRM"));
+            // CONFIRM / CONFIRMED is a toggle: clicking when tentative
+            // (matchState=1) sets matchState=2; clicking when confirmed
+            // sets it back to 1.  We update the button in place rather
+            // than rebuilding all cards (a populateCards() here would
+            // tear down every widget and the scroll position jumps).
+            // Both directions push a LambdaCommand so Ctrl+Z reverses
+            // either step.
+            {
+                auto* confirmBtn = new QPushButton;
                 confirmBtn->setFixedHeight(36);
-                confirmBtn->setToolTip("Confirm match");
                 confirmBtn->setCursor(Qt::PointingHandCursor);
-                confirmBtn->setStyleSheet(
-                    QString("QPushButton { background: %1; color: %2; font-weight: bold; "
-                    "font-size: 13px; border: 2px solid %3; border-radius: %4px; }"
-                    "QPushButton:hover { background: %5; }").arg(
-                        Theme::hex(_tc.successBtnBg), Theme::hex(_tc.textBright),
-                        Theme::hex(_tc.success), _radM, Theme::hex(_tc.successBtnHover)));
-                connect(confirmBtn, &QPushButton::clicked, this, [this, clipIdx]() {
-                    if (clipIdx < m_clips.size()) {
-                        m_clips[clipIdx].matchState = 2;
-                        populateLeftList();
+
+                auto applyButtonStyle = [confirmBtn, _tc, _radM](int ms) {
+                    const bool isConfirmed = (ms == 2);
+                    confirmBtn->setText(isConfirmed
+                        ? QStringLiteral("\u2713  CONFIRMED")
+                        : QStringLiteral("\u2713  CONFIRM"));
+                    confirmBtn->setToolTip(isConfirmed
+                        ? "Click to unconfirm match"
+                        : "Confirm match");
+                    confirmBtn->setStyleSheet(
+                        QString("QPushButton { background: %1; color: %2; font-weight: bold; "
+                        "font-size: 13px; border: 2px solid %3; border-radius: %4px; }"
+                        "QPushButton:hover { background: %5; }").arg(
+                            isConfirmed ? Theme::hex(_tc.success)
+                                        : Theme::hex(_tc.successBtnBg),
+                            Theme::hex(_tc.textBright),
+                            Theme::hex(_tc.success), _radM,
+                            Theme::hex(_tc.successBtnHover)));
+                };
+                // Size the button using the LONGER "CONFIRMED" label first
+                // and lock that as the minimum width.  Otherwise the button
+                // sized for "CONFIRM" (shorter) is too narrow to fit
+                // "CONFIRMED" on the first paint, clipping the trailing "D"
+                // until a manual relayout (e.g. clicking unconfirm then
+                // confirm again).  Computing this from sizeHint after the
+                // stylesheet is applied lets the actual font / padding /
+                // border be measured rather than estimated.
+                applyButtonStyle(2);
+                confirmBtn->ensurePolished();
+                confirmBtn->setMinimumWidth(confirmBtn->sizeHint().width());
+                applyButtonStyle(matchState);
+
+                // Captured by QPointer so undo lambdas can safely no-op the
+                // visual update if the card has since been torn down by
+                // another populateCards() pass \u2014 the underlying m_clips
+                // state still gets reverted; only the in-place visual
+                // refresh is skipped.
+                QPointer<QPushButton> btnGuard(confirmBtn);
+                connect(confirmBtn, &QPushButton::clicked, this,
+                        [this, clipIdx, btnGuard, applyButtonStyle]() {
+                    if (clipIdx >= m_clips.size()) return;
+                    const int oldMS = m_clips[clipIdx].matchState;
+                    const int newMS = (oldMS == 2) ? 1 : 2;
+                    if (oldMS == newMS) return;
+                    auto apply = [this, clipIdx, btnGuard, applyButtonStyle](int ms) {
+                        if (m_destroying.load(std::memory_order_acquire)) return;
+                        if (clipIdx >= m_clips.size()) return;
+                        m_clips[clipIdx].matchState = ms;
+                        if (btnGuard) applyButtonStyle(ms);
                         updateCardMatchStyle(clipIdx);
+                        populateLeftList();
                         updateWorkflowState();
+                    };
+                    if (m_commandStack) {
+                        m_commandStack->execute(std::make_unique<LambdaCommand>(
+                            newMS == 2 ? "Confirm audio match"
+                                       : "Unconfirm audio match",
+                            [apply, newMS]() { apply(newMS); },
+                            [apply, oldMS]() { apply(oldMS); }));
+                    } else {
+                        apply(newMS);
                     }
                 });
                 rightLayout->addWidget(confirmBtn);
@@ -655,14 +700,40 @@ void AudioSync::populateCards()
                     Theme::hex(_tc.dangerBg), Theme::hex(_tc.textSecondary),
                     Theme::hex(_tc.controlBorder), _rad, Theme::hex(_tc.error)));
             connect(rejectBtn, &QPushButton::clicked, this, [this, clipIdx]() {
-                if (clipIdx < m_clips.size()) {
-                    m_clips[clipIdx].matchState = 0;
-                    m_clips[clipIdx].scriptLineNumber = -1;
-                    m_clips[clipIdx].scriptSegment.clear();
-                    m_clips[clipIdx].confidence = 0.0f;
+                if (clipIdx >= m_clips.size()) return;
+                struct Snap {
+                    int         matchState;
+                    int         scriptLineNumber;
+                    std::string scriptSegment;
+                    float       confidence;
+                };
+                Snap oldSnap{
+                    m_clips[clipIdx].matchState,
+                    m_clips[clipIdx].scriptLineNumber,
+                    m_clips[clipIdx].scriptSegment,
+                    m_clips[clipIdx].confidence};
+                Snap newSnap{0, -1, std::string{}, 0.0f};
+                auto apply = [this, clipIdx](Snap s) {
+                    if (m_destroying.load(std::memory_order_acquire)) return;
+                    if (clipIdx >= m_clips.size()) return;
+                    m_clips[clipIdx].matchState       = s.matchState;
+                    m_clips[clipIdx].scriptLineNumber = s.scriptLineNumber;
+                    m_clips[clipIdx].scriptSegment    = std::move(s.scriptSegment);
+                    m_clips[clipIdx].confidence       = s.confidence;
+                    // Defer rebuild so the clicked widget isn't deleted during its own signal
+                    QTimer::singleShot(0, this, [this]() {
+                        if (m_destroying.load(std::memory_order_acquire)) return;
+                        populateCards();
+                    });
+                };
+                if (m_commandStack) {
+                    m_commandStack->execute(std::make_unique<LambdaCommand>(
+                        "Reject audio match",
+                        [apply, newSnap]() mutable { apply(std::move(newSnap)); },
+                        [apply, oldSnap]() mutable { apply(std::move(oldSnap)); }));
+                } else {
+                    apply(std::move(newSnap));
                 }
-                // Defer rebuild so the clicked button isn't deleted during its own signal
-                QTimer::singleShot(0, this, [this]() { populateCards(); });
             });
             rightLayout->addWidget(rejectBtn);
 
@@ -691,16 +762,45 @@ void AudioSync::populateCards()
                     this, [this, clipIdx, displayLinesCopy](int comboIdx) {
                 if (clipIdx >= m_clips.size() || comboIdx <= 0) return;
                 size_t lineIdx = static_cast<size_t>(comboIdx - 1);
-                if (lineIdx < displayLinesCopy.size()) {
-                    const auto& dl = displayLinesCopy[lineIdx];
-                    m_clips[clipIdx].scriptLineNumber = dl.lineNumber;
-                    m_clips[clipIdx].character = dl.character;
-                    m_clips[clipIdx].scriptSegment = dl.character + ": " + dl.dialogue;
-                    m_clips[clipIdx].matchState = 1;
-                    m_clips[clipIdx].confidence = 1.0f;
+                if (lineIdx >= displayLinesCopy.size()) return;
+                const auto& dl = displayLinesCopy[lineIdx];
+                struct Snap {
+                    int         matchState;
+                    int         scriptLineNumber;
+                    std::string character;
+                    std::string scriptSegment;
+                    float       confidence;
+                };
+                Snap oldSnap{
+                    m_clips[clipIdx].matchState,
+                    m_clips[clipIdx].scriptLineNumber,
+                    m_clips[clipIdx].character,
+                    m_clips[clipIdx].scriptSegment,
+                    m_clips[clipIdx].confidence};
+                Snap newSnap{1, dl.lineNumber, dl.character,
+                             dl.character + ": " + dl.dialogue, 1.0f};
+                auto apply = [this, clipIdx](Snap s) {
+                    if (m_destroying.load(std::memory_order_acquire)) return;
+                    if (clipIdx >= m_clips.size()) return;
+                    m_clips[clipIdx].matchState       = s.matchState;
+                    m_clips[clipIdx].scriptLineNumber = s.scriptLineNumber;
+                    m_clips[clipIdx].character        = std::move(s.character);
+                    m_clips[clipIdx].scriptSegment    = std::move(s.scriptSegment);
+                    m_clips[clipIdx].confidence       = s.confidence;
+                    // Defer rebuild so the combo isn't deleted during its own signal
+                    QTimer::singleShot(0, this, [this]() {
+                        if (m_destroying.load(std::memory_order_acquire)) return;
+                        populateCards();
+                    });
+                };
+                if (m_commandStack) {
+                    m_commandStack->execute(std::make_unique<LambdaCommand>(
+                        "Reassign audio match",
+                        [apply, newSnap]() mutable { apply(std::move(newSnap)); },
+                        [apply, oldSnap]() mutable { apply(std::move(oldSnap)); }));
+                } else {
+                    apply(std::move(newSnap));
                 }
-                // Defer rebuild so the combo isn't deleted during its own signal
-                QTimer::singleShot(0, this, [this]() { populateCards(); });
             });
             rightLayout->addWidget(lineCombo);
 
@@ -807,15 +907,46 @@ void AudioSync::populateCards()
                 if (idx <= 0) return;
                 auto* combo = qobject_cast<QComboBox*>(sender());
                 if (!combo) return;
-                int clipIdx = combo->itemData(idx).toInt();
-                if (clipIdx >= 0 && static_cast<size_t>(clipIdx) < m_clips.size()) {
-                    m_clips[static_cast<size_t>(clipIdx)].scriptLineNumber = lineNum;
-                    m_clips[static_cast<size_t>(clipIdx)].character = lineChar;
-                    m_clips[static_cast<size_t>(clipIdx)].scriptSegment = lineChar + ": " + lineDial;
-                    m_clips[static_cast<size_t>(clipIdx)].matchState = 1;
-                    m_clips[static_cast<size_t>(clipIdx)].confidence = 1.0f;
+                int clipIdxRaw = combo->itemData(idx).toInt();
+                if (clipIdxRaw < 0) return;
+                const size_t clipIdx = static_cast<size_t>(clipIdxRaw);
+                if (clipIdx >= m_clips.size()) return;
+                struct Snap {
+                    int         matchState;
+                    int         scriptLineNumber;
+                    std::string character;
+                    std::string scriptSegment;
+                    float       confidence;
+                };
+                Snap oldSnap{
+                    m_clips[clipIdx].matchState,
+                    m_clips[clipIdx].scriptLineNumber,
+                    m_clips[clipIdx].character,
+                    m_clips[clipIdx].scriptSegment,
+                    m_clips[clipIdx].confidence};
+                Snap newSnap{1, lineNum, lineChar,
+                             lineChar + ": " + lineDial, 1.0f};
+                auto apply = [this, clipIdx](Snap s) {
+                    if (m_destroying.load(std::memory_order_acquire)) return;
+                    if (clipIdx >= m_clips.size()) return;
+                    m_clips[clipIdx].matchState       = s.matchState;
+                    m_clips[clipIdx].scriptLineNumber = s.scriptLineNumber;
+                    m_clips[clipIdx].character        = std::move(s.character);
+                    m_clips[clipIdx].scriptSegment    = std::move(s.scriptSegment);
+                    m_clips[clipIdx].confidence       = s.confidence;
                     // Defer rebuild so the combo isn't deleted during its own signal
-                    QTimer::singleShot(0, this, [this]() { populateCards(); });
+                    QTimer::singleShot(0, this, [this]() {
+                        if (m_destroying.load(std::memory_order_acquire)) return;
+                        populateCards();
+                    });
+                };
+                if (m_commandStack) {
+                    m_commandStack->execute(std::make_unique<LambdaCommand>(
+                        "Assign audio clip to script line",
+                        [apply, newSnap]() mutable { apply(std::move(newSnap)); },
+                        [apply, oldSnap]() mutable { apply(std::move(oldSnap)); }));
+                } else {
+                    apply(std::move(newSnap));
                 }
             });
             rightLayout->addWidget(assignCombo);

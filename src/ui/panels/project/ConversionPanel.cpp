@@ -835,32 +835,55 @@ void ConversionPanel::onTableContextMenu(const QPoint& pos)
     menu.addAction(QStringLiteral("\xF0\x9F\x93\x82  Reveal Converted in Explorer"), this,
         [this, charName, outfit]() {
             if (m_destroying.load(std::memory_order_acquire)) return;
-            // Always point to the Converted folder (not the animation cache)
-            QString convPath = rt::findProjectRoot()
-                + "/assets/Converted/" + charName + "/" + outfit;
-            QDir convDir(convPath);
-            if (convDir.exists()) {
-                // Find the first converted video file to select
-                QDirIterator it(convPath,
-                    QStringList() << "*.webm" << "*.mp4" << "*.mov",
+#ifdef ROUNDTABLE_HAS_SPINE
+            if (!m_animVideoCache) return;
+
+            // Cache layout: <cacheRoot>/<formatDir>/<charName>/<outfit>/*.{mp4,mov,webm}
+            // A given character+outfit can have files under any of the four
+            // format subdirs (H264_Green/H264_Blue/H264_Custom/ProRes); prefer
+            // the active encoder format, then fall back to whichever exists.
+            const QString cacheRoot = QString::fromStdString(
+                m_animVideoCache->cacheDirectory().string());
+
+            auto outfitDirFor = [&](SpineCacheFormat fmt) {
+                return cacheRoot + "/"
+                    + QString::fromStdString(AnimationVideoCache::formatDirName(fmt))
+                    + "/" + charName + "/" + outfit;
+            };
+
+            const SpineCacheFormat preferred = m_animVideoCache->encoderFormat();
+            QStringList candidates;
+            candidates << outfitDirFor(preferred);
+            for (auto fmt : {SpineCacheFormat::GreenScreen,
+                             SpineCacheFormat::BlueScreen,
+                             SpineCacheFormat::CustomColor,
+                             SpineCacheFormat::ProRes4444}) {
+                if (fmt != preferred)
+                    candidates << outfitDirFor(fmt);
+            }
+
+            for (const QString& dirPath : candidates) {
+                QDir d(dirPath);
+                if (!d.exists()) continue;
+                QDirIterator it(dirPath,
+                    QStringList() << "*.mp4" << "*.mov" << "*.webm",
                     QDir::Files, QDirIterator::Subdirectories);
-                QString selectPath;
-                if (it.hasNext()) {
-                    selectPath = QDir::toNativeSeparators(it.next());
-                } else {
-                    selectPath = QDir::toNativeSeparators(convPath);
-                }
+                QString selectPath = it.hasNext()
+                    ? QDir::toNativeSeparators(it.next())
+                    : QDir::toNativeSeparators(dirPath);
                 QProcess::startDetached("explorer.exe",
                     {"/select,", selectPath});
-            } else {
-                // If no Converted folder exists, open the character's source folder
-                QString charPath = rt::findProjectRoot()
-                    + "/assets/characters/" + charName;
-                if (QDir(charPath).exists()) {
-                    QProcess::startDetached("explorer.exe",
-                        {QDir::toNativeSeparators(charPath)});
-                }
+                return;
             }
+
+            // Nothing converted yet for this char/outfit — open the cache
+            // root so the user can see the converted folder, not the Spine
+            // source folder (which would be misleading).
+            if (QDir(cacheRoot).exists()) {
+                QProcess::startDetached("explorer.exe",
+                    {QDir::toNativeSeparators(cacheRoot)});
+            }
+#endif
         });
 
     menu.exec(m_table->viewport()->mapToGlobal(pos));

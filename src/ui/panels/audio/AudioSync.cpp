@@ -327,6 +327,32 @@ void AudioSync::setAudioEngine(AudioEngine* engine)
     m_audioEngine = engine;
 }
 
+void AudioSync::runClipsMutationWithUndo(const std::string& description,
+                                          std::function<void()> mutate,
+                                          std::function<void()> rebuild)
+{
+    auto oldClips = m_clips;
+    if (mutate) mutate();
+    if (m_clips == oldClips) {
+        // No observable change — refresh UI but don't pollute undo history.
+        if (rebuild) rebuild();
+        return;
+    }
+    auto newClips = m_clips;
+    auto apply = [this, rebuild](std::vector<SyncClip> clips) {
+        if (m_destroying.load(std::memory_order_acquire)) return;
+        m_clips = std::move(clips);
+        if (rebuild) rebuild();
+    };
+    if (rebuild) rebuild();
+    if (m_commandStack) {
+        m_commandStack->pushWithoutExecute(std::make_unique<LambdaCommand>(
+            description,
+            [apply, newClips]() mutable { apply(std::move(newClips)); },
+            [apply, oldClips]() mutable { apply(std::move(oldClips)); }));
+    }
+}
+
 // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Event filter: route spacebar / J / K / L to the selected clip ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
 
 // Helper: walk up from a widget to find which clip index it belongs to.

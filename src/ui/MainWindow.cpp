@@ -374,6 +374,18 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event)
                 }
             }
 
+            // FCP7-style tool shortcuts: must work whichever panel has
+            // focus (Program Monitor, Timeline, etc.) — Premiere parity.
+            // The text-input focus check at the top of this filter already
+            // skips these when typing in a QLineEdit / QSpinBox / etc.
+            auto setTool = [this](EditTool t) -> bool {
+                if (m_timelineWorkspace && m_timelineWorkspace->timelinePanel()) {
+                    m_timelineWorkspace->timelinePanel()->setActiveTool(t);
+                    return true;
+                }
+                return false;
+            };
+
             switch (keyEvent->key()) {
             case Qt::Key_J:
                 m_playbackController->shuttleReverse();
@@ -392,6 +404,12 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event)
                 if (m_timelineWorkspace)
                     m_timelineWorkspace->togglePanelMaximize();
                 return true;
+            case Qt::Key_A: if (setTool(EditTool::Selection)) return true; break;
+            case Qt::Key_B: if (setTool(EditTool::Razor))     return true; break;
+            case Qt::Key_R: if (setTool(EditTool::Rolling))   return true; break;
+            case Qt::Key_S: if (setTool(EditTool::Slip))      return true; break;
+            case Qt::Key_T: if (setTool(EditTool::Text))      return true; break;
+            case Qt::Key_Z: if (setTool(EditTool::Zoom))      return true; break;
             default:
                 break;
             }

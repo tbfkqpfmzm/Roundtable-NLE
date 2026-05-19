@@ -532,6 +532,7 @@ void MainWindow::buildPanels()
     if (m_currentProject) m_exportPanel->setProject(m_currentProject.get());
     if (m_playbackController) m_exportPanel->setPlaybackController(m_playbackController);
     if (m_audioEngine) m_exportPanel->setAudioEngine(m_audioEngine);
+    if (m_commandStack) m_exportPanel->setCommandStack(m_commandStack);
     m_exportPanel->setPreviewCallback(
         [this](int64_t tick, uint32_t w, uint32_t h, bool scrub)
             -> std::shared_ptr<CachedFrame> {

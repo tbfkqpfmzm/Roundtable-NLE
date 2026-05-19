@@ -460,6 +460,15 @@ private:
     void updateTransformOverlay();
     void scheduleOverlayRefresh();  ///< Deferred overlay re-sync via QTimer
 
+    /// Reference canvas resolution for GraphicClip layout (text/shape
+    /// layer posX/posY space). This is the project/sequence resolution
+    /// that renderGraphicClip() composites at — NOT the ProgramMonitor
+    /// preview resolution, which can be lower (e.g. a 1920 preview of a
+    /// 4K project). The transform overlay, the text-tool click→posX
+    /// conversion, and layer hit-testing must all use this so they agree
+    /// with where the compositor actually draws the layer.
+    void graphicCanvasRes(uint32_t& w, uint32_t& h) const;
+
     /// Sync ProgramMonitor MiniTimeline in/out points from the Timeline.
     void syncProgramMonitorInOut();
 

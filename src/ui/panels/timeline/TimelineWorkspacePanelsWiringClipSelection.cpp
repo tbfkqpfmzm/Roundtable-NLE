@@ -3,6 +3,7 @@
 
 #include <volk.h>
 
+#include <cmath>
 #include <map>
 #include <set>
 
@@ -77,6 +78,25 @@
 
 namespace rt {
 
+void TimelineWorkspace::graphicCanvasRes(uint32_t& w, uint32_t& h) const
+{
+    // Mirror renderGraphicClip()'s reference: the project/sequence
+    // resolution. Fall back to the monitor preview res, then 1920×1080.
+    w = 0;
+    h = 0;
+    if (m_project) {
+        const auto& res = m_project->settings().resolution();
+        w = res.width;
+        h = res.height;
+    }
+    if ((w == 0 || h == 0) && m_programMonitor) {
+        w = m_programMonitor->outputWidth();
+        h = m_programMonitor->outputHeight();
+    }
+    if (w == 0) w = 1920;
+    if (h == 0) h = 1080;
+}
+
 // Returns true for still-image media. Such files have no real "source duration",
 
 void TimelineWorkspace::wireClipSelectionSignals() {
@@ -116,7 +136,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
                     // signal is required to set m_selectedGraphicLayerIdx for
                     // per-layer transform overlay mode.
                     bool isGraphic = (clip->clipType() == ClipType::Graphic);
-                    auto* dock = dockForPanel(QStringLiteral("Essential Graphics"));
+                    auto* dock = dockForPanel(QStringLiteral("Graphics Editor"));
                     if (!dock || dock->isVisible() || isGraphic)
                         m_GraphicsEditorPanel->setClip(clip, track);
                 }
@@ -154,7 +174,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
                         }
                     }
                 } else if (clip->clipType() == ClipType::Graphic) {
-                    if (auto* dock = dockForPanel(QStringLiteral("Essential Graphics"))) {
+                    if (auto* dock = dockForPanel(QStringLiteral("Graphics Editor"))) {
                         dock->setVisible(true);
                         dock->raise();
                     }
@@ -287,7 +307,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
 
                         // Auto-raise the appropriate dock tab
                         if (clip->clipType() == ClipType::Graphic) {
-                            if (auto* dock = dockForPanel(QStringLiteral("Essential Graphics"))) {
+                            if (auto* dock = dockForPanel(QStringLiteral("Graphics Editor"))) {
                                 dock->setVisible(true);
                                 dock->raise();
                             }
@@ -355,6 +375,11 @@ void TimelineWorkspace::wireClipSelectionSignals() {
                 m_selectedClip->positionY().writeValue(relTick, posY);
             }
             if (m_effectControlsPanel) m_effectControlsPanel->syncValuesFromClip();
+            // For text/shape layers the modified transform lives on the
+            // layer, not the clip — refresh the Essential Graphics panel
+            // so its posX/posY/scale/rotation spinboxes reflect the drag.
+            // No-op when no graphic layer is selected (early return inside).
+            if (m_GraphicsEditorPanel) m_GraphicsEditorPanel->refresh();
             invalidateCompositeCache();
             if (m_programMonitor) m_programMonitor->requestRefresh();
         });
@@ -397,6 +422,11 @@ void TimelineWorkspace::wireClipSelectionSignals() {
                 }
             }
             if (m_effectControlsPanel) m_effectControlsPanel->syncValuesFromClip();
+            // For text/shape layers the modified transform lives on the
+            // layer, not the clip — refresh the Essential Graphics panel
+            // so its posX/posY/scale/rotation spinboxes reflect the drag.
+            // No-op when no graphic layer is selected (early return inside).
+            if (m_GraphicsEditorPanel) m_GraphicsEditorPanel->refresh();
             invalidateCompositeCache();
             if (m_programMonitor) m_programMonitor->requestRefresh();
         });
@@ -417,6 +447,11 @@ void TimelineWorkspace::wireClipSelectionSignals() {
                 m_selectedClip->rotation().writeValue(relTick, rot);
             }
             if (m_effectControlsPanel) m_effectControlsPanel->syncValuesFromClip();
+            // For text/shape layers the modified transform lives on the
+            // layer, not the clip — refresh the Essential Graphics panel
+            // so its posX/posY/scale/rotation spinboxes reflect the drag.
+            // No-op when no graphic layer is selected (early return inside).
+            if (m_GraphicsEditorPanel) m_GraphicsEditorPanel->refresh();
             invalidateCompositeCache();
             if (m_programMonitor) m_programMonitor->requestRefresh();
         });
@@ -605,6 +640,11 @@ void TimelineWorkspace::wireClipSelectionSignals() {
                 m_selectedClip->positionY().writeValue(relTick, posY);
             }
             if (m_effectControlsPanel) m_effectControlsPanel->syncValuesFromClip();
+            // For text/shape layers the modified transform lives on the
+            // layer, not the clip — refresh the Essential Graphics panel
+            // so its posX/posY/scale/rotation spinboxes reflect the drag.
+            // No-op when no graphic layer is selected (early return inside).
+            if (m_GraphicsEditorPanel) m_GraphicsEditorPanel->refresh();
             invalidateCompositeCache();
             if (m_programMonitor) m_programMonitor->requestRefresh();
         });
@@ -647,6 +687,11 @@ void TimelineWorkspace::wireClipSelectionSignals() {
                 }
             }
             if (m_effectControlsPanel) m_effectControlsPanel->syncValuesFromClip();
+            // For text/shape layers the modified transform lives on the
+            // layer, not the clip — refresh the Essential Graphics panel
+            // so its posX/posY/scale/rotation spinboxes reflect the drag.
+            // No-op when no graphic layer is selected (early return inside).
+            if (m_GraphicsEditorPanel) m_GraphicsEditorPanel->refresh();
             invalidateCompositeCache();
             if (m_programMonitor) m_programMonitor->requestRefresh();
         });
@@ -667,6 +712,11 @@ void TimelineWorkspace::wireClipSelectionSignals() {
                 m_selectedClip->rotation().writeValue(relTick, rot);
             }
             if (m_effectControlsPanel) m_effectControlsPanel->syncValuesFromClip();
+            // For text/shape layers the modified transform lives on the
+            // layer, not the clip — refresh the Essential Graphics panel
+            // so its posX/posY/scale/rotation spinboxes reflect the drag.
+            // No-op when no graphic layer is selected (early return inside).
+            if (m_GraphicsEditorPanel) m_GraphicsEditorPanel->refresh();
             invalidateCompositeCache();
             if (m_programMonitor) m_programMonitor->requestRefresh();
         });
@@ -887,13 +937,15 @@ void TimelineWorkspace::wireClipSelectionSignals() {
                 if (!m_GraphicsEditorPanel) goto skipHitTest;
 
                 {
-                uint32_t outW = m_programMonitor ? m_programMonitor->outputWidth()  : 1920u;
-                uint32_t outH = m_programMonitor ? m_programMonitor->outputHeight() : 1080u;
-                if (outW == 0) outW = 1920;
-                if (outH == 0) outH = 1080;
+                // Layer posX/posY live in PROJECT-resolution space (what
+                // renderGraphicClip composites at), which can differ from
+                // the monitor preview resolution. Measure/hit-test in that
+                // same space so clicks select the layer where it's drawn.
+                uint32_t outW = 0, outH = 0;
+                graphicCanvasRes(outW, outH);
 
                 // frameX/frameY are in viewport source (composite) resolution.
-                // Scale to output (project) resolution to match text layout space.
+                // Scale to project resolution to match text layout space.
                 float hitX = frameX;
                 float hitY = frameY;
                 if (m_programMonitor) {
@@ -1080,10 +1132,38 @@ void TimelineWorkspace::wireClipSelectionSignals() {
             gc->setSourceIn(0);
             gc->setLabel("Text");
 
-            // Position the text layer at the click position (convert from output coords to reference 1920x1080)
+            // Position the text layer at the click position.
+            //
+            // frameX/frameY arrive in composite (preview) px — the click
+            // handler scales by m_vulkanVp->srcWidth(), which tracks
+            // ProgramMonitor::compositeWidth(). A GraphicClip layer's
+            // posX/posY are raw offsets from canvas center in
+            // PROJECT-resolution px: renderGraphicClip() adds them
+            // directly to renderW/2 where renderW == the project/sequence
+            // resolution (it renders full-res then downscales). The
+            // preview/output resolution can be lower (e.g. 1920 preview of
+            // a 4K project), so converting the click via outputWidth made
+            // the text/box drift by a factor of projectRes/previewRes,
+            // worsening with distance from center. Use the same project
+            // resolution the compositor does.
             auto* tl = gc->addTextLayer("Text");
-            tl->transform().posX = KeyframeTrack<float>(frameX * (1920.0f / static_cast<float>(m_programMonitor->outputWidth())) - 960.0f);
-            tl->transform().posY = KeyframeTrack<float>(frameY * (1080.0f / static_cast<float>(m_programMonitor->outputHeight())) - 540.0f);
+            uint32_t compW = m_programMonitor->compositeWidth();
+            uint32_t compH = m_programMonitor->compositeHeight();
+            uint32_t canvasW = 0, canvasH = 0;
+            graphicCanvasRes(canvasW, canvasH);
+            if (compW == 0) compW = canvasW;
+            if (compH == 0) compH = canvasH;
+            const float nx = static_cast<float>(frameX) / static_cast<float>(compW);
+            const float ny = static_cast<float>(frameY) / static_cast<float>(compH);
+            const float newPosX = (nx - 0.5f) * static_cast<float>(canvasW);
+            const float newPosY = (ny - 0.5f) * static_cast<float>(canvasH);
+            tl->transform().posX = KeyframeTrack<float>(newPosX);
+            tl->transform().posY = KeyframeTrack<float>(newPosY);
+
+            spdlog::info("[TextTool] click frame=({:.1f},{:.1f}) compW={} compH={} "
+                         "canvas={}x{} -> posX={:.1f} posY={:.1f}",
+                         frameX, frameY, compW, compH, canvasW, canvasH,
+                         newPosX, newPosY);
 
             // Route through the command stack so Ctrl+Z undoes the new
             // text layer (previously addClip() was called directly, leaving
@@ -1124,7 +1204,7 @@ void TimelineWorkspace::wireClipSelectionSignals() {
             scheduleOverlayRefresh();
 
             // Raise Essential Graphics for the new graphic clip
-            if (auto* dock = dockForPanel(QStringLiteral("Essential Graphics"))) {
+            if (auto* dock = dockForPanel(QStringLiteral("Graphics Editor"))) {
                 dock->setVisible(true);
                 dock->raise();
             }
@@ -1176,16 +1256,35 @@ void TimelineWorkspace::wireClipSelectionSignals() {
             if (m_programMonitor) m_programMonitor->requestRefresh();
             scheduleOverlayRefresh();
 
-            // Pass the layer's font in REFERENCE units; the overlay scales
-            // it to its on-screen content rect so the editor's text matches
-            // the rendered text size exactly.
+            // Pass the layer's font in REFERENCE units. The renderer
+            // multiplies the rasterised glyphs by the layer's vertical
+            // scale (painter.scale(lsx, lsy) in renderGraphicClip), so a
+            // text layer scaled to 2× shows glyphs twice as tall. The
+            // inline editor uses a single QFont pointSize, so bake that
+            // vertical scale into the effective font size — otherwise the
+            // editor renders at the un-scaled size while the surrounding
+            // transform box (which already accounts for scale) is much
+            // larger.
+            float scaleX = 1.0f;
+            float scaleY = 1.0f;
+            if (m_selectedClip && m_playbackController) {
+                const int64_t localTick = std::max<int64_t>(
+                    0, m_playbackController->currentTick() - m_selectedClip->timelineIn());
+                scaleX = tl->transform().scaleX.evaluate(localTick);
+                scaleY = tl->transform().scaleY.evaluate(localTick);
+                if (!std::isfinite(scaleX) || scaleX <= 0.0f) scaleX = 1.0f;
+                if (!std::isfinite(scaleY) || scaleY <= 0.0f) scaleY = 1.0f;
+            }
+            // fontSize × scaleY → vertical match. horizontalStretch =
+            // scaleX/scaleY → horizontal match for anisotropic scaling.
             ov2->beginInlineTextEdit(
                 QString::fromStdString(m_preEditOriginalText),
                 QString::fromStdString(tl->fontFamily()),
-                tl->fontSize(),
+                tl->fontSize() * scaleY,
                 tl->fontWeight(),
                 tl->isItalic(),
-                textColor);
+                textColor,
+                scaleX / scaleY);
         });
 
         connect(ov2, &TransformOverlayWidget::inlineTextCommitted,

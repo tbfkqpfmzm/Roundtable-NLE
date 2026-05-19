@@ -71,6 +71,7 @@ class Compositor;
 class ExportMiniTimeline;
 class PlaybackController;
 class AudioEngine;
+class CommandStack;
 
 /// Export panel — configure and launch video/audio exports.
 class ExportPanel : public QWidget, public TimelineObserver
@@ -103,11 +104,25 @@ public:
     /// Update the preview thumbnail (called when panel becomes visible).
     void refreshPreview();
 
+private:
+    /// Snapshot current in/out points + range-combo selection, apply new
+    /// values, refresh the preview, and push a LambdaCommand so Ctrl+Z
+    /// reverses the edit.  No-op if the new state equals the current state.
+    void applyInOutPointEdit(const std::string& description,
+                             int64_t newInPoint,
+                             int64_t newOutPoint,
+                             int     newRangeComboIdx);
+
+public:
+
     /// Set the global playback controller (for audio + AV-sync during preview play).
     void setPlaybackController(PlaybackController* controller);
 
     /// Set the audio engine (for scrub audio and playback).
     void setAudioEngine(AudioEngine* engine);
+
+    /// Set the command stack for undo/redo integration (in/out point edits).
+    void setCommandStack(CommandStack* stack) { m_commandStack = stack; }
 
     // ── Accessors (for testing) ─────────────────────────────────────────
 
@@ -260,6 +275,7 @@ private:
     Compositor*   m_compositor{nullptr};
     PlaybackController* m_playbackController{nullptr};
     AudioEngine*  m_audioEngine{nullptr};
+    CommandStack* m_commandStack{nullptr};
     std::unique_ptr<RenderQueue> m_renderQueue;
     uint32_t      m_activeJobId{0};
 

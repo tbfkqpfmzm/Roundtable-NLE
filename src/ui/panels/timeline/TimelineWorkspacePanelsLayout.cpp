@@ -23,7 +23,7 @@ void TimelineWorkspace::arrangeDockLayout()
     auto* dockSourceMonitor   = m_dockWidgets.value("Source Monitor");
     auto* dockProgramMonitor  = m_dockWidgets.value("Program Monitor");
     auto* dockEffectControls  = m_dockWidgets.value("Effect Controls");
-    auto* dockEssentialGraphics = m_dockWidgets.value("Essential Graphics");
+    auto* dockEssentialGraphics = m_dockWidgets.value("Graphics Editor");
     auto* dockColorGrading    = m_dockWidgets.value("Color Correction");
     auto* dockEffects         = m_dockWidgets.value("Effects");
     auto* dockHistory         = m_dockWidgets.value("History");

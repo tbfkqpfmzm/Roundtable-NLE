@@ -506,11 +506,11 @@ void TimelineWorkspace::createPanelWidgets()
         static const char* fmtDirs[] = {"H264_Green", "H264_Blue", "H264_Custom", "ProRes"};
         fs::path dir;
         for (const auto* fmt : fmtDirs) {
-            auto candidate = fs::path("assets/Converted") / fmt / charName / outfit;
+            auto candidate = fs::path("assets/converted") / fmt / charName / outfit;
             std::error_code ec2;
             if (fs::exists(candidate, ec2)) { dir = candidate; break; }
         }
-        if (dir.empty()) dir = fs::path("assets/Converted") / "H264_Green" / charName / outfit;
+        if (dir.empty()) dir = fs::path("assets/converted") / "H264_Green" / charName / outfit;
         std::error_code ec;
         for (auto& entry : fs::directory_iterator(dir, ec)) {
             if (!entry.is_regular_file()) continue;
@@ -550,11 +550,11 @@ void TimelineWorkspace::createPanelWidgets()
     m_scopesPanel = new ScopesPanel(this);
     makeDock("Scopes", m_scopesPanel);
 
-    // -- Essential Graphics -----------------------------------------------
+    // -- Graphics Editor --------------------------------------------------
     m_GraphicsEditorPanel = new GraphicsEditorPanel(this);
     if (m_commandStack) m_GraphicsEditorPanel->setCommandStack(m_commandStack);
     if (m_timeline) m_GraphicsEditorPanel->setTimeline(m_timeline);
-    makeDock("Essential Graphics", m_GraphicsEditorPanel);
+    makeDock("Graphics Editor", m_GraphicsEditorPanel);
 
     // -- Library ----------------------------------------------------------
     m_libraryPanel = new LibraryPanel(this);

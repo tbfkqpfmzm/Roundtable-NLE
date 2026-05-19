@@ -200,10 +200,10 @@ void TimelineWorkspace::wireMediaDropSignals()
                 }
 
                 // Fallback: detect character from AnimationVideoCache path.
-                // Cache files live under assets/Converted/{format}/{charName}/{outfit}/{anim}.ext
+                // Cache files live under assets/converted/{format}/{charName}/{outfit}/{anim}.ext
                 if (vcCharName.empty()) {
                     std::string generic = std::filesystem::path(path).generic_string();
-                    const std::string marker = "assets/Converted/";
+                    const std::string marker = "assets/converted/";
                     auto pos = generic.find(marker);
                     if (pos != std::string::npos) {
                         std::string rest = generic.substr(pos + marker.size());
@@ -768,10 +768,10 @@ void TimelineWorkspace::wireMediaDropSignals()
                 }
 
                 // Fallback: detect character from AnimationVideoCache path.
-                // Cache files live under assets/Converted/{format}/{charName}/{outfit}/{anim}.ext
+                // Cache files live under assets/converted/{format}/{charName}/{outfit}/{anim}.ext
                 if (vcCharName2.empty()) {
                     std::string generic = std::filesystem::path(path).generic_string();
-                    const std::string marker = "assets/Converted/";
+                    const std::string marker = "assets/converted/";
                     auto pos = generic.find(marker);
                     if (pos != std::string::npos) {
                         std::string rest = generic.substr(pos + marker.size());

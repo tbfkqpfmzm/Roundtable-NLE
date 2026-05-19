@@ -18,6 +18,7 @@
 #include <QMenu>
 #include <QAction>
 #include <QLineEdit>
+#include <QFontMetricsF>
 #include <QPointer>
 #include <QTimer>
 #include <algorithm>
@@ -228,14 +229,34 @@ void TransformOverlayWidget::mousePressEvent(QMouseEvent* event)
 
     // ── Left-click on empty area: emit signal for text tool etc. ────────
     if (event->button() == Qt::LeftButton) {
-        QRectF fr = computeFrameRect();
-        if (!fr.isEmpty() && m_vulkanVp) {
-            QPointF wPos = event->position();
+        if (m_vulkanVp) {
+            // IMPORTANT: this handler is reached via eventFilter() forwarding
+            // mouse events from m_vulkanVp's native QWindow (HWND). So
+            // event->position() is in HWND-LOCAL coordinates — NOT the
+            // overlay widget's local coords. computeFrameRect() returns a
+            // rect in overlay-widget-local coords (it applies
+            // `+ hwndOff - vpOffset` to shift FROM HWND space INTO overlay
+            // space). Mixing those two spaces produces a constant offset
+            // exactly equal to (hwndOff - vpOffset) — historically seen as
+            // text/shapes landing ~31 px below the cursor when the panel
+            // header clipped the HWND upward. Compute the click in the
+            // composite's source pixels directly from the GPU draw rect in
+            // HWND space (gpuNorm × surface), which is the SAME space the
+            // event coordinates are in.
+            QRectF gnorm = m_vulkanVp->gpuFrameRect();
+            QSize  surf  = m_vulkanVp->nativeSurfaceSize();
             float srcW = static_cast<float>(m_vulkanVp->srcWidth());
             float srcH = static_cast<float>(m_vulkanVp->srcHeight());
-            if (srcW > 0.0f && srcH > 0.0f) {
-                float frameX = static_cast<float>((wPos.x() - fr.x()) / fr.width()) * srcW;
-                float frameY = static_cast<float>((wPos.y() - fr.y()) / fr.height()) * srcH;
+            if (!gnorm.isEmpty() && surf.width() > 0 && surf.height() > 0 &&
+                srcW > 0.0f && srcH > 0.0f)
+            {
+                QPointF wPos = event->position();
+                double drawX = gnorm.x() * surf.width();
+                double drawY = gnorm.y() * surf.height();
+                double drawW = gnorm.width()  * surf.width();
+                double drawH = gnorm.height() * surf.height();
+                float frameX = static_cast<float>((wPos.x() - drawX) / drawW) * srcW;
+                float frameY = static_cast<float>((wPos.y() - drawY) / drawH) * srcH;
                 emit emptyAreaClicked(frameX, frameY);
                 event->accept();
                 return;
@@ -254,14 +275,25 @@ void TransformOverlayWidget::mouseDoubleClickEvent(QMouseEvent* event)
     // to the panels (see emptyAreaClicked handler), so we only need to
     // signal "enter text editing" with the frame-space coordinates.
     if (event->button() == Qt::LeftButton) {
-        QRectF fr = computeFrameRect();
-        if (!fr.isEmpty() && m_vulkanVp) {
-            QPointF wPos = event->position();
+        if (m_vulkanVp) {
+            // Same coord-space caveat as emptyAreaClicked: events forwarded
+            // from m_vulkanVp's native QWindow are in HWND-local coords, so
+            // map the click directly through the GPU draw rect rather than
+            // computeFrameRect (which is in overlay-widget-local coords).
+            QRectF gnorm = m_vulkanVp->gpuFrameRect();
+            QSize  surf  = m_vulkanVp->nativeSurfaceSize();
             float srcW = static_cast<float>(m_vulkanVp->srcWidth());
             float srcH = static_cast<float>(m_vulkanVp->srcHeight());
-            if (srcW > 0.0f && srcH > 0.0f) {
-                float frameX = static_cast<float>((wPos.x() - fr.x()) / fr.width()) * srcW;
-                float frameY = static_cast<float>((wPos.y() - fr.y()) / fr.height()) * srcH;
+            if (!gnorm.isEmpty() && surf.width() > 0 && surf.height() > 0 &&
+                srcW > 0.0f && srcH > 0.0f)
+            {
+                QPointF wPos = event->position();
+                double drawX = gnorm.x() * surf.width();
+                double drawY = gnorm.y() * surf.height();
+                double drawW = gnorm.width()  * surf.width();
+                double drawH = gnorm.height() * surf.height();
+                float frameX = static_cast<float>((wPos.x() - drawX) / drawW) * srcW;
+                float frameY = static_cast<float>((wPos.y() - drawY) / drawH) * srcH;
                 emit textEditRequested(frameX, frameY);
                 event->accept();
                 return;
@@ -281,7 +313,8 @@ void TransformOverlayWidget::beginInlineTextEdit(const QString& initial,
                                                   float fontSizeRef,
                                                   int fontWeight,
                                                   bool italic,
-                                                  const QColor& textColor)
+                                                  const QColor& textColor,
+                                                  float horizontalStretch)
 {
     // Bounding box of the selected layer in widget coords (same corners
     // used to draw the transform box). Falls back to a centred box if the
@@ -302,13 +335,30 @@ void TransformOverlayWidget::beginInlineTextEdit(const QString& initial,
         box = QRectF((width() - w) / 2.0, height() / 2.0 - 18.0,
                      std::max(120, w), 36.0);
     }
-    // Clamp to the widget and enforce a usable minimum size.
-    QRect g(static_cast<int>(box.x()), static_cast<int>(box.y()),
-            std::max(120, static_cast<int>(box.width())),
-            std::max(28,  static_cast<int>(box.height())));
+    // Keep the editor centered on the rendered text. Earlier code
+    // enforced a 120×28 minimum anchored at the box's top-left, which
+    // made the editor grow down-and-right of small transform boxes —
+    // both off-center and visually much larger than the rendered text.
+    // Center any minimum-size expansion around the transform box's
+    // centroid, and use a small floor (40×16) that won't dominate the
+    // rendered text for typical font sizes.
+    constexpr double kMinW = 40.0;
+    constexpr double kMinH = 16.0;
+    double cx = box.x() + box.width()  * 0.5;
+    double cy = box.y() + box.height() * 0.5;
+    double w  = std::max(kMinW, box.width());
+    double h  = std::max(kMinH, box.height());
+    QRect g(static_cast<int>(std::round(cx - w * 0.5)),
+            static_cast<int>(std::round(cy - h * 0.5)),
+            static_cast<int>(std::round(w)),
+            static_cast<int>(std::round(h)));
     QRect clamped = g.intersected(rect().adjusted(2, 2, -2, -2));
-    if (clamped.width() < 80 || clamped.height() < 20)
-        clamped = QRect((width() - 200) / 2, (height() - 32) / 2, 200, 32);
+    if (clamped.width() < 8 || clamped.height() < 8) {
+        // Degenerate (e.g. overlay not laid out yet) — fall back to a
+        // small editor centered in the overlay.
+        clamped = QRect((width() - 200) / 2, (height() - 32) / 2, 200, 32)
+                      .intersected(rect().adjusted(2, 2, -2, -2));
+    }
 
     if (!m_inlineTextEdit) {
         // Independent top-level frameless window. A child of this overlay
@@ -346,6 +396,31 @@ void TransformOverlayWidget::beginInlineTextEdit(const QString& initial,
         };
         connect(m_inlineTextEdit, &QLineEdit::returnPressed, this, commit);
         connect(m_inlineTextEdit, &QLineEdit::editingFinished, this, commit);
+
+        // Auto-grow as the user types: QLineEdit doesn't expand to fit its
+        // content, it just scrolls. Recompute the screen geometry from the
+        // current text's pixel width and keep it anchored on the original
+        // transform-box center so the edit area grows symmetrically.
+        connect(m_inlineTextEdit, &QLineEdit::textChanged, this,
+                [this](const QString& t) {
+            if (!m_inlineTextEdit) return;
+            QFontMetricsF fm(m_inlineTextEdit->font());
+            // Slack of one average char-width keeps the caret visible past
+            // the last glyph and avoids a one-frame scroll on the next
+            // keystroke. Border (1 px each side) + padding 0 + caret slack.
+            double slack  = std::max(8.0, fm.averageCharWidth());
+            double inkW   = fm.horizontalAdvance(t);
+            double wantW  = inkW + 2.0 /*border*/ + slack;
+            int    minW   = 40;
+            int    newW   = std::max(minW, static_cast<int>(std::ceil(wantW)));
+            int    newH   = (m_inlineEditHeight > 0) ? m_inlineEditHeight
+                                                     : m_inlineTextEdit->height();
+            QRect r(m_inlineEditCenter.x() - newW / 2,
+                    m_inlineEditCenter.y() - newH / 2,
+                    newW, newH);
+            if (r != m_inlineTextEdit->geometry())
+                m_inlineTextEdit->setGeometry(r);
+        });
     }
 
     // Position in GLOBAL screen coordinates: a top-level window's geometry
@@ -353,19 +428,20 @@ void TransformOverlayWidget::beginInlineTextEdit(const QString& initial,
     QPoint globalTL = mapToGlobal(clamped.topLeft());
     QRect screenRect(globalTL, clamped.size());
 
-    // Match the renderer's font sizing exactly. ClipRenderers.cpp builds
-    // its QFont with `QFont(family, fontSize)` — i.e. POINT size, in the
-    // 1920×1080 reference canvas. The canvas is then drawn into the
-    // output viewport which is mapped to the on-screen frame rect via
-    // (frameRect.height / 1080). So the on-screen point size = layer
-    // pointSize × frameRect.height / 1080. Using setPointSizeF preserves
-    // the same pt-to-px conversion the renderer uses, so the editor's
-    // text is the same size as the rendered text. (Using setPixelSize
-    // was 25% too small because it skipped the pt→px DPI conversion.)
+    // Match the renderer's font sizing exactly. renderGraphicClip()
+    // builds its QFont with POINT size and rasterises into a canvas at
+    // the PROJECT/sequence resolution, which is then downscaled to the
+    // composite output and displayed in the on-screen frame rect. So
+    // the on-screen point size = layer pointSize × frameRect.height /
+    // projectHeight. The reference height here MUST be the project
+    // resolution (m_seqH, e.g. 2160 for a 4K project), NOT a hardcoded
+    // 1080 — that hardcode made the inline editor's text ~2× too big
+    // during edit for non-1080 projects, then snap back on commit.
     QRectF fr = computeFrameRect();
     double scaleHeight = (fr.height() > 1.0) ? fr.height()
                                               : double(height());
-    double fontPt = std::max(6.0, double(fontSizeRef) * scaleHeight / 1080.0);
+    double refH = (m_seqH > 0) ? static_cast<double>(m_seqH) : 1080.0;
+    double fontPt = std::max(6.0, double(fontSizeRef) * scaleHeight / refH);
 
     // Force opaque alpha on the text color (the layer's fill might be
     // semi-transparent and would otherwise be unreadable while editing).
@@ -396,8 +472,24 @@ void TransformOverlayWidget::beginInlineTextEdit(const QString& initial,
         .arg(visibleColor.name(QColor::HexRgb));
     QFont qf(fontFamily, -1, std::clamp(fontWeight, 1, 1000), italic);
     qf.setPointSizeF(fontPt);
+    // Anisotropic-scale support: the renderer applies painter.scale(sx, sy)
+    // which stretches glyph WIDTHS by sx/sy relative to height. QFont has
+    // no general anisotropic transform, but setStretch() is exactly this:
+    // a percentage applied to glyph advance/width. QSS has no font-stretch
+    // property so setStyleSheet below won't override it. QFontMetricsF
+    // honours it too, so the textChanged auto-grow stays accurate.
+    if (std::isfinite(horizontalStretch) && horizontalStretch > 0.0f) {
+        const int stretchPct = std::clamp(
+            static_cast<int>(std::round(horizontalStretch * 100.0f)), 1, 4000);
+        qf.setStretch(stretchPct);
+    }
     m_inlineTextEdit->setFont(qf);
     m_inlineTextEdit->setStyleSheet(styleSheet);
+
+    // Remember the editor's screen-space anchor so the textChanged handler
+    // can grow/shrink the geometry symmetrically as the user types.
+    m_inlineEditCenter = screenRect.center();
+    m_inlineEditHeight = screenRect.height();
 
     m_inlineTextEdit->setGeometry(screenRect);
     m_inlineTextEdit->setText(initial);

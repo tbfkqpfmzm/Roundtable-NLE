@@ -113,6 +113,8 @@ struct SyncClip
     int         scriptLineNumber{-1};
     std::string scriptSegment;
     std::vector<std::pair<double,double>> deletedRegions;
+
+    bool operator==(const SyncClip&) const = default;
 };
 
 /// Loaded audio sample data (mono float, keyed by file path)
@@ -302,6 +304,16 @@ private:
     void scrollToCard(int scriptLineNumber);  // sync left→right
     void updateCardMatchStyle(size_t clipIdx); // lightweight restyle after matchState change
     void syncLeftListFromScroll();     // sync right→left
+
+    /// Snapshot-then-mutate helper for bulk operations.  Captures m_clips
+    /// before running `mutate`, runs it, then pushes a LambdaCommand whose
+    /// undo restores the snapshot and whose redo replays the new state.
+    /// `rebuild` is called immediately after the mutation and again on each
+    /// undo/redo to refresh the UI.  Skips the command push when the
+    /// mutation produced no observable change.
+    void runClipsMutationWithUndo(const std::string& description,
+                                  std::function<void()> mutate,
+                                  std::function<void()> rebuild = nullptr);
 
     // Audio playback / waveform helpers
     void loadAudioSamples();

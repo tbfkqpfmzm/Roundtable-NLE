@@ -8,6 +8,12 @@ ROUNDTABLE is a full-featured NLE written in C++20 with Vulkan 1.3 compute shade
 
 ---
 
+## Disclaimer
+
+**ROUNDTABLE NLE is a fan-made project and is not affiliated with, endorsed by, or supported by Shift Up Corporation.** All *Goddess of Victory: NIKKE* characters, names, images, and related assets are the exclusive property of Shift Up Corporation. NIKKE is a registered trademark of Shift Up. This project does not claim any ownership over Shift Up's intellectual property. Character assets available through the Character Browser are provided by the community and are used under fair use for creative, non-commercial purposes.
+
+---
+
 ## Support
 
 If you'd like to support development, you can leave a tip at:
@@ -193,5 +199,5 @@ assets/                   # Characters, backgrounds, fonts, effect presets
 
 GNU Affero General Public License v3.0 — see [LICENSE.txt](LICENSE.txt) for details.
 
-Copyright (C) 2025 ROUNDTABLE TALK.  
+Copyright (C) 2025–2026 ROUNDTABLE TALK.  
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.

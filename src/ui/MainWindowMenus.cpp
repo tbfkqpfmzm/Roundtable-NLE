@@ -509,6 +509,7 @@ void MainWindow::buildWindowMenu(QMenuBar* menuBar)
         // -- Color panels --
         const PanelEntry colorPanels[] = {
             {"Color Correction", "Color Correction", {}},
+            {"Graphics Editor", "Graphics Editor", {}},
             {"Color Grading",  "Color Grading",  {}},
             {"Video Scopes", "Video Scopes", {}},
         };

@@ -12,6 +12,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QHBoxLayout>
+#include <QImage>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
@@ -71,11 +72,17 @@ QWidget* createProjectThumb(const ProjectInfo& info, QWidget* parent,
     auto* thumb = new QLabel(thumbFrame);
     thumb->setGeometry(0, 0, thumbW, thumbH);
 
+    // Load via QImage to bypass QPixmap's filename cache.  QPixmap(QString)
+    // keys QPixmapCache on path + mtime(SECONDS) + size, so two captures
+    // within the same wall-clock second that encode to the same byte size
+    // return the previously cached pixmap — the thumbnail appears frozen.
     QFileInfo fi(info.filePath);
     QString thumbPathPng = fi.absolutePath() + "/" + fi.baseName() + ".png";
     QString thumbPathJpg = fi.absolutePath() + "/" + fi.baseName() + ".jpg";
-    QPixmap pix(thumbPathPng);
-    if (pix.isNull()) pix.load(thumbPathJpg);
+    QImage thumbImg(thumbPathPng);
+    if (thumbImg.isNull()) thumbImg.load(thumbPathJpg);
+    QPixmap pix = thumbImg.isNull() ? QPixmap()
+                                    : QPixmap::fromImage(std::move(thumbImg));
 
     if (!pix.isNull()) {
         thumb->setPixmap(pix.scaled(thumbW, thumbH,

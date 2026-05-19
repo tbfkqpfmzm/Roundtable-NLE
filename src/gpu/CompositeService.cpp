@@ -141,7 +141,7 @@ void CompositeService::initAnimVideoCache(MediaPool* pool)
         //  app directory in installed builds — the same as how assets/
         //  itself is resolved).
         m_animVideoCache = std::make_unique<AnimationVideoCache>(
-            pool, "assets/Converted", "assets");
+            pool, "assets/converted", "assets");
         m_animVideoCache->scanCacheDirectory();
     }
 }
