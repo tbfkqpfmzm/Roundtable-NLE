@@ -46,6 +46,7 @@ void PropertiesPanel::setClip(Clip* clip, Track* track)
 {
     auto pp0 = std::chrono::steady_clock::now();
     m_clip  = clip;
+    m_multiSelection.clear(); // single-clip path: no multi-selection in flight
     m_track = track;
     m_transitionIndex = SIZE_MAX; // clear transition selection
     m_spineClip = (clip && clip->clipType() == ClipType::Spine)
@@ -73,6 +74,7 @@ void PropertiesPanel::setClip(Clip* clip, Track* track)
 void PropertiesPanel::clearClip()
 {
     m_clip  = nullptr;
+    m_multiSelection.clear();
     m_spineClip = nullptr;
     m_track = nullptr;
     m_transitionIndex = SIZE_MAX;
@@ -101,6 +103,11 @@ void PropertiesPanel::setMultiSelection(const std::vector<Clip*>& clips)
         setClip(clips.front());
         return;
     }
+
+    // Retain the full selection so the Shot dropdown (and any other future
+    // multi-clip action) can operate on every selected clip, not just the
+    // single representative `m_clip` we pick below for the section bindings.
+    m_multiSelection = clips;
 
     // Check if all clips share the same non-zero groupId
     uint64_t commonGroup = clips.front()->groupId();
@@ -179,9 +186,22 @@ void PropertiesPanel::setMultiSelection(const std::vector<Clip*>& clips)
             }
         }
     } else {
-        m_clip = nullptr;
+        // Mixed selection (clips don't share a shot group). The Shot dropdown
+        // is still useful here: picking a shot replaces the selection's visual
+        // clips with the shot's assets. We need a representative `m_clip` so
+        // updateShotSection() / onShotChanged() have a Clip* to anchor on —
+        // use the first visual clip if there is one, otherwise leave m_clip
+        // null and hide the Shot section (audio-only selection has nothing
+        // visual to replace).
+        Clip* visualRep = nullptr;
+        for (auto* c : clips) {
+            if (c && c->clipType() != ClipType::Audio) { visualRep = c; break; }
+        }
+        m_clip = visualRep;
         m_track = nullptr;
-        m_shotSection->setVisible(false);
+        m_spineClip = (visualRep && visualRep->clipType() == ClipType::Spine)
+                          ? static_cast<SpineClip*>(visualRep)
+                          : nullptr;
 
         m_headerLabel->setText(QString("%1 clips selected")
                                    .arg(clips.size()));
@@ -194,6 +214,13 @@ void PropertiesPanel::setMultiSelection(const std::vector<Clip*>& clips)
         m_scrollArea->setVisible(true);
         m_emptyLabel->setVisible(false);
         if (m_statusLabel) m_statusLabel->setText(QStringLiteral("Mixed selection"));
+
+        if (visualRep) {
+            m_shotSection->setVisible(true);
+            updateShotSection();
+        } else {
+            m_shotSection->setVisible(false);
+        }
     }
 
     emit clipChanged(m_clip);
@@ -260,6 +287,7 @@ void PropertiesPanel::setTransition(Track* track, size_t transitionIndex)
     m_track = track;
     m_transitionIndex = transitionIndex;
     m_clip = nullptr; // clear clip selection
+    m_multiSelection.clear();
 
     // Hide clip sections
     m_identitySection->setVisible(false);

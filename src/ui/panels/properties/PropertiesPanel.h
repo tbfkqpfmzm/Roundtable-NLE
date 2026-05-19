@@ -287,6 +287,10 @@ private:
 
     // State
     Clip*              m_clip{nullptr};
+    /// Full multi-clip selection (empty for single-clip / transition / empty
+    /// states). Retained so the Shot dropdown can apply across every selected
+    /// clip rather than just the single representative `m_clip`.
+    std::vector<Clip*> m_multiSelection;
     SpineClip*         m_spineClip{nullptr};
     Track*             m_track{nullptr};
     size_t             m_transitionIndex{SIZE_MAX};

@@ -80,8 +80,16 @@ void TimelineWorkspace::applyShotSwitch(uint64_t groupId, const std::string& new
     // Find existing group's time position/duration AND the video tracks
     // the group currently occupies (so the new preset's layers land on
     // those same tracks instead of being re-routed elsewhere).
+    //
+    // Time span is computed as [min(timelineIn), max(timelineOut)] over
+    // every visual clip in the group. For a normal shot group all members
+    // are aligned, so this matches the first clip's range. For a freshly-
+    // grouped multi-clip selection (where the user picked unrelated clips
+    // at different times) it correctly covers the bounding span the user
+    // selected — the new shot fills the whole selection rather than just
+    // the first clip's slot.
     int64_t groupStart = 0;
-    int64_t groupDuration = 48000; // 1 second fallback
+    int64_t groupEnd = 48000; // 1s fallback (used only if no group clips found)
     std::vector<size_t> groupVideoTracks; // ascending; front (top) -> back (bottom)
     bool foundGroupTime = false;
     for (size_t ti = 0; ti < m_timeline->trackCount(); ++ti) {
@@ -91,10 +99,15 @@ void TimelineWorkspace::applyShotSwitch(uint64_t groupId, const std::string& new
         for (size_t ci = 0; ci < trk->clipCount(); ++ci) {
             Clip* c = trk->clip(ci);
             if (c && c->groupId() == groupId && c->clipType() != ClipType::Audio) {
+                const int64_t cIn  = c->timelineIn();
+                const int64_t cOut = c->timelineOut();
                 if (!foundGroupTime) {
-                    groupStart = c->timelineIn();
-                    groupDuration = c->duration();
+                    groupStart = cIn;
+                    groupEnd   = cOut;
                     foundGroupTime = true;
+                } else {
+                    if (cIn  < groupStart) groupStart = cIn;
+                    if (cOut > groupEnd)   groupEnd   = cOut;
                 }
                 trackHasGroupVisual = true;
             }
@@ -102,8 +115,15 @@ void TimelineWorkspace::applyShotSwitch(uint64_t groupId, const std::string& new
         if (trackHasGroupVisual && trk->type() == TrackType::Video)
             groupVideoTracks.push_back(ti);
     }
+    int64_t groupDuration = std::max<int64_t>(1, groupEnd - groupStart);
 
-    // Clone old visual clips in this group (for undo)
+    // Clone old visual clips in this group (for undo).
+    // IMPORTANT: clone() assigns a fresh global ID, so we explicitly copy
+    // the original id onto the snapshot. insertSnapshots() will then keep
+    // that id stable across every undo/redo cycle. Without this, undoing a
+    // shot switch resurrects the old clips with brand-new ids and any
+    // earlier undo command on the stack that referenced them by id (a
+    // prior MoveClipCommand, trim, etc.) silently fails to apply.
     for (size_t ti = 0; ti < m_timeline->trackCount(); ++ti) {
         Track* trk = m_timeline->track(ti);
         for (size_t ci = 0; ci < trk->clipCount(); ++ci) {
@@ -111,7 +131,9 @@ void TimelineWorkspace::applyShotSwitch(uint64_t groupId, const std::string& new
             if (c && c->groupId() == groupId && c->clipType() != ClipType::Audio) {
                 if (oldShotName->empty() && !c->shotName().empty())
                     *oldShotName = c->shotName();
-                oldClips->push_back({ti, c->clone()});
+                auto snapClone = c->clone();
+                snapClone->setId(c->id()); // preserve original id for undo correctness
+                oldClips->push_back({ti, std::move(snapClone)});
             }
         }
     }
@@ -385,7 +407,17 @@ void TimelineWorkspace::applyShotSwitch(uint64_t groupId, const std::string& new
                 }
                 if (!trk) trk = m_timeline->addVideoTrack("");
             }
-            if (trk) trk->addClip(snap.clip->clone());
+            if (trk) {
+                // Preserve the snapshot's clip id on the live re-inserted
+                // clone. snap.clip already holds the canonical id (set at
+                // capture time for old clips, the original creation id for
+                // new shot-layer clips) — without restoring it here, every
+                // redo/undo would mint a new global id and stale undo
+                // commands referencing the prior id would silently no-op.
+                auto reClone = snap.clip->clone();
+                reClone->setId(snap.clip->id());
+                trk->addClip(std::move(reClone));
+            }
         }
         // Propagate the shot name to remaining group members (audio).
         if (!shotNameToPropagate.empty()) {

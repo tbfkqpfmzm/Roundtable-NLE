@@ -710,7 +710,10 @@ void PropertiesPanel::setupShotSection(QWidget* container)
     connect(m_shotCombo, &QComboBox::currentTextChanged,
             this, [this](const QString& text) {
                 if (m_updating) return;
-                if (!m_clip || m_clip->groupId() == 0) return;
+                if (!m_clip) return;
+                // No groupId gate: single non-shot clips and multi-clip mixed
+                // selections both flow through onShotChanged(), which assigns
+                // a shared groupId before dispatching the shot switch.
                 auto newShot = text.toStdString();
                 if (newShot == m_clip->shotName()) return;
                 onShotChanged(newShot);

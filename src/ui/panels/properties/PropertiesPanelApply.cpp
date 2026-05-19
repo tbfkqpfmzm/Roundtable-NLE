@@ -361,19 +361,66 @@ void PropertiesPanel::onShotChanged(const std::string& newShotName)
     // Placeholder item — ignore
     if (newShotName.empty() || newShotName == "-- Choose a shot --") return;
 
-    uint64_t groupId = m_clip->groupId();
-    // Auto-assign a group ID for single clips so the shot switch machinery works.
-    // Uses clip ID as a unique group identifier for this operation.
-    if (groupId == 0) {
-        groupId = m_clip->id();
-        m_clip->setGroupId(groupId);
+    // Determine the set of visual clips this switch applies to. For a
+    // multi-clip mixed selection we operate on every visual clip the user
+    // picked; for a single-clip selection it's just m_clip. Audio clips are
+    // intentionally left alone — shot presets carry only visual layers.
+    std::vector<Clip*> visualClips;
+    if (m_multiSelection.size() > 1) {
+        visualClips.reserve(m_multiSelection.size());
+        for (auto* c : m_multiSelection) {
+            if (c && c->clipType() != ClipType::Audio)
+                visualClips.push_back(c);
+        }
+    } else {
+        visualClips.push_back(m_clip);
+    }
+    if (visualClips.empty()) return;
+
+    // Pick / assign a shared groupId so applyShotSwitch can find every clip
+    // that should be replaced. If the visual clips already share a non-zero
+    // groupId, reuse it (preserves an existing shot group).
+    uint64_t groupId = visualClips.front()->groupId();
+    bool allSameNonZero = (groupId != 0);
+    for (size_t i = 1; i < visualClips.size() && allSameNonZero; ++i) {
+        if (visualClips[i]->groupId() != groupId) allSameNonZero = false;
+    }
+    if (!allSameNonZero) {
+        // Generate a groupId that is guaranteed not to collide with any
+        // existing clip id or groupId anywhere on the timeline. Using a
+        // clip's own id (the previous behaviour) can collide with a
+        // groupId already stamped on an unrelated clip — applyShotSwitch
+        // scans by groupId equality, so a collision sweeps that clip into
+        // the swap, replacing far more than the selection AND stretching
+        // the new shot's layers across the inflated span (whose duration
+        // exceeds the source media, painting black frames on the timeline
+        // scrub strip). Pick max(id, groupId)+1 across the whole timeline
+        // so the new id is strictly fresh.
+        uint64_t freshGid = 1;
+        if (m_timeline) {
+            for (size_t ti = 0; ti < m_timeline->trackCount(); ++ti) {
+                const Track* trk = m_timeline->track(ti);
+                if (!trk) continue;
+                for (size_t ci = 0; ci < trk->clipCount(); ++ci) {
+                    const Clip* c = trk->clip(ci);
+                    if (!c) continue;
+                    if (c->groupId() >= freshGid) freshGid = c->groupId() + 1;
+                    if (c->id()      >= freshGid) freshGid = c->id() + 1;
+                }
+            }
+        } else {
+            freshGid = visualClips.front()->id() + 1;
+        }
+        groupId = freshGid;
+        for (auto* c : visualClips) c->setGroupId(groupId);
     }
 
     // Let TimelineWorkspace handle the actual switch with undo support
     emit shotSwitchRequested(groupId, newShotName);
     emit propertyChanged();
 
-    spdlog::info("PropertiesPanel: shot switch requested for group {}", groupId);
+    spdlog::info("PropertiesPanel: shot switch requested for group {} ({} visual clip(s))",
+                 groupId, visualClips.size());
 }
 
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
