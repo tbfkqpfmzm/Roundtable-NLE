@@ -610,6 +610,8 @@ void TimelineWorkspace::updateTransformOverlay()
             info.scaleX   = xf.scaleX.evaluate(relTick);
             info.scaleY   = xf.scaleY.evaluate(relTick);
             info.rotation = xf.rotation.evaluate(relTick);
+            info.anchorX  = xf.anchorX.evaluate(relTick);
+            info.anchorY  = xf.anchorY.evaluate(relTick);
 
             // Content-rect mode: the overlay will apply the EXACT same
             // QPainter transform that renderGraphicClip() uses, so the
@@ -732,6 +734,8 @@ void TimelineWorkspace::updateTransformOverlay()
         info.scaleX   = m_selectedClip->scaleX().evaluate(relTick);
         info.scaleY   = m_selectedClip->scaleY().evaluate(relTick);
         info.rotation = m_selectedClip->rotation().evaluate(relTick);
+        info.anchorX  = m_selectedClip->anchorX().evaluate(relTick);
+        info.anchorY  = m_selectedClip->anchorY().evaluate(relTick);
     }
 
     // Determine source dimensions for the bounding box.

@@ -88,6 +88,16 @@ void EffectControlsPanel::clearPropertyTree()
     m_scaleSpin = nullptr;
     m_scaleWSpin = nullptr;
     m_uniformScaleCheck = nullptr;
+    // Transform-row member ptrs — used by setSelectedGraphicLayer to
+    // retarget rows between clip-level and layer-level transforms
+    // without rebuilding the tree. Must be nulled here so a stray
+    // post-clear access doesn't dereference a dangling widget.
+    m_posRow = nullptr;
+    m_scaleRow = nullptr;
+    m_scaleWRow = nullptr;
+    m_rotationRow = nullptr;
+    m_anchorRow = nullptr;
+    m_opacityRow = nullptr;
     m_rotationSpin = nullptr;
     m_anchorXSpin = nullptr;
     m_anchorYSpin = nullptr;
@@ -194,10 +204,10 @@ void EffectControlsPanel::buildPropertyTree()
             // Determine if we should also toggle the companion scale track
             KeyframeTrack<float>* companion = nullptr;
             if (m_uniformScaleCheck && m_uniformScaleCheck->isChecked()) {
-                if (trk == &m_clip->scaleX())
-                    companion = &m_clip->scaleY();
-                else if (trk == &m_clip->scaleY())
-                    companion = &m_clip->scaleX();
+                if (trk == effScaleX())
+                    companion = effScaleY();
+                else if (trk == effScaleY())
+                    companion = effScaleX();
             }
 
             if (enabled) {
@@ -218,7 +228,7 @@ void EffectControlsPanel::buildPropertyTree()
                         companion->addKeyframe(t, cVal);
                     }
                     // Sync companion row stopwatch
-                    if (m_scaleWRow && companion == &m_clip->scaleY()) {
+                    if (m_scaleWRow && companion == effScaleY()) {
                         m_scaleWRow->stopwatchButton()->blockSignals(true);
                         m_scaleWRow->stopwatchButton()->setChecked(true);
                         m_scaleWRow->stopwatchButton()->blockSignals(false);
@@ -247,7 +257,7 @@ void EffectControlsPanel::buildPropertyTree()
                         companion->removeKeyframe(companion->keyframeCount() - 1);
                     companion->setDefaultValue(companionNewDefault);
                     // Sync companion row stopwatch
-                    if (m_scaleWRow && companion == &m_clip->scaleY()) {
+                    if (m_scaleWRow && companion == effScaleY()) {
                         m_scaleWRow->stopwatchButton()->blockSignals(true);
                         m_scaleWRow->stopwatchButton()->setChecked(false);
                         m_scaleWRow->stopwatchButton()->blockSignals(false);
@@ -314,21 +324,21 @@ void EffectControlsPanel::buildPropertyTree()
         m_motionSection = makeSectionHeader("Motion");
         m_propLayout->addWidget(m_motionSection);
 
-        // Position
-        auto* posRow = makeRow("Position", &m_clip->positionX());
+        // Position — bound to the active source (clip OR selected layer)
+        m_posRow = makeRow("Position", effPosX());
         m_posXSpin = createScrubby(-10000, 10000, 1.0, 1);
         m_posYSpin = createScrubby(-10000, 10000, 1.0, 1);
-        posRow->addValuePair(m_posXSpin, m_posYSpin);
-        m_propLayout->addWidget(posRow);
+        m_posRow->addValuePair(m_posXSpin, m_posYSpin);
+        m_propLayout->addWidget(m_posRow);
 
         // Scale
-        auto* scaleRow = makeRow("Scale", &m_clip->scaleX());
+        m_scaleRow = makeRow("Scale", effScaleX());
         m_scaleSpin = createScrubby(0, 1000, 0.1, 1);
-        scaleRow->addValueWidget(m_scaleSpin);
-        m_propLayout->addWidget(scaleRow);
+        m_scaleRow->addValueWidget(m_scaleSpin);
+        m_propLayout->addWidget(m_scaleRow);
 
         // Scale Width (hidden when Uniform Scale is on)
-        m_scaleWRow = makeRow("Scale Width", &m_clip->scaleY());
+        m_scaleWRow = makeRow("Scale Width", effScaleY());
         m_scaleWSpin = createScrubby(0, 1000, 0.1, 1);
         m_scaleWRow->addValueWidget(m_scaleWSpin);
         m_propLayout->addWidget(m_scaleWRow);
@@ -352,17 +362,19 @@ void EffectControlsPanel::buildPropertyTree()
         m_propLayout->addWidget(m_uniformScaleCheck);
 
         // Rotation
-        auto* rotRow = makeRow("Rotation", &m_clip->rotation());
+        m_rotationRow = makeRow("Rotation", effRotation());
         m_rotationSpin = createScrubby(-3600, 3600, 0.1, 1);
-        rotRow->addValueWidget(m_rotationSpin);
-        m_propLayout->addWidget(rotRow);
+        m_rotationRow->addValueWidget(m_rotationSpin);
+        m_propLayout->addWidget(m_rotationRow);
 
-        // Anchor Point (uses position tracks as proxy â€” no separate track yet)
-        auto* anchorRow = makeRow("Anchor Point", nullptr);
+        // Anchor Point — clip-level (or selected graphic layer) anchorX/Y
+        // track. The keyframe nav buttons / stopwatch operate on anchorX
+        // as the row's primary track (Y follows via the same write path).
+        m_anchorRow = makeRow("Anchor Point", effAnchorX());
         m_anchorXSpin = createScrubby(-10000, 10000, 1.0, 1);
         m_anchorYSpin = createScrubby(-10000, 10000, 1.0, 1);
-        anchorRow->addValuePair(m_anchorXSpin, m_anchorYSpin);
-        m_propLayout->addWidget(anchorRow);
+        m_anchorRow->addValuePair(m_anchorXSpin, m_anchorYSpin);
+        m_propLayout->addWidget(m_anchorRow);
 
         // Anti-flicker Filter
         auto* antiFlickerRow = makeRow("Anti-flicker Filter", nullptr);
@@ -434,10 +446,10 @@ void EffectControlsPanel::buildPropertyTree()
         }
         m_propLayout->addWidget(m_opacitySection);
 
-        auto* opacityRow = makeRow("Opacity", &m_clip->opacity());
+        m_opacityRow = makeRow("Opacity", effOpacity());
         m_opacitySpin = createScrubby(0, 100, 0.1, 1, " %");
-        opacityRow->addValueWidget(m_opacitySpin);
-        m_propLayout->addWidget(opacityRow);
+        m_opacityRow->addValueWidget(m_opacitySpin);
+        m_propLayout->addWidget(m_opacityRow);
 
         m_blendModeCombo = new QComboBox(m_propContainer);
         m_blendModeCombo->setFixedHeight(22);
@@ -796,13 +808,13 @@ void EffectControlsPanel::populateFromClip()
 
     int64_t t = clipRelativeTick();
 
-    // Position — internally REF-1920 px; show in sequence pixels
-    // (Premiere-style Motion).  Stored value is unchanged; this is purely
-    // a display-layer conversion, so the saved file format stays stable.
-    const double posFx = static_cast<double>(m_seqW) / 1920.0;
-    const double posFy = static_cast<double>(m_seqH) / 1080.0;
-    if (m_posXSpin)   m_posXSpin->setValue(m_clip->positionX().evaluate(t) * posFx);
-    if (m_posYSpin)   m_posYSpin->setValue(m_clip->positionY().evaluate(t) * posFy);
+    // Position — clip-level is stored REF-1920 and shown ×seqW/1920;
+    // graphic-layer is stored project-px (already seq-px) and shown as-is.
+    // posDisplayFactor{X,Y}() returns the right multiplier for each source.
+    const double posFx = posDisplayFactorX();
+    const double posFy = posDisplayFactorY();
+    if (auto* trk = effPosX();    m_posXSpin && trk) m_posXSpin->setValue(trk->evaluate(t) * posFx);
+    if (auto* trk = effPosY();    m_posYSpin && trk) m_posYSpin->setValue(trk->evaluate(t) * posFy);
 
     // Scale — Premiere-style native-pixel percentage.  Stored values are
     // cover-fit multipliers (1.0 = fill frame), but we want the displayed
@@ -813,18 +825,21 @@ void EffectControlsPanel::populateFromClip()
     // without a meaningful native-pixel size (characters / spine / title /
     // graphic) coverFitForCurrentClip() returns 1.0 — unchanged display.
     const double sf = coverFitForCurrentClip();
-    if (m_scaleSpin)  m_scaleSpin->setValue(m_clip->scaleX().evaluate(t) * sf * 100.0);
-    if (m_scaleWSpin) m_scaleWSpin->setValue(m_clip->scaleY().evaluate(t) * sf * 100.0);
+    if (auto* trk = effScaleX();  m_scaleSpin  && trk) m_scaleSpin->setValue(trk->evaluate(t) * sf * 100.0);
+    if (auto* trk = effScaleY();  m_scaleWSpin && trk) m_scaleWSpin->setValue(trk->evaluate(t) * sf * 100.0);
 
     // Rotation (degrees)
-    if (m_rotationSpin) m_rotationSpin->setValue(m_clip->rotation().evaluate(t));
+    if (auto* trk = effRotation(); m_rotationSpin && trk) m_rotationSpin->setValue(trk->evaluate(t));
 
     // Opacity (percentage)
-    if (m_opacitySpin) m_opacitySpin->setValue(m_clip->opacity().evaluate(t) * 100.0);
+    if (auto* trk = effOpacity();  m_opacitySpin  && trk) m_opacitySpin->setValue(trk->evaluate(t) * 100.0);
 
-    // Anchor point defaults to center (640, 360 for 1280x720)
-    if (m_anchorXSpin) m_anchorXSpin->setValue(640.0);
-    if (m_anchorYSpin) m_anchorYSpin->setValue(360.0);
+    // Anchor point — same display convention as Position. Clip-level
+    // anchor is REF-1920 so multiply by seqW/1920; graphic-layer anchor
+    // is project-px (already seq-px) so factor is 1.0. posDisplayFactor*
+    // returns the right multiplier for whichever source is active.
+    if (auto* trk = effAnchorX(); m_anchorXSpin && trk) m_anchorXSpin->setValue(trk->evaluate(t) * posFx);
+    if (auto* trk = effAnchorY(); m_anchorYSpin && trk) m_anchorYSpin->setValue(trk->evaluate(t) * posFy);
 
     // Speed (percentage)
     if (m_speedSpin) m_speedSpin->setValue(m_clip->speed() * 100.0);

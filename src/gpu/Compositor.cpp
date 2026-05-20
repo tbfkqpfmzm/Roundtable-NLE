@@ -560,7 +560,9 @@ glm::mat4 Compositor::buildViewportTransform(uint32_t srcW, uint32_t srcH,
                                               float posXPx, float posYPx,
                                               float scaleX, float scaleY,
                                               float rotDeg,
-                                              bool containFit)
+                                              bool containFit,
+                                              float anchorXPx,
+                                              float anchorYPx)
 {
     // Cover/contain fit: scale source to fill (cover) or fit within (contain)
     // the output rectangle.  Resolution-independent — the composited image
@@ -597,18 +599,24 @@ glm::mat4 Compositor::buildViewportTransform(uint32_t srcW, uint32_t srcH,
     // 6. Subtract base offset
     m = glm::translate(m, glm::vec3(-baseOffX, -baseOffY, 0.0f));
 
-    // 5. Shift back to output-pixel origin
-    m = glm::translate(m, glm::vec3(cx, cy, 0.0f));
+    // 5. Shift back to output-pixel origin (centre + anchor)
+    // Anchor is a pivot offset relative to the layer's centre: rotation
+    // and scale below pivot around (cx + anchor), not around (cx).
+    // With anchor=(0,0) this collapses to legacy behaviour.
+    m = glm::translate(m, glm::vec3(cx + anchorXPx, cy + anchorYPx, 0.0f));
 
     // 4. Inverse user scale
     m = glm::scale(m, glm::vec3(1.0f / scaleX, 1.0f / scaleY, 1.0f));
 
-    // 3. Inverse user rotation (around output centre)
+    // 3. Inverse user rotation (around the anchor — origin is at the
+    // anchor after step 2 below shifts there)
     if (rotDeg != 0.0f)
         m = glm::rotate(m, glm::radians(-rotDeg), glm::vec3(0.0f, 0.0f, 1.0f));
 
-    // 2. Subtract output centre + user position offset
-    m = glm::translate(m, glm::vec3(-cx - posXPx, -cy - posYPx, 0.0f));
+    // 2. Subtract output centre + user position + anchor so subsequent
+    // rotate/scale pivot around the anchor point in output-pixel space.
+    m = glm::translate(m, glm::vec3(-cx - posXPx - anchorXPx,
+                                    -cy - posYPx - anchorYPx, 0.0f));
 
     // 1. Un-normalise output UV → output pixel
     m = glm::scale(m, glm::vec3(static_cast<float>(outW),

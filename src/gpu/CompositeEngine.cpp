@@ -811,7 +811,7 @@ std::shared_ptr<CachedFrame> CompositeEngine::compositeViaRenderGraph(
             cl.transform = Compositor::buildViewportTransform(
                 srcW, srcH, outW, outH,
                 layer.posX, layer.posY, layer.scX, layer.scY, layer.rot,
-                layer.containFit);
+                layer.containFit, layer.anchorX, layer.anchorY);
         }
 
         gpuLayers.push_back(cl);
@@ -919,7 +919,7 @@ std::shared_ptr<CachedFrame> CompositeEngine::compositeViaRenderGraph(
                         gpuLayers[li].transform = Compositor::buildViewportTransform(
                             srcW, srcH, outW, outH,
                             layer.posX, layer.posY, layer.scX, layer.scY, layer.rot,
-                            layer.containFit);
+                            layer.containFit, layer.anchorX, layer.anchorY);
                     } else {
                         // Upload via existing GpuUploadManager
                         auto uploadResult = m_uploadManager->uploadLayer(
@@ -934,7 +934,7 @@ std::shared_ptr<CachedFrame> CompositeEngine::compositeViaRenderGraph(
                             gpuLayers[li].transform = Compositor::buildViewportTransform(
                                 uploadResult.srcW, uploadResult.srcH, outW, outH,
                                 layer.posX, layer.posY, layer.scX, layer.scY, layer.rot,
-                                layer.containFit);
+                                layer.containFit, layer.anchorX, layer.anchorY);
                         } else {
                             spdlog::warn("[RENDER_GRAPH] layer {} upload failed", li);
                             gpuLayers[li].enabled = false;

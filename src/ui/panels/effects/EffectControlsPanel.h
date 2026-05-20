@@ -71,6 +71,7 @@ namespace rt {
 class Clip;
 class CommandStack;
 class Effect;
+class GraphicLayer;
 class Timeline;
 class Track;
 class ScrubbySpinBox;
@@ -298,6 +299,15 @@ public:
     /// Program Monitor — so the Effect Controls numbers track live.
     void syncValuesFromClip();
 
+    /// Premiere-style per-layer Effect Controls: when a graphic layer
+    /// (text / shape inside a GraphicClip) is selected, route the Motion
+    /// section's reads AND writes through the LAYER's transform instead
+    /// of the clip's. Pass nullptr to fall back to clip-level transforms
+    /// (default behavior for video / image clips and for graphic clips
+    /// with no layer selected). Triggers a property-tree rebuild when
+    /// the source changes so PropertyRows hold the right track pointers.
+    void setSelectedGraphicLayer(GraphicLayer* layer);
+
     /// Get the PropertyRow widgets for test introspection.
     [[nodiscard]] const std::vector<PropertyRow*>& propertyRows() const noexcept { return m_propertyRows; }
 
@@ -387,9 +397,33 @@ protected:
     ScrubbySpinBox* createScrubby(double min, double max, double step,
                                    int decimals, const QString& suffix = {});
 
+    // ── Transform source indirection (Premiere-style per-layer Motion) ──
+    // When m_graphicLayer is non-null, the Motion section binds to that
+    // layer's transform tracks; otherwise it binds to the clip's tracks.
+    // Defined in EffectControlsPanel.cpp so we can keep GraphicLayer.h out
+    // of this header.
+    KeyframeTrack<float>* effPosX() noexcept;
+    KeyframeTrack<float>* effPosY() noexcept;
+    KeyframeTrack<float>* effScaleX() noexcept;
+    KeyframeTrack<float>* effScaleY() noexcept;
+    KeyframeTrack<float>* effRotation() noexcept;
+    KeyframeTrack<float>* effOpacity() noexcept;
+    KeyframeTrack<float>* effAnchorX() noexcept;
+    KeyframeTrack<float>* effAnchorY() noexcept;
+    /// Display-factor for the Position spinboxes (multiply stored→display).
+    /// Clip-level position is stored REF-1920 and shown in sequence px;
+    /// layer-level position is stored project-px (already sequence-px) so
+    /// the factor is 1.0 when a graphic layer drives the source.
+    double posDisplayFactorX() const noexcept;
+    double posDisplayFactorY() const noexcept;
+
     // ── State ───────────────────────────────────────────────────────────
     Clip*          m_clip{nullptr};
     Track*         m_track{nullptr};
+    /// Non-null when Effect Controls is bound to a graphic layer's
+    /// transform (text / shape inside a GraphicClip). See
+    /// setSelectedGraphicLayer().
+    GraphicLayer*  m_graphicLayer{nullptr};
     CommandStack*  m_commandStack{nullptr};
     Timeline*      m_timeline{nullptr};
     bool           m_updating{false};
@@ -445,7 +479,12 @@ protected:
     ScrubbySpinBox* m_posYSpin{nullptr};
     ScrubbySpinBox* m_scaleSpin{nullptr};
     ScrubbySpinBox* m_scaleWSpin{nullptr};
+    PropertyRow*    m_posRow{nullptr};
+    PropertyRow*    m_scaleRow{nullptr};
     PropertyRow*    m_scaleWRow{nullptr};
+    PropertyRow*    m_rotationRow{nullptr};
+    PropertyRow*    m_anchorRow{nullptr};
+    PropertyRow*    m_opacityRow{nullptr};
     QCheckBox*      m_uniformScaleCheck{nullptr};
     ScrubbySpinBox* m_rotationSpin{nullptr};
     ScrubbySpinBox* m_anchorXSpin{nullptr};

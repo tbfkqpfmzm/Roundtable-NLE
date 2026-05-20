@@ -16,6 +16,7 @@
 #include "timeline/Track.h"
 #include "timeline/Timeline.h"
 #include "timeline/KeyframeTrack.h"
+#include "timeline/GraphicLayer.h"
 #include "media/PlaybackController.h"
 #include "command/CommandStack.h"
 #include "command/LambdaCommand.h"
@@ -46,9 +47,100 @@ inline float gainToDb(float gain) noexcept {
 }
 } // namespace
 
+// ─── Per-layer Motion source indirection ─────────────────────────────────
+// When a graphic layer is selected (Essential Graphics → text/shape inside
+// a GraphicClip), the Motion section in Effect Controls binds to that
+// LAYER's transform instead of the clip's, matching Premiere's per-layer
+// Vector Motion behavior. Otherwise it binds to the clip's tracks. The
+// six helpers below resolve to the right KeyframeTrack at each call site.
+
+KeyframeTrack<float>* EffectControlsPanel::effPosX() noexcept
+{
+    if (m_graphicLayer) return &m_graphicLayer->transform().posX;
+    return m_clip ? &m_clip->positionX() : nullptr;
+}
+KeyframeTrack<float>* EffectControlsPanel::effPosY() noexcept
+{
+    if (m_graphicLayer) return &m_graphicLayer->transform().posY;
+    return m_clip ? &m_clip->positionY() : nullptr;
+}
+KeyframeTrack<float>* EffectControlsPanel::effScaleX() noexcept
+{
+    if (m_graphicLayer) return &m_graphicLayer->transform().scaleX;
+    return m_clip ? &m_clip->scaleX() : nullptr;
+}
+KeyframeTrack<float>* EffectControlsPanel::effScaleY() noexcept
+{
+    if (m_graphicLayer) return &m_graphicLayer->transform().scaleY;
+    return m_clip ? &m_clip->scaleY() : nullptr;
+}
+KeyframeTrack<float>* EffectControlsPanel::effRotation() noexcept
+{
+    if (m_graphicLayer) return &m_graphicLayer->transform().rotation;
+    return m_clip ? &m_clip->rotation() : nullptr;
+}
+KeyframeTrack<float>* EffectControlsPanel::effOpacity() noexcept
+{
+    if (m_graphicLayer) return &m_graphicLayer->transform().opacity;
+    return m_clip ? &m_clip->opacity() : nullptr;
+}
+KeyframeTrack<float>* EffectControlsPanel::effAnchorX() noexcept
+{
+    if (m_graphicLayer) return &m_graphicLayer->transform().anchorX;
+    return m_clip ? &m_clip->anchorX() : nullptr;
+}
+KeyframeTrack<float>* EffectControlsPanel::effAnchorY() noexcept
+{
+    if (m_graphicLayer) return &m_graphicLayer->transform().anchorY;
+    return m_clip ? &m_clip->anchorY() : nullptr;
+}
+
+double EffectControlsPanel::posDisplayFactorX() const noexcept
+{
+    // Layer transform's posX is in PROJECT-resolution pixels (= sequence
+    // pixels), so no conversion. Clip-level positionX is stored REF-1920;
+    // multiply by seqW/1920 for the seq-px display value.
+    if (m_graphicLayer) return 1.0;
+    return (m_seqW > 0 ? static_cast<double>(m_seqW) : 1920.0) / 1920.0;
+}
+double EffectControlsPanel::posDisplayFactorY() const noexcept
+{
+    if (m_graphicLayer) return 1.0;
+    return (m_seqH > 0 ? static_cast<double>(m_seqH) : 1080.0) / 1080.0;
+}
+
+void EffectControlsPanel::setSelectedGraphicLayer(GraphicLayer* layer)
+{
+    if (m_graphicLayer == layer) return;
+    m_graphicLayer = layer;
+    if (!m_clip) return;
+    // CRITICAL: do NOT rebuild the property tree here. layerSelected can
+    // fire synchronously from inside a paint cycle (Qt direct-connect
+    // default), and destroying child widgets mid-paint leaves Qt's
+    // sibling-iterator with a dangling pointer — the next
+    // QWidget::isVisible() crashes the app. Instead, retarget the
+    // existing rows' track pointers in place; all read/write call sites
+    // already route through eff*() helpers, so the spinboxes will write
+    // to the new source on next edit, and populateFromClip below pulls
+    // the new values into the spinboxes.
+    m_updating = true;
+    if (m_posRow)      m_posRow->setTrack(effPosX());
+    if (m_scaleRow)    m_scaleRow->setTrack(effScaleX());
+    if (m_scaleWRow)   m_scaleWRow->setTrack(effScaleY());
+    if (m_rotationRow) m_rotationRow->setTrack(effRotation());
+    if (m_anchorRow)   m_anchorRow->setTrack(effAnchorX());
+    if (m_opacityRow)  m_opacityRow->setTrack(effOpacity());
+    populateFromClip();
+    m_updating = false;
+}
+
 void EffectControlsPanel::setClip(Clip* clip, Track* track)
 {
     if (m_clip == clip) return;
+    // A fresh clip starts with no per-layer selection — the workspace
+    // calls setSelectedGraphicLayer() afterwards if Essential Graphics
+    // already has one chosen for this clip.
+    m_graphicLayer = nullptr;
     m_clip = clip;
     m_track = track;
     m_updating = true;
@@ -220,13 +312,16 @@ EffectControlsPanel::TransformState EffectControlsPanel::captureTransformState()
 {
     if (!m_clip) return {};
     int64_t t = clipRelativeTick();
+    auto evalOr = [](KeyframeTrack<float>* trk, int64_t time, float fallback) {
+        return trk ? trk->evaluate(time) : fallback;
+    };
     TransformState s{
-        m_clip->positionX().evaluate(t),
-        m_clip->positionY().evaluate(t),
-        m_clip->scaleX().evaluate(t),
-        m_clip->scaleY().evaluate(t),
-        m_clip->rotation().evaluate(t),
-        m_clip->opacity().evaluate(t),
+        evalOr(const_cast<EffectControlsPanel*>(this)->effPosX(),     t, 0.0f),
+        evalOr(const_cast<EffectControlsPanel*>(this)->effPosY(),     t, 0.0f),
+        evalOr(const_cast<EffectControlsPanel*>(this)->effScaleX(),   t, 1.0f),
+        evalOr(const_cast<EffectControlsPanel*>(this)->effScaleY(),   t, 1.0f),
+        evalOr(const_cast<EffectControlsPanel*>(this)->effRotation(), t, 0.0f),
+        evalOr(const_cast<EffectControlsPanel*>(this)->effOpacity(),  t, 1.0f),
         m_clip->speed()
     };
     if (auto* ac = dynamic_cast<AudioClip*>(m_clip)) {
@@ -240,12 +335,15 @@ void EffectControlsPanel::restoreTransformState(const TransformState& s)
 {
     if (!m_clip) return;
     int64_t t = clipRelativeTick();
-    m_clip->positionX().writeValue(t, s.posX);
-    m_clip->positionY().writeValue(t, s.posY);
-    m_clip->scaleX().writeValue(t, s.scaleX);
-    m_clip->scaleY().writeValue(t, s.scaleY);
-    m_clip->rotation().writeValue(t, s.rotation);
-    m_clip->opacity().writeValue(t, s.opacity);
+    auto writeIf = [t](KeyframeTrack<float>* trk, float val) {
+        if (trk) trk->writeValue(t, val);
+    };
+    writeIf(effPosX(),     s.posX);
+    writeIf(effPosY(),     s.posY);
+    writeIf(effScaleX(),   s.scaleX);
+    writeIf(effScaleY(),   s.scaleY);
+    writeIf(effRotation(), s.rotation);
+    writeIf(effOpacity(),  s.opacity);
     m_clip->setSpeed(s.speed);
     if (auto* ac = dynamic_cast<AudioClip*>(m_clip)) {
         ac->pan().writeValue(t, s.pan);
@@ -269,31 +367,39 @@ void EffectControlsPanel::applyTransformLive()
         track.writeValue(clipRelativeTick(), val);
     };
 
+    auto writeIfTrack = [&](KeyframeTrack<float>* trk, float val) {
+        if (trk) writeTrack(*trk, val);
+    };
     if (spin == m_posXSpin) {
-        // Spin shows sequence pixels; convert back to REF-1920 px on write.
-        const double f = (m_seqW > 0 ? static_cast<double>(m_seqW) : 1920.0) / 1920.0;
-        writeTrack(m_clip->positionX(), static_cast<float>(spin->value() / f));
+        // Spin shows display-space pixels; divide by display-factor on write.
+        // (clip-level: stored REF-1920, factor = seqW/1920. layer-level:
+        // stored project-px, factor = 1.0.)
+        writeIfTrack(effPosX(), static_cast<float>(spin->value() / posDisplayFactorX()));
     } else if (spin == m_posYSpin) {
-        const double f = (m_seqH > 0 ? static_cast<double>(m_seqH) : 1080.0) / 1080.0;
-        writeTrack(m_clip->positionY(), static_cast<float>(spin->value() / f));
+        writeIfTrack(effPosY(), static_cast<float>(spin->value() / posDisplayFactorY()));
     } else if (spin == m_scaleSpin) {
         // Spin shows Premiere-style native percentage; convert back to the
         // engine's cover-fit-multiplier storage so the compositor renders
         // exactly the same on-screen size the displayed number promises.
+        // Cover-fit is 1.0 for graphic clips, so this works uniformly.
         const double sf = coverFitForCurrentClip();
         const double divisor = (sf > 0.0001) ? sf : 1.0;
         float s = static_cast<float>(spin->value() / 100.0 / divisor);
-        writeTrack(m_clip->scaleX(), s);
+        writeIfTrack(effScaleX(), s);
         if (m_uniformScaleCheck && m_uniformScaleCheck->isChecked())
-            writeTrack(m_clip->scaleY(), s);
+            writeIfTrack(effScaleY(), s);
     } else if (spin == m_scaleWSpin) {
         const double sf = coverFitForCurrentClip();
         const double divisor = (sf > 0.0001) ? sf : 1.0;
-        writeTrack(m_clip->scaleY(), static_cast<float>(spin->value() / 100.0 / divisor));
+        writeIfTrack(effScaleY(), static_cast<float>(spin->value() / 100.0 / divisor));
     } else if (spin == m_rotationSpin) {
-        writeTrack(m_clip->rotation(), static_cast<float>(spin->value()));
+        writeIfTrack(effRotation(), static_cast<float>(spin->value()));
     } else if (spin == m_opacitySpin) {
-        writeTrack(m_clip->opacity(), static_cast<float>(spin->value() / 100.0));
+        writeIfTrack(effOpacity(), static_cast<float>(spin->value() / 100.0));
+    } else if (spin == m_anchorXSpin) {
+        writeIfTrack(effAnchorX(), static_cast<float>(spin->value() / posDisplayFactorX()));
+    } else if (spin == m_anchorYSpin) {
+        writeIfTrack(effAnchorY(), static_cast<float>(spin->value() / posDisplayFactorY()));
     } else if (spin == m_speedSpin) {
         m_clip->setSpeed(spin->value() / 100.0);
     } else if (auto* ac = dynamic_cast<AudioClip*>(m_clip)) {
@@ -327,11 +433,11 @@ void EffectControlsPanel::commitTransform(double /*oldVal*/, double /*newVal*/)
     double factor = 1.0;  // spin-display-value = track-value * factor
     bool uniformScale = false;
 
-    if      (spin == m_posXSpin)     { track = &m_clip->positionX();
-                                       factor = (m_seqW > 0 ? static_cast<double>(m_seqW) : 1920.0) / 1920.0; }
-    else if (spin == m_posYSpin)     { track = &m_clip->positionY();
-                                       factor = (m_seqH > 0 ? static_cast<double>(m_seqH) : 1080.0) / 1080.0; }
-    else if (spin == m_scaleSpin)    { track = &m_clip->scaleX();
+    if      (spin == m_posXSpin)     { track = effPosX();
+                                       factor = posDisplayFactorX(); }
+    else if (spin == m_posYSpin)     { track = effPosY();
+                                       factor = posDisplayFactorY(); }
+    else if (spin == m_scaleSpin)    { track = effScaleX();
                                        // displayed = stored × coverFit × 100,
                                        // so factor (= displayed / stored) is
                                        // 100 × coverFit.  Captured at commit
@@ -339,10 +445,12 @@ void EffectControlsPanel::commitTransform(double /*oldVal*/, double /*newVal*/)
                                        // with the same conversion used live.
                                        factor = 100.0 * coverFitForCurrentClip();
                                        uniformScale = m_uniformScaleCheck && m_uniformScaleCheck->isChecked(); }
-    else if (spin == m_scaleWSpin)   { track = &m_clip->scaleY();
+    else if (spin == m_scaleWSpin)   { track = effScaleY();
                                        factor = 100.0 * coverFitForCurrentClip(); }
-    else if (spin == m_rotationSpin) { track = &m_clip->rotation(); }
-    else if (spin == m_opacitySpin)  { track = &m_clip->opacity(); factor = 100.0; }
+    else if (spin == m_rotationSpin) { track = effRotation(); }
+    else if (spin == m_opacitySpin)  { track = effOpacity(); factor = 100.0; }
+    else if (spin == m_anchorXSpin)  { track = effAnchorX(); factor = posDisplayFactorX(); }
+    else if (spin == m_anchorYSpin)  { track = effAnchorY(); factor = posDisplayFactorY(); }
     else if (spin == m_speedSpin) {
         // Speed is not a keyframe track
         double oldSpd = spin->scrubStartValue() / 100.0;
@@ -395,7 +503,7 @@ void EffectControlsPanel::commitTransform(double /*oldVal*/, double /*newVal*/)
     bool wasAnimated = trk->keyframeCount() > 0;
 
     // Also handle uniform scale (mirror to scaleY)
-    KeyframeTrack<float>* trkY = uniformScale ? &m_clip->scaleY() : nullptr;
+    KeyframeTrack<float>* trkY = uniformScale ? effScaleY() : nullptr;
     int64_t tY = trkY ? ((trkY->keyframeCount() > 0) ? clipRelativeTick() : 0) : 0;
     bool createdKFY = trkY ? kfWasCreated(*trkY, tY, oldF) : false;
     bool wasAnimatedY = trkY && (trkY->keyframeCount() > 0);
@@ -459,12 +567,14 @@ void EffectControlsPanel::resetPropertyRow(PropertyRow* row)
     bool  resetSpeed = false;
 
     for (auto* spin : spins) {
-        if      (spin == m_posXSpin)                 addTrack(&m_clip->positionX(), 0.0f);
-        else if (spin == m_posYSpin)                 addTrack(&m_clip->positionY(), 0.0f);
-        else if (spin == m_scaleSpin)                addTrack(&m_clip->scaleX(),    1.0f);
-        else if (spin == m_scaleWSpin)               addTrack(&m_clip->scaleY(),    1.0f);
-        else if (spin == m_rotationSpin)             addTrack(&m_clip->rotation(),  0.0f);
-        else if (spin == m_opacitySpin)              addTrack(&m_clip->opacity(),   1.0f);
+        if      (spin == m_posXSpin)                 addTrack(effPosX(),     0.0f);
+        else if (spin == m_posYSpin)                 addTrack(effPosY(),     0.0f);
+        else if (spin == m_scaleSpin)                addTrack(effScaleX(),   1.0f);
+        else if (spin == m_scaleWSpin)               addTrack(effScaleY(),   1.0f);
+        else if (spin == m_rotationSpin)             addTrack(effRotation(), 0.0f);
+        else if (spin == m_opacitySpin)              addTrack(effOpacity(),  1.0f);
+        else if (spin == m_anchorXSpin)              addTrack(effAnchorX(),  0.0f);
+        else if (spin == m_anchorYSpin)              addTrack(effAnchorY(),  0.0f);
         else if (spin == m_speedSpin)                resetSpeed = true;
         else if (audio && spin == m_panSpin)         addTrack(&audio->pan(),        0.0f);
         else if (audio && spin == m_audioVolumeSpin) addTrack(&audio->volume(),     1.0f);
@@ -476,11 +586,11 @@ void EffectControlsPanel::resetPropertyRow(PropertyRow* row)
     if (uniform) {
         bool touchedScale = false;
         for (const auto& s : snaps)
-            if (s.trk == &m_clip->scaleX() || s.trk == &m_clip->scaleY())
+            if (s.trk == effScaleX() || s.trk == effScaleY())
                 touchedScale = true;
         if (touchedScale) {
-            addTrack(&m_clip->scaleX(), 1.0f);
-            addTrack(&m_clip->scaleY(), 1.0f);
+            addTrack(effScaleX(), 1.0f);
+            addTrack(effScaleY(), 1.0f);
         }
     }
 

@@ -50,11 +50,16 @@ void computeOverlayCorners(
         float clipPxY = overlay.clipPosY * (canvasH / REF_H);
 
         auto fwd = [&](float x, float y) -> QPointF {
-            // Layer transform (inner): same as renderGraphicClip QPainter
-            float dx = overlay.scaleX * (x - cx);
-            float dy = overlay.scaleY * (y - cy);
-            float ox = dx * cosR - dy * sinR + cx + overlay.posX;
-            float oy = dx * sinR + dy * cosR + cy + overlay.posY;
+            // Layer transform (inner): same as renderGraphicClip QPainter.
+            // Subtract the anchor inside the scale/rotate so they pivot
+            // around (cx+anchorX, cy+anchorY), then add it back along with
+            // the layer position. Anchor=(0,0) → identical to legacy.
+            const float lax = overlay.anchorX;
+            const float lay = overlay.anchorY;
+            float dx = overlay.scaleX * (x - cx - lax);
+            float dy = overlay.scaleY * (y - cy - lay);
+            float ox = dx * cosR - dy * sinR + cx + lax + overlay.posX;
+            float oy = dx * sinR + dy * cosR + cy + lay + overlay.posY;
 
             // Clip-level transform (outer): compositor blitLayerWithTransform
             float rx = (ox - cx) * overlay.clipScaleX;
@@ -85,8 +90,10 @@ void computeOverlayCorners(
     }
 
     // Scale positions from reference (1920×1080) to output.
-    float posXPx = overlay.posX * (outW / REF_W);
-    float posYPx = overlay.posY * (outH / REF_H);
+    float posXPx    = overlay.posX    * (outW / REF_W);
+    float posYPx    = overlay.posY    * (outH / REF_H);
+    float anchorXPx = overlay.anchorX * (outW / REF_W);
+    float anchorYPx = overlay.anchorY * (outH / REF_H);
 
     float cx = outW * 0.5f;
     float cy = outH * 0.5f;
@@ -119,10 +126,15 @@ void computeOverlayCorners(
     float sinR = std::sin(radians);
 
     auto forwardXY = [&](float fitX, float fitY) -> QPointF {
-        float rx = (fitX - cx + baseOffX) * overlay.scaleX;
-        float ry = (fitY - cy + baseOffY) * overlay.scaleY;
-        float ox = rx * cosR - ry * sinR + cx + posXPx;
-        float oy = rx * sinR + ry * cosR + cy + posYPx;
+        // Subtract anchor inside the scale/rotate so they pivot around
+        // (cx + anchor); add anchor + posPx back afterwards. Mirrors the
+        // GPU compositor's buildViewportTransform anchor handling and
+        // the per-layer (content-rect) overlay branch. anchor=(0,0)
+        // collapses to legacy behavior.
+        float rx = (fitX - cx + baseOffX - anchorXPx) * overlay.scaleX;
+        float ry = (fitY - cy + baseOffY - anchorYPx) * overlay.scaleY;
+        float ox = rx * cosR - ry * sinR + cx + posXPx + anchorXPx;
+        float oy = rx * sinR + ry * cosR + cy + posYPx + anchorYPx;
         return toWidget(ox, oy);
     };
 

@@ -46,6 +46,12 @@ struct TransformOverlayInfo
     float clipPosX{0.0f}, clipPosY{0.0f};
     float clipScaleX{1.0f}, clipScaleY{1.0f};
     float clipRotation{0.0f};
+
+    /// Anchor point — layer-local offset from the layer's geometric
+    /// center that acts as the pivot for rotation/scale (Premiere-style).
+    /// Defaults to (0,0), which makes the pivot the layer center and
+    /// preserves the legacy renderer/overlay behavior.
+    float anchorX{0.0f}, anchorY{0.0f};
 };
 
 /// Map a point in canvas/frame coordinates to widget-space coordinates.

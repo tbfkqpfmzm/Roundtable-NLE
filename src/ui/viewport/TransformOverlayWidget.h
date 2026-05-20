@@ -137,6 +137,17 @@ signals:
     /// Emitted when the user drag-rotates via outside-corner handles.
     void transformRotationChanged(float rotation);
 
+    /// Emitted when the user drags the anchor handle. Values are in the
+    /// same units as the transform's anchor track (canvas pixels for
+    /// graphic layers — relative to the layer's geometric center).
+    void transformAnchorChanged(float anchorX, float anchorY);
+
+    /// Emitted on mouse-release after an anchor drag — carries the
+    /// pre-drag and post-drag values so the workspace can push a single
+    /// undo command for the whole drag.
+    void transformAnchorDragFinished(float oldX, float oldY,
+                                     float newX, float newY);
+
     /// Emitted when the transform drag completes (for undo recording).
     void transformDragFinished(float oldPosX, float oldPosY, float oldScX, float oldScY, float oldRot,
                                float newPosX, float newPosY, float newScX, float newScY, float newRot);
@@ -252,6 +263,7 @@ private:
         Pan,
         DragMaskPoint,
         DragMotionHandle,   ///< spatial bezier handle on a Position keyframe
+        MoveAnchor,         ///< anchor point (rotation/scale pivot) handle
     };
     DragMode m_dragMode{DragMode::None};
     int      m_dragHandle{-1};
@@ -262,6 +274,8 @@ private:
     float    m_dragStartScY{1.0f};
     float    m_dragStartRot{0.0f};
     float    m_dragStartAngle{0.0f}; ///< Angle from center at drag start (for rotation)
+    float    m_dragStartAnchorX{0.0f};
+    float    m_dragStartAnchorY{0.0f};
 
     // Pan state (middle mouse)
     QPointF  m_panStartPos;

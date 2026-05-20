@@ -159,6 +159,13 @@ std::shared_ptr<CachedFrame> renderGraphicClip(
         float lsx = ltf.scaleX.evaluate(localTick);
         float lsy = ltf.scaleY.evaluate(localTick);
         float lrot = ltf.rotation.evaluate(localTick);
+        // Anchor point — pivot for rotation/scale (Premiere-style). It's a
+        // layer-LOCAL offset from the layer's geometric center; positioning
+        // (posX/posY) still places the layer center, only the pivot moves.
+        // Defaults to (0,0) → identical behavior to the pre-anchor renderer
+        // for all existing clips.
+        float lax = ltf.anchorX.evaluate(localTick);
+        float lay = ltf.anchorY.evaluate(localTick);
 
         painter.save();
         painter.setOpacity(static_cast<double>(layerOpacity));
@@ -166,9 +173,13 @@ std::shared_ptr<CachedFrame> renderGraphicClip(
         float centerX = static_cast<float>(renderW) * 0.5f + lpx;
         float centerY = static_cast<float>(renderH) * 0.5f + lpy;
         painter.translate(static_cast<double>(centerX), static_cast<double>(centerY));
+        // Shift origin to the anchor so rotate/scale below pivot around it,
+        // then shift back so the layer's geometric center stays at posXY.
+        painter.translate(static_cast<double>(lax), static_cast<double>(lay));
         if (std::abs(lrot) > 0.01f)
             painter.rotate(static_cast<double>(lrot));
         painter.scale(static_cast<double>(lsx), static_cast<double>(lsy));
+        painter.translate(-static_cast<double>(lax), -static_cast<double>(lay));
         painter.translate(-static_cast<double>(renderW) * 0.5,
                           -static_cast<double>(renderH) * 0.5);
 

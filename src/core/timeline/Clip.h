@@ -120,6 +120,14 @@ public:
     KeyframeTrack<float>& scaleX()    noexcept { return m_scaleX; }
     KeyframeTrack<float>& scaleY()    noexcept { return m_scaleY; }
     KeyframeTrack<float>& rotation()  noexcept { return m_rotation; }
+    /// Anchor point — clip-LOCAL pivot offset (REF-1920 px from the
+    /// clip's geometric center) used by the compositor as the
+    /// rotation/scale pivot. Defaults to (0,0), matching the legacy
+    /// renderer that pivots around the layer center. Backward
+    /// compatible: existing projects load anchor as 0 and render
+    /// identically.
+    KeyframeTrack<float>& anchorX()   noexcept { return m_anchorX; }
+    KeyframeTrack<float>& anchorY()   noexcept { return m_anchorY; }
 
     // ── Effect stack ────────────────────────────────────────────────────
     EffectStack& effects() noexcept { return m_effects; }
@@ -176,6 +184,8 @@ protected:
     KeyframeTrack<float> m_scaleX{1.0f};
     KeyframeTrack<float> m_scaleY{1.0f};
     KeyframeTrack<float> m_rotation{0.0f};
+    KeyframeTrack<float> m_anchorX{0.0f};
+    KeyframeTrack<float> m_anchorY{0.0f};
 
     int32_t m_blendMode{0}; ///< Compositor blend mode (0=Normal)
     EffectStack m_effects;

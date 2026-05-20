@@ -316,11 +316,18 @@ int FrameRenderer::evaluateLayers(const Timeline& timeline, int64_t tick, int de
             float sx = clip->scaleX().evaluate(localTick);
             float sy = clip->scaleY().evaluate(localTick);
             float rot = clip->rotation().evaluate(localTick);
+            // Clip-level anchor is stored REF-1920 px; FrameRenderer's
+            // px/py are already in REF-1920 (no scale to output here, the
+            // shader handles the output mapping), so pass anchor in the
+            // same space.
+            float ancX = clip->anchorX().evaluate(localTick);
+            float ancY = clip->anchorY().evaluate(localTick);
 
             cl.transform = Compositor::buildViewportTransform(
                 frame->width, frame->height,
                 m_config.outputWidth, m_config.outputHeight,
-                px, py, sx, sy, rot);
+                px, py, sx, sy, rot,
+                /*containFit=*/false, ancX, ancY);
 
             cl.opacity   = opac;
             cl.blendMode = static_cast<BlendMode>(clip->blendMode());

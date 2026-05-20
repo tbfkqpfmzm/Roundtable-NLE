@@ -720,6 +720,93 @@ void TimelineWorkspace::wireClipSelectionSignals() {
             invalidateCompositeCache();
             if (m_programMonitor) m_programMonitor->requestRefresh();
         });
+        // Anchor handle drag → write to the selected graphic layer's
+        // anchorX/anchorY tracks. Anchor is meaningful only for graphic
+        // layers (the renderer pivots rotation/scale around it); the
+        // overlay only fires this signal in content-rect mode anyway.
+        connect(ov, &TransformOverlayWidget::transformAnchorChanged,
+                this, [this](float ax, float ay) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
+            if (!m_selectedClip) return;
+            const int64_t relTick = m_playbackController
+                ? std::max<int64_t>(0, m_playbackController->currentTick() - m_selectedClip->timelineIn())
+                : 0;
+            bool wroteLayer = false;
+            if (m_selectedClip->clipType() == ClipType::Graphic && m_selectedGraphicLayerIdx >= 0) {
+                auto* gc = static_cast<GraphicClip*>(m_selectedClip);
+                if (m_selectedGraphicLayerIdx < static_cast<int>(gc->layerCount())) {
+                    auto* layer = gc->layer(static_cast<size_t>(m_selectedGraphicLayerIdx));
+                    layer->transform().anchorX.writeValue(relTick, ax);
+                    layer->transform().anchorY.writeValue(relTick, ay);
+                    wroteLayer = true;
+                }
+            }
+            if (!wroteLayer) {
+                // Clip-level anchor (video / image / spine / etc.).
+                m_selectedClip->anchorX().writeValue(relTick, ax);
+                m_selectedClip->anchorY().writeValue(relTick, ay);
+            }
+            if (m_effectControlsPanel) m_effectControlsPanel->syncValuesFromClip();
+            if (m_GraphicsEditorPanel) m_GraphicsEditorPanel->refresh();
+            invalidateCompositeCache();
+            if (m_programMonitor) m_programMonitor->requestRefresh();
+        });
+        // Anchor drag finished → push an undo command. The per-move signal
+        // already wrote the new value during the drag; here we capture the
+        // pre-drag anchor and bind both old/new into a LambdaCommand so
+        // Ctrl+Z reverts the whole drag in one step.
+        connect(ov, &TransformOverlayWidget::transformAnchorDragFinished,
+                this, [this](float oldX, float oldY, float newX, float newY) {
+            if (m_destroying.load(std::memory_order_acquire)) return;
+            if (!m_selectedClip || !m_commandStack) return;
+            if (std::abs(oldX - newX) < 1e-4f && std::abs(oldY - newY) < 1e-4f) return;
+            Clip* clip = m_selectedClip;
+            // For graphic layers, undo writes to the LAYER's anchor; for
+            // everything else, to the clip's anchor. Resolve via clipType
+            // and the current layer-idx, captured by value so a later
+            // selection change doesn't redirect the undo.
+            const bool toLayer = clip->clipType() == ClipType::Graphic
+                              && m_selectedGraphicLayerIdx >= 0
+                              && m_selectedGraphicLayerIdx < static_cast<int>(
+                                     static_cast<GraphicClip*>(clip)->layerCount());
+            const int  layerIdx = m_selectedGraphicLayerIdx;
+            const int64_t relTick = m_playbackController
+                ? std::max<int64_t>(0, m_playbackController->currentTick() - clip->timelineIn())
+                : 0;
+            auto apply = [clip, toLayer, layerIdx, relTick](float ax, float ay) {
+                if (toLayer) {
+                    auto* gc = static_cast<GraphicClip*>(clip);
+                    if (layerIdx < static_cast<int>(gc->layerCount())) {
+                        auto* layer = gc->layer(static_cast<size_t>(layerIdx));
+                        layer->transform().anchorX.writeValue(relTick, ax);
+                        layer->transform().anchorY.writeValue(relTick, ay);
+                    }
+                } else {
+                    clip->anchorX().writeValue(relTick, ax);
+                    clip->anchorY().writeValue(relTick, ay);
+                }
+            };
+            auto* panel = this;
+            m_commandStack->pushWithoutExecute(std::make_unique<LambdaCommand>(
+                "Anchor Point",
+                [apply, newX, newY, panel]() {
+                    apply(newX, newY);
+                    if (panel->m_effectControlsPanel) panel->m_effectControlsPanel->syncValuesFromClip();
+                    if (panel->m_GraphicsEditorPanel) panel->m_GraphicsEditorPanel->refresh();
+                    panel->invalidateCompositeCache();
+                    panel->scheduleOverlayRefresh();
+                    if (panel->m_programMonitor) panel->m_programMonitor->requestRefresh();
+                },
+                [apply, oldX, oldY, panel]() {
+                    apply(oldX, oldY);
+                    if (panel->m_effectControlsPanel) panel->m_effectControlsPanel->syncValuesFromClip();
+                    if (panel->m_GraphicsEditorPanel) panel->m_GraphicsEditorPanel->refresh();
+                    panel->invalidateCompositeCache();
+                    panel->scheduleOverlayRefresh();
+                    if (panel->m_programMonitor) panel->m_programMonitor->requestRefresh();
+                }));
+        });
+
         connect(ov, &TransformOverlayWidget::transformDragFinished,
                 this, [this](float oldPosX, float oldPosY, float oldScX, float oldScY, float oldRot,
                              float newPosX, float newPosY, float newScX, float newScY, float newRot) {
@@ -1567,9 +1654,15 @@ void TimelineWorkspace::wireClipSelectionSignals() {
         });
         // Track which graphic layer is selected for per-layer transform overlay
         connect(m_GraphicsEditorPanel, &GraphicsEditorPanel::layerSelected,
-                this, [this](GraphicLayer* /*layer*/, int layerIdx) {
+                this, [this](GraphicLayer* layer, int layerIdx) {
             if (m_destroying.load(std::memory_order_acquire)) return;
             m_selectedGraphicLayerIdx = layerIdx;
+            // Premiere-style per-layer Motion: route the Effect Controls
+            // panel's Position/Scale/Rotation/Opacity rows through the
+            // selected layer's transform. Passing nullptr falls back to
+            // the clip's transform (default for non-graphic clips).
+            if (m_effectControlsPanel)
+                m_effectControlsPanel->setSelectedGraphicLayer(layer);
             scheduleOverlayRefresh();
         });
         // (Double-clicking a layer row in Essential Graphics now focuses

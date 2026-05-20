@@ -550,11 +550,16 @@ void TransformOverlayWidget::computeOverlayCorners(QPointF corners[4]) const
             float clipPxY = ov.clipPosY * (canvasH / 1080.0f);
 
             auto fwd = [&](float x, float y) -> QPointF {
-                // Layer transform (inner): same as renderGraphicClip QPainter
-                float dx = ov.scaleX * (x - cx);
-                float dy = ov.scaleY * (y - cy);
-                float ox = dx * cosR - dy * sinR + cx + ov.posX;
-                float oy = dx * sinR + dy * cosR + cy + ov.posY;
+                // Layer transform (inner): same as renderGraphicClip QPainter.
+                // Pivot rotation/scale around the anchor (cx+anchor) and
+                // re-add the anchor + layer position afterwards. Defaults
+                // (anchor=0) reduce to the legacy un-anchored form.
+                const float lax = ov.anchorX;
+                const float lay = ov.anchorY;
+                float dx = ov.scaleX * (x - cx - lax);
+                float dy = ov.scaleY * (y - cy - lay);
+                float ox = dx * cosR - dy * sinR + cx + lax + ov.posX;
+                float oy = dx * sinR + dy * cosR + cy + lay + ov.posY;
 
                 // Clip-level transform (outer): compositor blitLayerWithTransform
                 float rx = (ox - cx) * ov.clipScaleX;
@@ -596,8 +601,10 @@ void TransformOverlayWidget::computeOverlayCorners(QPointF corners[4]) const
     }
 
     // Scale positions from reference (1920×1080) to output.
-    float posXPx = ov.posX * (outW / REF_W);
-    float posYPx = ov.posY * (outH / REF_H);
+    float posXPx    = ov.posX    * (outW / REF_W);
+    float posYPx    = ov.posY    * (outH / REF_H);
+    float anchorXPx = ov.anchorX * (outW / REF_W);
+    float anchorYPx = ov.anchorY * (outH / REF_H);
 
     float cx = outW * 0.5f;
     float cy = outH * 0.5f;
@@ -631,10 +638,13 @@ void TransformOverlayWidget::computeOverlayCorners(QPointF corners[4]) const
     float sinR = std::sin(radians);
 
     auto forwardXY = [&](float fitX, float fitY) -> QPointF {
-        float rx = (fitX - cx + baseOffX) * ov.scaleX;
-        float ry = (fitY - cy + baseOffY) * ov.scaleY;
-        float ox = rx * cosR - ry * sinR + cx + posXPx;
-        float oy = rx * sinR + ry * cosR + cy + posYPx;
+        // Pivot rotation/scale around the anchor (cx + anchorPx); add
+        // anchor + posPx back afterwards. anchor=(0,0) → identical to
+        // legacy un-anchored math.
+        float rx = (fitX - cx + baseOffX - anchorXPx) * ov.scaleX;
+        float ry = (fitY - cy + baseOffY - anchorYPx) * ov.scaleY;
+        float ox = rx * cosR - ry * sinR + cx + posXPx + anchorXPx;
+        float oy = rx * sinR + ry * cosR + cy + posYPx + anchorYPx;
         return frameToWidget(QPointF(ox, oy));
     };
 

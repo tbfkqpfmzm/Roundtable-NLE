@@ -177,6 +177,11 @@ void writeClip(BinaryWriter& w, const Clip& clip)
     // Speed ramp track (v5+)
     writeKeyframeTrack(w, const_cast<Clip&>(clip).speedRamp());
 
+    // Anchor point tracks (v19+) — rotation/scale pivot offset. Old
+    // projects load these as default 0 (legacy pivot at layer center).
+    writeKeyframeTrack(w, const_cast<Clip&>(clip).anchorX());
+    writeKeyframeTrack(w, const_cast<Clip&>(clip).anchorY());
+
     // Blend mode (v5+)
     w.writeU32(static_cast<uint32_t>(clip.blendMode()));
 
@@ -475,6 +480,14 @@ std::unique_ptr<Clip> readClip(BinaryReader& r, uint32_t version)
     // Speed ramp track (v5+)
     if (version >= 5)
         readKeyframeTrack(r, clip->speedRamp(), version);
+
+    // Anchor point tracks (v19+). Pre-v19 projects leave the tracks at
+    // the constructed default of 0, which makes the renderer pivot
+    // around the layer center — identical to the pre-anchor behavior.
+    if (version >= 19) {
+        readKeyframeTrack(r, clip->anchorX(), version);
+        readKeyframeTrack(r, clip->anchorY(), version);
+    }
 
     // Blend mode (v5+)
     if (version >= 5)

@@ -195,6 +195,65 @@ void TransformOverlayWidget::drawTransformOverlay(QPainter& painter)
                      QPointF(center.x() + CROSS_SIZE, center.y()));
     painter.drawLine(QPointF(center.x(), center.y() - CROSS_SIZE),
                      QPointF(center.x(), center.y() + CROSS_SIZE));
+
+    // ── Anchor point handle ─────────────────────────────────────────────
+    // Premiere/AE-style target marker at the rotation/scale pivot. Two
+    // coordinate conventions are in play:
+    //   • Content-rect mode (graphic layers): posX/anchorX are in canvas
+    //     (project) pixels, stored in info.contentCanvasW.
+    //   • Standard mode (video / image / spine / etc.): posX/anchorX are
+    //     in REF-1920 pixels, mapped to the viewport's srcWidth via the
+    //     compositor's buildViewportTransform scaling.
+    if (m_vulkanVp) {
+        QRectF fr = computeFrameRect();
+        if (!fr.isEmpty()) {
+            float canvasW = 0.0f, canvasH = 0.0f;
+            float refAnchorPxX = 0.0f, refAnchorPxY = 0.0f;
+            float refPosPxX    = 0.0f, refPosPxY    = 0.0f;
+            bool  drawAnchor   = false;
+            if (m_overlay.useContentRect &&
+                m_overlay.contentCanvasW > 0.0f && m_overlay.contentCanvasH > 0.0f)
+            {
+                canvasW = m_overlay.contentCanvasW;
+                canvasH = m_overlay.contentCanvasH;
+                refAnchorPxX = m_overlay.anchorX;  // already canvas-px
+                refAnchorPxY = m_overlay.anchorY;
+                refPosPxX    = m_overlay.posX;
+                refPosPxY    = m_overlay.posY;
+                drawAnchor = true;
+            } else if (m_vulkanVp->srcWidth() > 0 && m_vulkanVp->srcHeight() > 0) {
+                canvasW = static_cast<float>(m_vulkanVp->srcWidth());
+                canvasH = static_cast<float>(m_vulkanVp->srcHeight());
+                constexpr float REF_W = 1920.0f;
+                constexpr float REF_H = 1080.0f;
+                refAnchorPxX = m_overlay.anchorX * (canvasW / REF_W);
+                refAnchorPxY = m_overlay.anchorY * (canvasH / REF_H);
+                refPosPxX    = m_overlay.posX    * (canvasW / REF_W);
+                refPosPxY    = m_overlay.posY    * (canvasH / REF_H);
+                drawAnchor = true;
+            }
+            if (drawAnchor) {
+                const float ax = canvasW * 0.5f + refPosPxX + refAnchorPxX;
+                const float ay = canvasH * 0.5f + refPosPxY + refAnchorPxY;
+                const QPointF anchorPt(
+                    fr.x() + (static_cast<double>(ax) / canvasW) * fr.width(),
+                    fr.y() + (static_cast<double>(ay) / canvasH) * fr.height());
+
+                constexpr double ANCHOR_RADIUS = 7.0;
+                constexpr double ANCHOR_CROSS  = 5.0;
+                QColor anchorOuter = tc.warning; anchorOuter.setAlpha(220);
+                QColor anchorInner = QColor(255, 255, 255, 230);
+                painter.setBrush(Qt::NoBrush);
+                painter.setPen(QPen(anchorOuter, 1.5));
+                painter.drawEllipse(anchorPt, ANCHOR_RADIUS, ANCHOR_RADIUS);
+                painter.setPen(QPen(anchorInner, 1.0));
+                painter.drawLine(QPointF(anchorPt.x() - ANCHOR_CROSS, anchorPt.y()),
+                                 QPointF(anchorPt.x() + ANCHOR_CROSS, anchorPt.y()));
+                painter.drawLine(QPointF(anchorPt.x(), anchorPt.y() - ANCHOR_CROSS),
+                                 QPointF(anchorPt.x(), anchorPt.y() + ANCHOR_CROSS));
+            }
+        }
+    }
 }
 
 void TransformOverlayWidget::drawSafeAreas(QPainter& painter)

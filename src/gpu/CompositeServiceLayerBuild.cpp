@@ -127,6 +127,7 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
             float opac = 1.0f;
             float px = 0.0f, py = 0.0f;
             float sx = 1.0f, sy = 1.0f, rot = 0.0f;
+            float ancX = 0.0f, ancY = 0.0f;
             try {
                 opac = clip->opacity().evaluate(localTick);
                 {
@@ -137,6 +138,11 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
                 sx   = clip->scaleX().evaluate(localTick);
                 sy   = clip->scaleY().evaluate(localTick);
                 rot  = clip->rotation().evaluate(localTick);
+                // Anchor stored as REF-1920 px (same convention as position);
+                // convert to output px so the GPU transform builder treats it
+                // in the same space as posX/posY.
+                ancX = clip->anchorX().evaluate(localTick) * scaleToOutX;
+                ancY = clip->anchorY().evaluate(localTick) * scaleToOutY;
             } catch (...) {
                 // Keyframe vector corruption — use defaults and continue.
                 // The preroll deferral (isBackgroundWarmupActive gate) should
@@ -446,6 +452,8 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
                         layer.posX     = px;
                         layer.posY     = py;
                         layer.rot      = rot;
+                        layer.anchorX  = ancX;
+                        layer.anchorY  = ancY;
                         layer.clipId   = clipId;
                         layer.blendMode = clip->blendMode();
                         // VideoClip characters already have the COMPOSE 0.85
@@ -652,6 +660,8 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
                                     layer.scX      = sx * (kCF / kSP);
                                     layer.scY      = sy * (kCF / kSP);
                                     layer.rot      = rot;
+                                    layer.anchorX  = ancX;
+                                    layer.anchorY  = ancY;
                                     layer.clipId   = clipId;
                                     layer.blendMode = clip->blendMode();
                                     // Pre-rendered spine: contain-fit so
@@ -1225,6 +1235,8 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
             layer.scX     = finalSx;
             layer.scY     = finalSy;
             layer.rot     = rot;
+            layer.anchorX = ancX;
+            layer.anchorY = ancY;
             layer.clipId  = clipId;
             layer.blendMode = clip->blendMode();
             layer.needsSwapRB = fromNestedSequence;

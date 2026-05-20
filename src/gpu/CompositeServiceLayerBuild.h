@@ -40,6 +40,11 @@ struct LayerInfo
     float scX{1.0f};      // scale multiplier
     float scY{1.0f};
     float rot{0.0f};      // degrees
+    /// Anchor / rotation-scale pivot, in OUTPUT pixels relative to the
+    /// composited frame's geometric centre. Already scaled from the
+    /// clip's REF-1920 anchor track by buildLayersForFrame.
+    float anchorX{0.0f};
+    float anchorY{0.0f};
     float cropL{0.0f};    // crop percentages 0–100
     float cropR{0.0f};
     float cropT{0.0f};

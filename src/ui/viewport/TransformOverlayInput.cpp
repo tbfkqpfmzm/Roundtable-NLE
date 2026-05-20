@@ -170,6 +170,61 @@ void TransformOverlayWidget::mousePressEvent(QMouseEvent* event)
     if (event->button() == Qt::LeftButton && m_overlay.visible) {
         QPointF wPos = event->position();
 
+        // Anchor point handle takes priority — it can sit inside the
+        // bounding box so a body-drag would otherwise eat the click.
+        // Works in both modes: content-rect (graphic layers, anchor in
+        // canvas px) and standard (clips, anchor in REF-1920 px scaled
+        // to srcWidth/Height like position).
+        if (m_vulkanVp) {
+            QRectF fr = computeFrameRect();
+            if (!fr.isEmpty()) {
+                float canvasW = 0.0f, canvasH = 0.0f;
+                float anchorPxX = 0.0f, anchorPxY = 0.0f;
+                float posPxX    = 0.0f, posPxY    = 0.0f;
+                bool  testAnchor = false;
+                if (m_overlay.useContentRect &&
+                    m_overlay.contentCanvasW > 0.0f && m_overlay.contentCanvasH > 0.0f)
+                {
+                    canvasW = m_overlay.contentCanvasW;
+                    canvasH = m_overlay.contentCanvasH;
+                    anchorPxX = m_overlay.anchorX;
+                    anchorPxY = m_overlay.anchorY;
+                    posPxX    = m_overlay.posX;
+                    posPxY    = m_overlay.posY;
+                    testAnchor = true;
+                } else if (m_vulkanVp->srcWidth() > 0 && m_vulkanVp->srcHeight() > 0) {
+                    canvasW = static_cast<float>(m_vulkanVp->srcWidth());
+                    canvasH = static_cast<float>(m_vulkanVp->srcHeight());
+                    constexpr float REF_W = 1920.0f;
+                    constexpr float REF_H = 1080.0f;
+                    anchorPxX = m_overlay.anchorX * (canvasW / REF_W);
+                    anchorPxY = m_overlay.anchorY * (canvasH / REF_H);
+                    posPxX    = m_overlay.posX    * (canvasW / REF_W);
+                    posPxY    = m_overlay.posY    * (canvasH / REF_H);
+                    testAnchor = true;
+                }
+                if (testAnchor) {
+                    const float ax = canvasW * 0.5f + posPxX + anchorPxX;
+                    const float ay = canvasH * 0.5f + posPxY + anchorPxY;
+                    const QPointF anchorPt(
+                        fr.x() + (static_cast<double>(ax) / canvasW) * fr.width(),
+                        fr.y() + (static_cast<double>(ay) / canvasH) * fr.height());
+                    const double dx = wPos.x() - anchorPt.x();
+                    const double dy = wPos.y() - anchorPt.y();
+                    constexpr double kAnchorHitRadius = 10.0;
+                    if (dx * dx + dy * dy <= kAnchorHitRadius * kAnchorHitRadius) {
+                        m_dragMode = DragMode::MoveAnchor;
+                        m_dragStartWidget  = wPos;
+                        m_dragStartAnchorX = m_overlay.anchorX;
+                        m_dragStartAnchorY = m_overlay.anchorY;
+                        applyCursor(Qt::SizeAllCursor);
+                        event->accept();
+                        return;
+                    }
+                }
+            }
+        }
+
         int handle = hitTestHandle(wPos);
         if (handle >= 0) {
             m_dragMode = DragMode::ScaleCorner;
@@ -668,6 +723,48 @@ void TransformOverlayWidget::mouseMoveEvent(QMouseEvent* event)
         return;
     }
 
+    // ── Anchor point drag ───────────────────────────────────────────────
+    // The anchor is the rotation/scale pivot (Premiere/AE-style). Two
+    // coordinate conventions:
+    //   • Content-rect mode (graphic layers): anchor is canvas-px → use
+    //     contentCanvasW/H to convert widget Δ → canvas Δ.
+    //   • Standard mode (video / image / etc.): anchor is REF-1920 px
+    //     stored on the clip's anchorX/Y tracks → convert widget Δ →
+    //     REF-1920 Δ using fr.width / REF_1920.
+    if (m_dragMode == DragMode::MoveAnchor && (event->buttons() & Qt::LeftButton)) {
+        QRectF fr = computeFrameRect();
+        if (fr.isEmpty()) return;
+        float pxPerUnitX = 0.0f, pxPerUnitY = 0.0f;
+        if (m_overlay.useContentRect &&
+            m_overlay.contentCanvasW > 0.0f && m_overlay.contentCanvasH > 0.0f)
+        {
+            pxPerUnitX = static_cast<float>(fr.width())  / m_overlay.contentCanvasW;
+            pxPerUnitY = static_cast<float>(fr.height()) / m_overlay.contentCanvasH;
+        } else {
+            constexpr float REF_W = 1920.0f;
+            constexpr float REF_H = 1080.0f;
+            pxPerUnitX = static_cast<float>(fr.width())  / REF_W;
+            pxPerUnitY = static_cast<float>(fr.height()) / REF_H;
+        }
+        if (pxPerUnitX < 1e-4f || pxPerUnitY < 1e-4f) return;
+
+        const float effClipScaleX = std::max(0.001f, m_overlay.clipScaleX);
+        const float effClipScaleY = std::max(0.001f, m_overlay.clipScaleY);
+
+        const float dx = static_cast<float>(wPos.x() - m_dragStartWidget.x())
+                         / (pxPerUnitX * effClipScaleX);
+        const float dy = static_cast<float>(wPos.y() - m_dragStartWidget.y())
+                         / (pxPerUnitY * effClipScaleY);
+
+        m_overlay.anchorX = m_dragStartAnchorX + dx;
+        m_overlay.anchorY = m_dragStartAnchorY + dy;
+
+        emit transformAnchorChanged(m_overlay.anchorX, m_overlay.anchorY);
+        update();
+        event->accept();
+        return;
+    }
+
     // ── Scale corner drag ───────────────────────────────────────────────
     if (m_dragMode == DragMode::ScaleCorner && (event->buttons() & Qt::LeftButton)) {
         QPointF corners[4];
@@ -869,6 +966,23 @@ void TransformOverlayWidget::mouseReleaseEvent(QMouseEvent* event)
         m_dragMaskIndex = -1;
         m_dragMaskHandle = -1;
         applyCursor(Qt::ArrowCursor);
+        event->accept();
+        return;
+    }
+
+    // Anchor drag doesn't update pos/scale/rotation, so don't fire the
+    // generic transformDragFinished (it would push a no-op undo command
+    // for pos/scale/rot). Emit the anchor-specific finished signal with
+    // pre/post values so the workspace can record one undo command for
+    // the whole drag.
+    if (m_dragMode == DragMode::MoveAnchor) {
+        const float oldX = m_dragStartAnchorX;
+        const float oldY = m_dragStartAnchorY;
+        const float newX = m_overlay.anchorX;
+        const float newY = m_overlay.anchorY;
+        m_dragMode = DragMode::None;
+        applyCursor(Qt::ArrowCursor);
+        emit transformAnchorDragFinished(oldX, oldY, newX, newY);
         event->accept();
         return;
     }

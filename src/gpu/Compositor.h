@@ -299,7 +299,9 @@ public:
                                              float posXPx, float posYPx,
                                              float scaleX, float scaleY,
                                              float rotDeg = 0.0f,
-                                             bool containFit = false);
+                                             bool containFit = false,
+                                             float anchorXPx = 0.0f,
+                                             float anchorYPx = 0.0f);
 
     /// Identity transform (layer fills entire output).
     static glm::mat4 identityTransform() { return glm::mat4(1.0f); }
