@@ -324,12 +324,65 @@ static LONG WINAPI lastChanceVectoredHandler(EXCEPTION_POINTERS* exInfo)
     // Log using the stack-safe writer.  We're in the middle of an exception
     // so heap operations are unsafe.  The log may be incomplete if the
     // crash_dir_w isn't populated yet (before CrashHandler::install()).
-    char msg[256];
+    //
+    // Best-effort: resolve the module that owns ExceptionAddress so the log
+    // line lets us tell apart "our code", "NVIDIA driver", and "injected
+    // hook DLL" (NVIDIA App / OBS / Discord overlay).  GetModuleHandleExA +
+    // GetModuleBaseNameA are documented safe to call from a VEH and use
+    // only OS-internal allocators, not our CRT heap.  modBase is left
+    // empty on failure (no extra noise in the log).
+    char modBase[64] = {};
+    uintptr_t modOff = 0;
+    {
+        HMODULE hMod = nullptr;
+        if (GetModuleHandleExA(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                reinterpret_cast<LPCSTR>(exInfo->ExceptionRecord->ExceptionAddress),
+                &hMod) && hMod) {
+            char modPath[MAX_PATH] = {};
+            if (GetModuleFileNameA(hMod, modPath, MAX_PATH)) {
+                const char* base = modPath;
+                for (const char* p = modPath; *p; ++p) {
+                    if (*p == '\\' || *p == '/') base = p + 1;
+                }
+                size_t n = 0;
+                while (base[n] && n + 1 < sizeof(modBase)) {
+                    modBase[n] = base[n]; ++n;
+                }
+                modBase[n] = '\0';
+            }
+            modOff = reinterpret_cast<uintptr_t>(
+                         exInfo->ExceptionRecord->ExceptionAddress)
+                   - reinterpret_cast<uintptr_t>(hMod);
+        }
+    }
+
+    // 0x000006BA (= RPC_S_SERVER_UNAVAILABLE / 1722) is a software-raised
+    // exception observed coming from third-party injected DLLs (NVIDIA
+    // GeForce Experience overlay, OBS hook, Discord overlay) when the
+    // Vulkan ICD is mid-TDR.  Tag it distinctly so users / support can
+    // identify the injecting module from the log without a minidump.
+    const char* tag = "SEH";
+    if (code == 0x000006BA)         tag = "SEH(HOOK_RPC_UNAVAIL)";
+    else if (code == 0xC0000374)    tag = "SEH(HEAP_CORRUPTION)";
+    else if (code == EXCEPTION_ACCESS_VIOLATION) tag = "SEH(ACCESS_VIOLATION)";
+
+    char msg[320];
     uintptr_t addr = reinterpret_cast<uintptr_t>(
         exInfo->ExceptionRecord->ExceptionAddress);
-    snprintf(msg, sizeof(msg),
-             "SEH: CODE=0x%08X ADDR=0x%llX",
-             code, static_cast<unsigned long long>(addr));
+    if (modBase[0]) {
+        snprintf(msg, sizeof(msg),
+                 "%s: CODE=0x%08X ADDR=0x%llX MOD=%s+0x%llX TID=%lu",
+                 tag, code, static_cast<unsigned long long>(addr),
+                 modBase, static_cast<unsigned long long>(modOff),
+                 GetCurrentThreadId());
+    } else {
+        snprintf(msg, sizeof(msg),
+                 "%s: CODE=0x%08X ADDR=0x%llX TID=%lu",
+                 tag, code, static_cast<unsigned long long>(addr),
+                 GetCurrentThreadId());
+    }
     appendCrashLogRawStackSafe(state().crashDirW, msg);
 
     // Continue searching — SEH handlers and the unhandled exception

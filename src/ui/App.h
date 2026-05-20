@@ -17,9 +17,12 @@
 
 #pragma once
 
+#include "HardwareDiagnostics.h"
+
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 class QApplication;
 
@@ -60,6 +63,13 @@ public:
     /// Call after init().
     bool createMainWindow();
 
+private:
+    /// Show the overlay-hook advisory dialog using the snapshot captured
+    /// at startup.  Called from a deferred singleShot in createMainWindow.
+    void showOverlayAdvisoryDialog();
+
+public:
+
     // ── Accessors ───────────────────────────────────────────────────────
 
     [[nodiscard]] MainWindow*      mainWindow()      const noexcept { return m_mainWindow.get(); }
@@ -73,6 +83,13 @@ public:
     [[nodiscard]] MediaSourceService*    mediaSourceService()   const noexcept { return m_mediaSourceService.get(); }
     [[nodiscard]] ModelManager*         modelManager()         const noexcept { return m_modelManager.get(); }
     [[nodiscard]] bool                  isInitialized()        const noexcept { return m_initialized; }
+
+    /// Snapshot of the GPU classification gathered at startup.
+    [[nodiscard]] const HardwareDiagnostics::GpuClassification&
+        diagnosticsGpu() const noexcept { return m_diagnosticsGpu; }
+    /// Snapshot of injected overlay hooks found at startup.
+    [[nodiscard]] const std::vector<HardwareDiagnostics::InjectedHook>&
+        diagnosticsHooks() const noexcept { return m_diagnosticsHooks; }
 
     // ── Singleton-ish access (convenience) ──────────────────────────────
 
@@ -109,6 +126,12 @@ private:
 
     // ── UI (owned) ──────────────────────────────────────────────────────
     std::unique_ptr<MainWindow>      m_mainWindow;
+
+    // ── Hardware diagnostics ─────────────────────────────────────────────
+    // Captured after GpuContext::init() so the post-show advisory dialog
+    // can be raised against the same snapshot the startup log printed.
+    HardwareDiagnostics::GpuClassification        m_diagnosticsGpu;
+    std::vector<HardwareDiagnostics::InjectedHook> m_diagnosticsHooks;
 };
 
 } // namespace rt

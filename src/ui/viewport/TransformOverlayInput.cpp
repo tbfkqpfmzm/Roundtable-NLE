@@ -371,10 +371,15 @@ void TransformOverlayWidget::beginInlineTextEdit(const QString& initial,
                                                   const QColor& textColor,
                                                   float horizontalStretch)
 {
-    // Bounding box of the selected layer in widget coords (same corners
-    // used to draw the transform box). Falls back to a centred box if the
-    // overlay geometry isn't available yet.
-    QRectF box;
+    // Centroid of the selected layer's transform box (widget coords). We
+    // use ONLY the center as an anchor; the editor's actual width/height
+    // are derived from the font metrics below — NOT from the box AABB.
+    // Sizing from the AABB made the editor explode to the entire screen
+    // for scaled-up text layers, and become tall+distorted for rotated
+    // layers (the rotated box's AABB is much taller than the glyph line).
+    // Premiere's program-monitor inline edit sizes to the rendered text;
+    // we match that behavior.
+    double cx, cy;
     {
         QPointF c[4];
         computeOverlayCorners(c);
@@ -383,36 +388,13 @@ void TransformOverlayWidget::beginInlineTextEdit(const QString& initial,
             minX = std::min(minX, c[i].x()); maxX = std::max(maxX, c[i].x());
             minY = std::min(minY, c[i].y()); maxY = std::max(maxY, c[i].y());
         }
-        box = QRectF(minX, minY, maxX - minX, maxY - minY);
-    }
-    if (box.width() < 8.0 || box.height() < 8.0) {
-        const int w = std::min(width() - 40, 360);
-        box = QRectF((width() - w) / 2.0, height() / 2.0 - 18.0,
-                     std::max(120, w), 36.0);
-    }
-    // Keep the editor centered on the rendered text. Earlier code
-    // enforced a 120×28 minimum anchored at the box's top-left, which
-    // made the editor grow down-and-right of small transform boxes —
-    // both off-center and visually much larger than the rendered text.
-    // Center any minimum-size expansion around the transform box's
-    // centroid, and use a small floor (40×16) that won't dominate the
-    // rendered text for typical font sizes.
-    constexpr double kMinW = 40.0;
-    constexpr double kMinH = 16.0;
-    double cx = box.x() + box.width()  * 0.5;
-    double cy = box.y() + box.height() * 0.5;
-    double w  = std::max(kMinW, box.width());
-    double h  = std::max(kMinH, box.height());
-    QRect g(static_cast<int>(std::round(cx - w * 0.5)),
-            static_cast<int>(std::round(cy - h * 0.5)),
-            static_cast<int>(std::round(w)),
-            static_cast<int>(std::round(h)));
-    QRect clamped = g.intersected(rect().adjusted(2, 2, -2, -2));
-    if (clamped.width() < 8 || clamped.height() < 8) {
-        // Degenerate (e.g. overlay not laid out yet) — fall back to a
-        // small editor centered in the overlay.
-        clamped = QRect((width() - 200) / 2, (height() - 32) / 2, 200, 32)
-                      .intersected(rect().adjusted(2, 2, -2, -2));
+        if (maxX - minX < 1.0 || maxY - minY < 1.0) {
+            cx = width()  * 0.5;
+            cy = height() * 0.5;
+        } else {
+            cx = (minX + maxX) * 0.5;
+            cy = (minY + maxY) * 0.5;
+        }
     }
 
     if (!m_inlineTextEdit) {
@@ -478,11 +460,6 @@ void TransformOverlayWidget::beginInlineTextEdit(const QString& initial,
         });
     }
 
-    // Position in GLOBAL screen coordinates: a top-level window's geometry
-    // is screen-relative, not parent-relative.
-    QPoint globalTL = mapToGlobal(clamped.topLeft());
-    QRect screenRect(globalTL, clamped.size());
-
     // Match the renderer's font sizing exactly. renderGraphicClip()
     // builds its QFont with POINT size and rasterises into a canvas at
     // the PROJECT/sequence resolution, which is then downscaled to the
@@ -540,6 +517,37 @@ void TransformOverlayWidget::beginInlineTextEdit(const QString& initial,
     }
     m_inlineTextEdit->setFont(qf);
     m_inlineTextEdit->setStyleSheet(styleSheet);
+
+    // Derive the editor's pixel size from the actual rendered font
+    // metrics — height = one glyph line + a couple px for border/breathing
+    // room, width = enough to hold the initial string plus caret slack.
+    // This is the Premiere-style behavior: the edit box hugs the text,
+    // independent of how tall/wide/rotated the layer's transform box is.
+    QFontMetricsF fm(qf);
+    constexpr int kBorderPad = 4; // 1px border × 2 + 1px breathing × 2
+    int editH = std::max(12, static_cast<int>(std::ceil(fm.height())) + kBorderPad);
+    double slack0 = std::max(8.0, fm.averageCharWidth());
+    int editW = std::max(40,
+        static_cast<int>(std::ceil(fm.horizontalAdvance(initial) + slack0 + kBorderPad)));
+
+    // Build the widget-space rect centered on the transform box centroid,
+    // then clamp into the overlay (so a huge font near a screen edge
+    // doesn't push the editor partially off-screen).
+    QRect g(static_cast<int>(std::round(cx - editW * 0.5)),
+            static_cast<int>(std::round(cy - editH * 0.5)),
+            editW, editH);
+    QRect clamped = g.intersected(rect().adjusted(2, 2, -2, -2));
+    if (clamped.width() < 8 || clamped.height() < 8) {
+        // Degenerate (e.g. overlay not laid out yet) — fall back to a
+        // small editor centered in the overlay.
+        clamped = QRect((width() - 200) / 2, (height() - 32) / 2, 200, 32)
+                      .intersected(rect().adjusted(2, 2, -2, -2));
+    }
+
+    // Position in GLOBAL screen coordinates: a top-level window's geometry
+    // is screen-relative, not parent-relative.
+    QPoint globalTL = mapToGlobal(clamped.topLeft());
+    QRect screenRect(globalTL, clamped.size());
 
     // Remember the editor's screen-space anchor so the textChanged handler
     // can grow/shrink the geometry symmetrically as the user types.
@@ -699,11 +707,25 @@ void TransformOverlayWidget::mouseMoveEvent(QMouseEvent* event)
         QRectF fr = computeFrameRect();
         if (fr.isEmpty()) return;
 
-        constexpr float REF_W = 1920.0f;
-        constexpr float REF_H = 1080.0f;
-        float pxPerRefX = static_cast<float>(fr.width())  / REF_W;
-        float pxPerRefY = static_cast<float>(fr.height()) / REF_H;
-        if (pxPerRefX < 0.001f || pxPerRefY < 0.001f) return;
+        // Two coordinate conventions, mirroring the anchor handler below:
+        //   • Content-rect mode (graphic layers): posX/posY are CANVAS px
+        //     (project resolution). On a 4K project canvas=3840, so using
+        //     REF_1920 here divided the mouse-to-layer rate by 2 — the text
+        //     visibly lagged the cursor.
+        //   • Standard mode (video / image): posX/posY are REF-1920 px.
+        float pxPerUnitX = 0.0f, pxPerUnitY = 0.0f;
+        if (m_overlay.useContentRect &&
+            m_overlay.contentCanvasW > 0.0f && m_overlay.contentCanvasH > 0.0f)
+        {
+            pxPerUnitX = static_cast<float>(fr.width())  / m_overlay.contentCanvasW;
+            pxPerUnitY = static_cast<float>(fr.height()) / m_overlay.contentCanvasH;
+        } else {
+            constexpr float REF_W = 1920.0f;
+            constexpr float REF_H = 1080.0f;
+            pxPerUnitX = static_cast<float>(fr.width())  / REF_W;
+            pxPerUnitY = static_cast<float>(fr.height()) / REF_H;
+        }
+        if (pxPerUnitX < 0.001f || pxPerUnitY < 0.001f) return;
 
         // Account for clip-level scale: layer position is in canvas space,
         // but the clip scale magnifies the whole canvas, so mouse movement
@@ -711,8 +733,8 @@ void TransformOverlayWidget::mouseMoveEvent(QMouseEvent* event)
         float effScaleX = std::max(0.001f, m_overlay.clipScaleX);
         float effScaleY = std::max(0.001f, m_overlay.clipScaleY);
 
-        float dx = static_cast<float>(wPos.x() - m_dragStartWidget.x()) / (pxPerRefX * effScaleX);
-        float dy = static_cast<float>(wPos.y() - m_dragStartWidget.y()) / (pxPerRefY * effScaleY);
+        float dx = static_cast<float>(wPos.x() - m_dragStartWidget.x()) / (pxPerUnitX * effScaleX);
+        float dy = static_cast<float>(wPos.y() - m_dragStartWidget.y()) / (pxPerUnitY * effScaleY);
 
         m_overlay.posX = m_dragStartPosX + dx;
         m_overlay.posY = m_dragStartPosY + dy;
@@ -888,8 +910,10 @@ void TransformOverlayWidget::mouseMoveEvent(QMouseEvent* event)
             applyCursor(Qt::SizeFDiagCursor);
         else if (hitTestRotate(wPos) >= 0)
             applyCursor(rotateCursor());
+        else if (hitTestBody(wPos))
+            applyCursor(Qt::SizeAllCursor);  // Premiere-style move cursor
         else
-            applyCursor(Qt::ArrowCursor);   // body = plain arrow (no hand)
+            applyCursor(Qt::ArrowCursor);
         event->accept();
         return;
     }

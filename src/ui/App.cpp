@@ -31,11 +31,22 @@
 
 #include "GpuContext.h"
 #include "ShutdownPhases.h"
+#include "HardwareDiagnostics.h"
 
 #include "QtHelpers.h"
 
 #include "Settings.h"
+#include <QCheckBox>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QDesktopServices>
+#include <QLabel>
+#include <QMessageBox>
+#include <QPushButton>
 #include <QSettings>
+#include <QTimer>
+#include <QUrl>
+#include <QVBoxLayout>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -246,6 +257,18 @@ bool App::init()
         if (!capturing) {
             if (!GpuContext::get().init()) {
                 spdlog::warn("App: GPU context failed — falling back to software compositor");
+            } else {
+                // ── Hardware diagnostics ───────────────────────────────────
+                // Scan loaded modules for known overlay/capture hooks and
+                // classify the GPU (Pascal vs Turing+).  Results are
+                // logged here; the user-facing advisory dialog fires
+                // post-showMaximized() in createMainWindow.
+                m_diagnosticsHooks = HardwareDiagnostics::scanLoadedHooks();
+                const auto& gi = GpuContext::get().device().gpuInfo();
+                m_diagnosticsGpu = HardwareDiagnostics::classifyGpu(
+                    gi.vendorId, gi.deviceId, gi.name, gi.vramSize);
+                HardwareDiagnostics::logAtStartup(m_diagnosticsGpu,
+                                                  m_diagnosticsHooks);
             }
         } else {
             spdlog::info("App: skipping GPU init (--capture-workspace mode)");
@@ -342,6 +365,36 @@ bool App::createMainWindow()
 
     m_mainWindow->showMaximized();
 
+    // ── Hardware diagnostics advisory ─────────────────────────────────
+    // If we detected overlay/capture hooks in our process, raise a
+    // dismissable advisory dialog telling the user which app to
+    // reconfigure.  Deferred to a singleShot so it appears after the
+    // window has finished its initial paint pass — otherwise the dialog
+    // can render before the main window has its final geometry and
+    // appear in the wrong screen position.
+    //
+    // Suppressed if the user has previously checked "Don't show again"
+    // and the hook set is identical to last time — if a new hook
+    // appears (e.g. they installed OBS since the last warning) we
+    // re-prompt.
+    if (!m_diagnosticsHooks.empty()) {
+        std::string hookKeyAccum;
+        for (const auto& h : m_diagnosticsHooks)
+            hookKeyAccum += h.moduleBaseName + ';';
+        QSettings cfg(QStringLiteral("RoundtableMedia"),
+                      QStringLiteral("RoundtableNLE"));
+        const QString dismissedKey =
+            cfg.value(QStringLiteral("diagnostics/overlayWarningDismissedFor")).toString();
+        if (dismissedKey != QString::fromStdString(hookKeyAccum)) {
+            // Defer to a singleShot so the dialog appears after the
+            // window has finished its first paint pass.  Captures only
+            // `this`; the dialog reads from m_diagnosticsHooks directly.
+            QTimer::singleShot(500, m_mainWindow.get(), [this]() {
+                showOverlayAdvisoryDialog();
+            });
+        }
+    }
+
     // Finish async model scan — by now the scan thread has been running
     // in parallel with UI construction so it's likely already done.
 #ifdef ROUNDTABLE_HAS_SPINE
@@ -371,6 +424,62 @@ bool App::createMainWindow()
 
     spdlog::info("App::createMainWindow() — UI ready");
     return true;
+}
+
+void App::showOverlayAdvisoryDialog()
+{
+    if (!m_mainWindow || m_diagnosticsHooks.empty()) return;
+
+    QDialog dlg(m_mainWindow.get());
+    dlg.setWindowTitle(QObject::tr("Compatibility advisory"));
+    auto* layout = new QVBoxLayout(&dlg);
+
+    auto* intro = new QLabel(
+        QObject::tr(
+            "<b>ROUNDTABLE detected one or more overlay or capture tools "
+            "attached to this process.</b><br><br>"
+            "These tools hook into the video pipeline and have been "
+            "observed crashing exports on some hardware. If exports fail "
+            "or the preview shows corruption, try the steps below."),
+        &dlg);
+    intro->setWordWrap(true);
+    layout->addWidget(intro);
+
+    for (const auto& h : m_diagnosticsHooks) {
+        auto* row = new QLabel(
+            QStringLiteral("<b>• %1</b> &nbsp; "
+                           "<span style='color:#888'>(%2)</span>"
+                           "<br>&nbsp;&nbsp;%3")
+                .arg(QString::fromStdString(h.sourceApp))
+                .arg(QString::fromStdString(h.moduleBaseName))
+                .arg(QString::fromStdString(h.exclusionHint)),
+            &dlg);
+        row->setWordWrap(true);
+        row->setTextInteractionFlags(Qt::TextBrowserInteraction);
+        layout->addWidget(row);
+    }
+
+    auto* dontShow = new QCheckBox(
+        QObject::tr("Don't show this again for the current set of detected tools"),
+        &dlg);
+    layout->addWidget(dontShow);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok, &dlg);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    layout->addWidget(buttons);
+
+    dlg.setMinimumWidth(580);
+    dlg.exec();
+
+    if (dontShow->isChecked()) {
+        std::string hookKey;
+        for (const auto& h : m_diagnosticsHooks)
+            hookKey += h.moduleBaseName + ';';
+        QSettings cfg(QStringLiteral("RoundtableMedia"),
+                      QStringLiteral("RoundtableNLE"));
+        cfg.setValue(QStringLiteral("diagnostics/overlayWarningDismissedFor"),
+                     QString::fromStdString(hookKey));
+    }
 }
 
 } // namespace rt

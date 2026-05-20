@@ -61,6 +61,13 @@ Source: "build\bin\Release\roundtable.exe"; DestDir: "{app}"; Flags: ignoreversi
 ; Runtime DLLs
 Source: "build\bin\Release\*.dll"; DestDir: "{app}"; Flags: ignoreversion
 
+; FFmpeg CLI tools — required by ShotComposer for thumbnail extraction
+; (libav* DLLs are already covered by the *.dll glob above).  Search path
+; in src/ui/panels/characters/ShotComposerVideo.cpp:181-186 looks for
+; ffmpeg.exe in QApplication::applicationDirPath().
+Source: "third_party\ffmpeg\bin\ffmpeg.exe";  DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "third_party\ffmpeg\bin\ffprobe.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+
 ; Qt deployment configuration (overrides hardcoded plugin path)
 Source: "qt.conf"; DestDir: "{app}"; Flags: ignoreversion
 

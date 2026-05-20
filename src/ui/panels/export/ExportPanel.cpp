@@ -39,6 +39,8 @@
 #include "timeline/Clip.h"
 
 #include "MainWindow.h"
+#include "App.h"
+#include "HardwareDiagnostics.h"
 
 #include <spdlog/spdlog.h>
 
@@ -266,9 +268,24 @@ std::shared_ptr<CachedFrame> ExportPanel::pipelineComposite(
             auto cb = m_previewCallback;
             QMetaObject::invokeMethod(this,
                 [promise, cb, targetTick, w, h, scrub]() {
-                    auto frame = cb(targetTick, w, h, scrub);
-                    if (frame) frame->ensurePixels();
-                    promise->set_value(std::move(frame));
+                    // /EHa is set on this TU (see ui/CMakeLists.txt) so
+                    // catch(...) covers SEH access violations and the
+                    // 0x000006BA hook-DLL exception that fires while the
+                    // Vulkan ICD is mid-TDR.  Without this catch, an SEH
+                    // raised on the main thread during the composite
+                    // would (a) kill the process and (b) leave the
+                    // worker thread blocked forever on promise.get_future().
+                    // On failure we set the promise to nullptr; the
+                    // worker treats that as "skip this frame".
+                    try {
+                        auto frame = cb(targetTick, w, h, scrub);
+                        if (frame) frame->ensurePixels();
+                        promise->set_value(std::move(frame));
+                    } catch (...) {
+                        spdlog::error("ExportPanel: SEH/exception during main-thread "
+                                      "composite at tick={} — skipping frame", targetTick);
+                        try { promise->set_value(nullptr); } catch (...) {}
+                    }
                 },
                 Qt::QueuedConnection);
         } else {
@@ -1010,6 +1027,51 @@ void ExportPanel::onStartExport()
         return;
 
     auto config = buildJobConfig();
+
+    // ── Pascal NVENC pre-flight ───────────────────────────────────────
+    // NVIDIA Pascal consumer GPUs (GTX 10xx) cap concurrent NVENC
+    // sessions at 2 in hardware.  If Discord / OBS / another encoder
+    // app is running we'll fail NVENC init and silently fall back to
+    // CPU encoding.  Warn the user upfront so they can close those
+    // apps now instead of discovering it after a long, slow export.
+    // Suppressed for one session via Cancel-then-tick, persisted via
+    // QSettings if they choose "Don't warn again".
+    if (config.encoderConfig.hwAccel != HardwareAccel::None) {
+        const auto* app = App::instance();
+        const bool isPascal = app && app->diagnosticsGpu().arch
+                              == HardwareDiagnostics::GpuArchitecture::NvidiaPascal;
+        if (isPascal) {
+            QSettings cfg(QStringLiteral("RoundtableMedia"),
+                          QStringLiteral("RoundtableNLE"));
+            const bool suppressed = cfg.value(
+                QStringLiteral("export/pascalNvencHintSuppressed"), false).toBool();
+            if (!suppressed) {
+                QMessageBox box(this);
+                box.setIcon(QMessageBox::Information);
+                box.setWindowTitle(tr("Pascal NVENC reminder"));
+                box.setText(tr(
+                    "Your GPU is a Pascal-class card (GTX 10xx). Pascal consumer "
+                    "GPUs are limited to <b>2 concurrent NVENC encoder sessions</b> "
+                    "in hardware.<br><br>"
+                    "If <b>Discord</b>, <b>OBS</b>, or another screen-recording app "
+                    "is running it may be holding an encoder session and this "
+                    "export will fall back to CPU encoding (much slower).<br><br>"
+                    "Close those apps for the fastest HW-accelerated export. "
+                    "Continue anyway?"));
+                auto* dontShow = new QCheckBox(tr("Don't show this again"), &box);
+                box.setCheckBox(dontShow);
+                box.setStandardButtons(QMessageBox::Yes | QMessageBox::Cancel);
+                box.setDefaultButton(QMessageBox::Yes);
+                int rc = box.exec();
+                if (dontShow->isChecked()) {
+                    cfg.setValue(
+                        QStringLiteral("export/pascalNvencHintSuppressed"), true);
+                }
+                if (rc != QMessageBox::Yes) return;
+            }
+        }
+    }
+
     rememberExportDir(config.outputPath.string());
     uint32_t jobId = m_renderQueue->addJob(config);
     m_activeJobId = jobId;
@@ -1033,7 +1095,17 @@ void ExportPanel::onStartExport()
     m_renderQueue->setCompleteCallback(
         [this](uint32_t id, bool success, const std::string& msg) {
             if (m_destroying.load(std::memory_order_acquire)) return;
-            QMetaObject::invokeMethod(this, [this, id, success, msg]() {
+            // Snapshot the fallback state on the worker thread BEFORE
+            // queueing back to the UI — the job record may be reset by
+            // the time the lambda runs.
+            bool fellBack = false;
+            std::string fellBackReason;
+            if (const auto* j = m_renderQueue->job(id)) {
+                fellBack = j->fellBackToCpuEncoder;
+                fellBackReason = j->fellBackReason;
+            }
+            QMetaObject::invokeMethod(this,
+                [this, id, success, msg, fellBack, fellBackReason]() {
                 if (m_destroying.load(std::memory_order_acquire)) return;
                 m_pollTimer->stop();
                 m_startButton->setEnabled(true);
@@ -1045,6 +1117,19 @@ void ExportPanel::onStartExport()
                 if (success)
                     QApplication::beep();
                 emit exportFinished(id, success, QString::fromStdString(msg));
+
+                // Surface the silent HW→CPU fallback to the user.  The
+                // export still succeeded (or failed for its own reason)
+                // but the user is waiting much longer than expected and
+                // deserves to know why and how to fix it for next time.
+                if (fellBack && !fellBackReason.empty()) {
+                    QMessageBox box(this);
+                    box.setIcon(QMessageBox::Information);
+                    box.setWindowTitle(tr("Hardware encoder unavailable"));
+                    box.setText(QString::fromStdString(fellBackReason));
+                    box.setStandardButtons(QMessageBox::Ok);
+                    box.exec();
+                }
             });
         });
 

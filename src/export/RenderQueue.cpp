@@ -316,8 +316,23 @@ void RenderQueue::processJob(ExportJob& job, Timeline* timeline, Compositor* com
         spdlog::error("RndQ[{}]: Encoder::create returned null", job.id);
     }
     spdlog::info("RndQ[{}]: Step 2b — encoder init", job.id);
+    const HardwareAccel kRequestedAccel = job.config.encoderConfig.hwAccel;
     if (!encoder || !encoder->init(job.config.encoderConfig)) {
         // Fallback: try CPU encoding
+        // Record the fact so ExportPanel can surface a friendly toast.
+        // On NVIDIA Pascal consumer GPUs the most common cause is that
+        // another app (Discord / OBS / a previous export still draining)
+        // is holding the second NVENC session — Pascal hardware caps
+        // consumer encoders at 2 concurrent sessions and the NVENC API
+        // doesn't surface a distinct "session limit" error code, just
+        // a generic init failure.
+        if (kRequestedAccel != HardwareAccel::None) {
+            job.fellBackToCpuEncoder = true;
+            job.fellBackReason = "Hardware encoder unavailable. If another app is "
+                                 "using the GPU encoder (Discord / OBS / screen "
+                                 "recorders) close it and retry for HW encoding. "
+                                 "Continuing this export with CPU encoding (slower).";
+        }
         // WARNING: CPU encoding is very slow. This is a TEMPORARY LAST RESORT
         // only Ã¢â‚¬â€ fix the HW encoder path instead.
         spdlog::error("RndQ[{}]: HW encoder failed Ã¢â‚¬â€ falling back to SLOW CPU encoding", job.id);

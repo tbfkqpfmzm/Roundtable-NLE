@@ -115,6 +115,14 @@ struct ExportJob
     JobStatus       status{JobStatus::Queued};
     JobProgress     progress;
     std::string     error;
+
+    /// Set when the encoder requested for `config.encoderConfig.hwAccel`
+    /// failed to initialise and processJob silently fell back to CPU
+    /// encoding (see RenderQueue.cpp).  Used by ExportPanel to surface
+    /// the fallback to the user (a Pascal GPU with Discord/OBS running
+    /// will trip the 2-session NVENC cap and end up here).
+    bool            fellBackToCpuEncoder{false};
+    std::string     fellBackReason;
 };
 
 // ── Callbacks ───────────────────────────────────────────────────────────────

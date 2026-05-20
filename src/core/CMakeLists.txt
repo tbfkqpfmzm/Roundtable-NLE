@@ -13,6 +13,9 @@ add_library(roundtable_core STATIC
     # Crash handler
     CrashHandler.cpp
 
+    # Hardware diagnostics (overlay-hook detection + GPU classification)
+    HardwareDiagnostics.cpp
+
     # Timeline
     timeline/Timeline.cpp
     timeline/Track.cpp

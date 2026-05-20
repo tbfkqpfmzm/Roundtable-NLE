@@ -401,6 +401,11 @@ private:
     /// Destruction guard — checked by lambdas and callbacks.
     std::atomic<bool> m_destroying{false};
 
+    /// Re-entrancy guard for the Text tool empty-area click handler.
+    /// Prevents duplicate clip creation when the overlay click signal
+    /// fires twice on the first interaction after project open.
+    std::atomic<bool> m_textToolBusy{false};
+
 
 
 

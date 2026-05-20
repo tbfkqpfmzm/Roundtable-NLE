@@ -255,6 +255,16 @@ set_source_files_properties(
 # close / timeline destruction.
 set_source_files_properties(panels/audio/AudioMixer.cpp PROPERTIES COMPILE_FLAGS "/EHa")
 
+# /EHa for ExportPanel.cpp — the main-thread composite lambda in
+# pipelineComposite runs under Qt::QueuedConnection during export.  A
+# raised SEH there (e.g. 0x000006BA from an injected hook DLL while the
+# Vulkan ICD is mid-TDR) would otherwise propagate out of the lambda,
+# escape Qt's event-loop dispatcher, and kill the process while the
+# worker thread is blocked on the promise.  /EHa lets catch(...) inside
+# the lambda swallow the SEH and set the promise to null — the worker
+# then skips that one frame instead of deadlocking forever.
+set_source_files_properties(panels/export/ExportPanel.cpp PROPERTIES COMPILE_FLAGS "/EHa")
+
 target_include_directories(roundtable_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 # PCH — enabled May 3, 2026.

@@ -679,11 +679,19 @@ void TimelineWorkspace::updateTransformOverlay()
                                   text, &textBounds);
                 metricsP.end();
 
-                float pad = tl->fontSize() * 0.3f;
-                info.contentL = static_cast<float>(textBounds.left())   - pad;
-                info.contentT = static_cast<float>(textBounds.top())    - pad;
-                info.contentR = static_cast<float>(textBounds.right())  + pad;
-                info.contentB = static_cast<float>(textBounds.bottom()) + pad;
+                // Premiere-style breathing room around the glyphs. Two parts:
+                //   • Horizontal: side-bearing slack so the box doesn't kiss
+                //     the leftmost/rightmost ink (which would put the corner
+                //     scale handles ON the glyphs).
+                //   • Vertical: a fraction of font height — text ascenders/
+                //     descenders vary, but ~25% of one line height matches
+                //     Premiere's clear margin above caps and below descenders.
+                const float horizPad = tl->fontSize() * 0.45f;
+                const float vertPad  = tl->fontSize() * 0.40f;
+                info.contentL = static_cast<float>(textBounds.left())   - horizPad;
+                info.contentT = static_cast<float>(textBounds.top())    - vertPad;
+                info.contentR = static_cast<float>(textBounds.right())  + horizPad;
+                info.contentB = static_cast<float>(textBounds.bottom()) + vertPad;
 
                 spdlog::info("[Overlay] text='{}' outW={} outH={} textBounds=({:.1f},{:.1f},{:.1f},{:.1f}) "
                              "content=({:.1f},{:.1f},{:.1f},{:.1f}) posX={:.1f} posY={:.1f} scX={:.2f} scY={:.2f}",

@@ -33,8 +33,10 @@
 #include "viewport/TransformOverlayWidget.h"
 
 #include "command/CommandStack.h"
+#include "command/CompoundCommand.h"
 #include "command/LambdaCommand.h"
 #include "command/commands/ClipCommands.h"
+#include "command/commands/TrackCommands.h"
 #include "command/commands/MarkerCommands.h"
 #include "command/commands/TransitionCmds.h"
 #include "command/commands/EffectCommands.h"
@@ -1186,7 +1188,16 @@ void TimelineWorkspace::wireClipSelectionSignals() {
             skipHitTest:
             if (m_timelinePanel->activeTool() != EditTool::Text) return;
 
-            // Find the topmost video track
+            // Re-entrancy guard: if the overlay click signal fires twice
+            // (seen on first interaction after project open), only process
+            // the first one to avoid duplicate clip creation.
+            if (m_textToolBusy.exchange(true, std::memory_order_acquire)) return;
+            // Ensure the guard is cleared when this scope exits, including
+            // early returns below.
+            struct BusyGuard { std::atomic<bool>& flag; ~BusyGuard() { flag.store(false, std::memory_order_release); } };
+            BusyGuard guard{m_textToolBusy};
+
+            // Find the topmost video track.
             Track* targetTrack = nullptr;
             size_t targetTrackIdx = 0;
             for (size_t ti = 0; ti < m_timeline->trackCount(); ++ti) {
@@ -1197,22 +1208,77 @@ void TimelineWorkspace::wireClipSelectionSignals() {
                     break;
                 }
             }
-            if (!targetTrack) return;
 
             // Get playhead position
             int64_t tick = 0;
             if (m_playbackController)
                 tick = m_playbackController->currentTick();
 
-            // Check if track is occupied at this position
-            for (size_t ci = 0; ci < targetTrack->clipCount(); ++ci) {
-                const Clip* c = targetTrack->clip(ci);
-                if (tick >= c->timelineIn() && tick < c->timelineOut())
-                    return; // occupied
+            // Check if the topmost track is occupied at this position.
+            bool topmostOccupied = false;
+            if (targetTrack) {
+                for (size_t ci = 0; ci < targetTrack->clipCount(); ++ci) {
+                    const Clip* c = targetTrack->clip(ci);
+                    if (tick >= c->timelineIn() && tick < c->timelineOut()) {
+                        topmostOccupied = true;
+                        break;
+                    }
+                }
             }
 
-            // Create a 5-second GraphicClip with a TextLayer
+            // If no video track exists yet or the topmost one is occupied,
+            // create a new video track so the text click always succeeds
+            // (Premiere Pro behaviour).  The new track goes straight to
+            // index 0 so text layers are always the topmost element.
+            std::unique_ptr<CompoundCommand> textCompound;
+            bool createdNewTrack = false;
+            if (!targetTrack || topmostOccupied) {
+                // Build a name that matches addVideoTrack() numbering.
+                int videoCount = 0;
+                for (size_t ti2 = 0; ti2 < m_timeline->trackCount(); ++ti2) {
+                    auto* t = m_timeline->track(ti2);
+                    if (t && t->type() == TrackType::Video && !t->isDivider())
+                        ++videoCount;
+                }
+                std::string trackName = "V" + std::to_string(videoCount + 1);
+
+                auto newTrack = std::make_unique<Track>(TrackType::Video, trackName);
+                targetTrack = newTrack.get();
+                m_timeline->insertTrack(0, std::move(newTrack));
+                targetTrackIdx = 0;
+                createdNewTrack = true;
+
+                if (m_commandStack) {
+                    textCompound = std::make_unique<CompoundCommand>("Add Text Layer");
+                    // Undo: remove the track we just inserted at index 0.
+                    Timeline* tl = m_timeline;
+                    textCompound->addExecuted(std::make_unique<LambdaCommand>(
+                        "Add Track",
+                        [](){},  // already executed above
+                        [tl](){
+                            if (tl && tl->trackCount() > 0)
+                                tl->removeTrack(0);
+                        }));
+                }
+
+                if (!targetTrack) return;
+
+                spdlog::info("[TextTool] created new top track '{}'", trackName);
+            }
+
+            // Create a GraphicClip with a TextLayer.  Duration is 5 seconds
+            // by default, but capped so the clip never spills into the next
+            // clip on the same track (both clips occupying the same time
+            // range causes compositing errors).
             int64_t duration = kTicksPerSecond * 5;
+            for (size_t ci = 0; ci < targetTrack->clipCount(); ++ci) {
+                const Clip* c = targetTrack->clip(ci);
+                if (c->timelineIn() > tick) {
+                    int64_t gap = c->timelineIn() - tick;
+                    if (gap < duration) duration = gap;
+                    break; // clips are ordered, first after tick is the nearest
+                }
+            }
             auto gc = std::make_unique<GraphicClip>();
             gc->setTimelineIn(tick);
             gc->setDuration(duration);
@@ -1238,6 +1304,16 @@ void TimelineWorkspace::wireClipSelectionSignals() {
             uint32_t compH = m_programMonitor->compositeHeight();
             uint32_t canvasW = 0, canvasH = 0;
             graphicCanvasRes(canvasW, canvasH);
+            // Scale the default font size to project resolution. The TextLayer
+            // default (72 pt) is sized for a 1080-tall canvas; renderGraphicClip
+            // rasterises into the project canvas without rescaling by resolution,
+            // so 72 pt in a 2160 canvas covers half the relative height of 1080,
+            // making the default look tiny on 4K projects. Anchor at 1080.
+            if (canvasH > 0) {
+                const float scaledFontSize =
+                    tl->fontSize() * (static_cast<float>(canvasH) / 1080.0f);
+                tl->setFontSize(scaledFontSize);
+            }
             if (compW == 0) compW = canvasW;
             if (compH == 0) compH = canvasH;
             const float nx = static_cast<float>(frameX) / static_cast<float>(compW);
@@ -1256,7 +1332,12 @@ void TimelineWorkspace::wireClipSelectionSignals() {
             // text layer (previously addClip() was called directly, leaving
             // nothing on the undo stack).
             const uint64_t newClipId = gc->id();
-            if (m_commandStack) {
+            if (textCompound) {
+                auto clipCmd = std::make_unique<AddClipCommand>(targetTrack, std::move(gc));
+                clipCmd->execute();
+                textCompound->addExecuted(std::move(clipCmd));
+                m_commandStack->pushWithoutExecute(std::move(textCompound));
+            } else if (m_commandStack) {
                 m_commandStack->execute(
                     std::make_unique<AddClipCommand>(targetTrack, std::move(gc)));
             } else {
@@ -1275,8 +1356,14 @@ void TimelineWorkspace::wireClipSelectionSignals() {
             m_selectedClipIdx = clipIdx;
             m_selectedGraphicLayerIdx = -1;
 
-            // Refresh everything
-            if (m_timelinePanel) m_timelinePanel->refreshTrackContents();
+            // Refresh everything — rebuildTracks if the track set changed,
+            // otherwise just refresh the contents of existing widgets.
+            if (m_timelinePanel) {
+                if (createdNewTrack)
+                    m_timelinePanel->rebuildTracks();
+                else
+                    m_timelinePanel->refreshTrackContents();
+            }
             invalidateCompositeCache();
             if (m_programMonitor) m_programMonitor->requestRefresh();
 
@@ -1333,15 +1420,39 @@ void TimelineWorkspace::wireClipSelectionSignals() {
             if (!fills.empty())
                 textColor = QColor::fromRgba(fills.front().color);
 
-            // Snapshot the current text and clear the layer's text so the
-            // rendered text doesn't show through behind the editor box
-            // while typing (Premiere Pro). Restored or replaced on commit.
+            // Snapshot the current text and update the overlay BEFORE
+            // clearing the text, so computeOverlayCorners can measure the
+            // content bounds from the original text (otherwise the overlay
+            // may have stale/zero bounds, causing beginInlineTextEdit to
+            // fall back to a huge default box).
             m_preEditOriginalText = tl->text();
             m_inlineTextEditActive = true;
+
+            // Sync m_selectedGraphicLayerIdx to the layer we're about to
+            // edit. updateTransformOverlay()'s per-layer branch is gated
+            // on this index (>= 0); when it's -1 the overlay falls back
+            // to a full-frame box, whose centroid is the frame center —
+            // making the editor appear dead-center on the first edit of a
+            // freshly-created text clip (the GraphicsEditorPanel's
+            // layerSelected signal hasn't propagated yet for a brand-new
+            // clip auto-selected by setClip). selectedLayer() is the
+            // authoritative source, so derive the index directly.
+            if (m_selectedClip &&
+                m_selectedClip->clipType() == ClipType::Graphic) {
+                auto* gc = static_cast<GraphicClip*>(m_selectedClip);
+                size_t idx = gc->findLayerIndex(tl->layerId());
+                if (idx != SIZE_MAX)
+                    m_selectedGraphicLayerIdx = static_cast<int>(idx);
+            }
+
+            // Force a synchronous overlay update with the current text bounds.
+            updateTransformOverlay();
+
+            // Now clear the text for compositing so it doesn't show behind
+            // the editor box (Premiere Pro).
             tl->setText(std::string{});
             invalidateCompositeCache();
             if (m_programMonitor) m_programMonitor->requestRefresh();
-            scheduleOverlayRefresh();
 
             // Pass the layer's font in REFERENCE units. The renderer
             // multiplies the rasterised glyphs by the layer's vertical

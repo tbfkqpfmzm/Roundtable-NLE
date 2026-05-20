@@ -25,6 +25,9 @@ FetchContent_Declare(glm
     GIT_TAG        1.0.1
     GIT_SHALLOW    TRUE
 )
+# GLM is header-only; disable building the library target to avoid
+# CMake 3.31+ errors when it tries to compile *.md files as sources.
+set(GLM_BUILD_LIBRARY OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(glm)
 
 # ─── Google Test ─────────────────────────────────────────────────────────────
@@ -71,7 +74,7 @@ FetchContent_MakeAvailable(vma)
 # ─── stb (single-header image/truetype libs) ─────────────────────────────────
 FetchContent_Declare(stb
     GIT_REPOSITORY https://github.com/nothings/stb.git
-    GIT_TAG        master  # stb doesn't tag releases
+    GIT_TAG        31c1ad37456438565541f4919958214b6e762fb4  # pinned commit (stb doesn't tag releases)
     GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(stb)
