@@ -94,13 +94,21 @@ std::shared_ptr<CachedFrame> CompositeService::resolveMediaFrame(
         }
         return frame;
     }
-    // During timeline scrub, avoid blocking decode (would hold the
-    // compositor mutex for 50-500ms, causing the program monitor to
-    // freeze on a stale m_lastGoodComposite).  The scrub settle loop
-    // will re-try next cycle when the prefetch has landed the frame.
-    if (scrubMode)
-        return nullptr;
-    // Fall back to blocking read (correct path for cold cache).
+    // Cache miss path.
+    //
+    // Both scrub and playback fall through to MediaPool::getFrame, which
+    // routes scrubMode requests through the dedicated NVDEC-backed scrub
+    // decoder (lock-free relative to m_mutex). Cold scrub positions now
+    // decode inline in ~5-15 ms (NVDEC) instead of waiting for the
+    // prefetch worker to land — the previous "scrubMode → nullptr" guard
+    // dated from when the scrub decoder was forced software (50-500 ms
+    // per seek would freeze the compositor mutex; that risk is gone with
+    // NVDEC). The compositor mutex is held during the call, but at NVDEC
+    // speeds the hold is shorter than one 60fps tick, which is comparable
+    // to a normal composite. Playback (scrubMode=false) still resolves
+    // via the non-blocking path inside getFrame — it returns stale or
+    // null without inline decoding, matching the "never stall the render
+    // thread" design.
     return m_mediaPool->getFrame(handle, frameNumber, tier, scrubMode);
 }
 

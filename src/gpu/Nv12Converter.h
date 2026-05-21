@@ -23,6 +23,7 @@
 #include "vulkan/Buffer.h"
 
 #include <cstdint>
+#include <mutex>
 #include <vector>
 #include <vulkan/vulkan.h>
 
@@ -139,6 +140,29 @@ public:
     /// Read back BGRA pixels to CPU.  Synchronous (allocates cmd + waits).
     bool readbackOutput(std::vector<uint8_t>& outPixels);
 
+    // ── Thread-safe combined convert + readback ────────────────────────
+    //
+    // Holds an internal mutex AND the GpuContext compute-queue mutex across
+    // the convert + readback pair, so the result cannot be clobbered by a
+    // racing caller between submit and copy-back. Prefetch workers (off the
+    // compositor thread) use these to do NV12/YUV420P → BGRA + downscale on
+    // the GPU instead of CPU sws_scale, then materialise the result back to
+    // CPU pixels (still needed for FrameCache + disk cache + the compositor
+    // upload path). Returns false on any failure — caller falls back to
+    // sws_scale.
+    bool convertAndReadbackNV12Scaled(const uint8_t* yData, int yLinesize,
+                                       const uint8_t* uvData, int uvLinesize,
+                                       uint32_t srcW, uint32_t srcH,
+                                       uint32_t dstW, uint32_t dstH,
+                                       std::vector<uint8_t>& outPixels);
+
+    bool convertAndReadbackYuv420pScaled(const uint8_t* yData, int yLinesize,
+                                          const uint8_t* uData, int uLinesize,
+                                          const uint8_t* vData, int vLinesize,
+                                          uint32_t srcW, uint32_t srcH,
+                                          uint32_t dstW, uint32_t dstH,
+                                          std::vector<uint8_t>& outPixels);
+
 private:
     bool createTextures();
     bool createDescriptorResources();
@@ -181,6 +205,11 @@ private:
     VkPipeline            m_yuv420pPipeline{VK_NULL_HANDLE};
     VkShaderModule        m_yuv420pShaderModule{VK_NULL_HANDLE};
 
+    // Serialises convertAndReadback* against concurrent prefetch-worker
+    // calls. The plain convertSync*/readbackOutput methods are NOT
+    // protected by this — callers using them directly must serialise
+    // externally (today the only direct caller is dead code).
+    mutable std::mutex m_apiMutex;
 };
 
 } // namespace rt

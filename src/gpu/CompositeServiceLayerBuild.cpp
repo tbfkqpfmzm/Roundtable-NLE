@@ -411,9 +411,23 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
                 // the dropdown setting — the user picked Full and the
                 // character preview stayed blurry. forceFullResolution
                 // from ExportPanel still wins for the export/preview path.)
-                const auto charVideoTier = m_forceFullResolution.load()
+                //
+                // Scrub override: during timeline scrub at Full tier, decode
+                // at Half. The Program Monitor already renders scrub composites
+                // at output/2 (ProgramMonitor::onPollTimer "resDivisor * 2"),
+                // so a Full-tier media decode is 4× the cost for pixels that
+                // get downscaled away. Premiere does the same — scrubs use a
+                // lower-quality preview. forceFullResolution (export) still
+                // gets Full. Half/Quarter playback already scrubs at the same
+                // tier and would only over-reduce if we generalized further.
+                auto baseVideoTier = m_forceFullResolution.load()
                     ? ResolutionTier::Full
                     : playbackTier();
+                const auto charVideoTier = (scrubMode
+                                            && !m_forceFullResolution.load()
+                                            && baseVideoTier == ResolutionTier::Full)
+                    ? ResolutionTier::Half
+                    : baseVideoTier;
 
                 // Clamp frame number to valid range.
                 // For video characters, wrap with modulo so the animation
@@ -639,11 +653,22 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
                             }
 
                             // Ã¢â€â‚¬Ã¢â€‚¬ DIRTY TRACKING: Skip decode for pre-rendered spine Ã¢â€â‚¬Ã¢â€â‚¬
+                            // Pre-rendered spine tier: matches VideoClip logic
+                            // (drop Full->Half during scrub since composite
+                            // output is already halved by ProgramMonitor).
+                            auto baseSpineTier = m_forceFullResolution.load()
+                                ? ResolutionTier::Full
+                                : playbackTier();
+                            const auto spineVideoTier = (scrubMode
+                                                         && !m_forceFullResolution.load()
+                                                         && baseSpineTier == ResolutionTier::Full)
+                                ? ResolutionTier::Half
+                                : baseSpineTier;
+
                             auto* texCache2 = m_engine ? m_engine->textureCache() : nullptr;
                             if (texCache2 && m_engine->isGpuCompositeEnabled()) {
                                 auto gpuHit = texCache2->get(animHandle, animFrame,
-                                    static_cast<uint8_t>(m_forceFullResolution.load()
-                                        ? ResolutionTier::Full : playbackTier()));
+                                    static_cast<uint8_t>(spineVideoTier));
                                 if (gpuHit.found) {
                                     LayerInfo layer;
                                     layer.gpuTextureReady = true;
@@ -703,7 +728,7 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
                             // character resolution in the source-monitor
                             // sequence preview.
                             frame = resolveMediaFrame(animHandle, animFrame,
-                                                    m_forceFullResolution.load() ? ResolutionTier::Full : playbackTier(), scrubMode);
+                                                    spineVideoTier, scrubMode);
                             if (frame) {
                                 // Packed-alpha unpack is now handled by:
                                 //   - GPU path: compositor shader isPacked UV split

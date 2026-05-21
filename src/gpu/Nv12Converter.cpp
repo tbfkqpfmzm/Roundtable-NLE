@@ -187,6 +187,39 @@ VkDescriptorImageInfo Nv12Converter::outputDescriptorInfo() const
     return m_outputTexture.descriptorInfo();
 }
 
+bool Nv12Converter::convertAndReadbackNV12Scaled(
+    const uint8_t* yData, int yLinesize,
+    const uint8_t* uvData, int uvLinesize,
+    uint32_t srcW, uint32_t srcH,
+    uint32_t dstW, uint32_t dstH,
+    std::vector<uint8_t>& outPixels)
+{
+    if (!m_initialized) return false;
+    std::lock_guard<std::mutex> apiLock(m_apiMutex);
+    std::lock_guard<std::mutex> qLock(GpuContext::get().computeQueueMutex());
+    if (!convertSyncScaled(yData, yLinesize, uvData, uvLinesize,
+                           srcW, srcH, dstW, dstH))
+        return false;
+    return readbackOutput(outPixels);
+}
+
+bool Nv12Converter::convertAndReadbackYuv420pScaled(
+    const uint8_t* yData, int yLinesize,
+    const uint8_t* uData, int uLinesize,
+    const uint8_t* vData, int vLinesize,
+    uint32_t srcW, uint32_t srcH,
+    uint32_t dstW, uint32_t dstH,
+    std::vector<uint8_t>& outPixels)
+{
+    if (!m_initialized) return false;
+    std::lock_guard<std::mutex> apiLock(m_apiMutex);
+    std::lock_guard<std::mutex> qLock(GpuContext::get().computeQueueMutex());
+    if (!convertYuv420pSyncScaled(yData, yLinesize, uData, uLinesize,
+                                   vData, vLinesize, srcW, srcH, dstW, dstH))
+        return false;
+    return readbackOutput(outPixels);
+}
+
 bool Nv12Converter::readbackOutput(std::vector<uint8_t>& outPixels)
 {
     if (!m_initialized || !m_cmdPool || !m_allocator) return false;

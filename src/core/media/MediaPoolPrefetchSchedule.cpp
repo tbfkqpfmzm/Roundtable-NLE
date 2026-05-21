@@ -211,11 +211,18 @@ void MediaPool::prefetchWorker(int workerId)
                         }
                     }
                     if (sawTask) {
-                        const bool swHoldsNvdecCapable =
-                            (workerId >= PREFETCH_NVDEC_WORKERS) && !anyPackedAlpha;
+                        // Only NVDEC-vs-packed-alpha is a hard mismatch:
+                        // NVDEC cannot decode packed-alpha sources, so an
+                        // NVDEC worker that took ownership of one must hand
+                        // it back to a SW worker. Plain (non-packed) video
+                        // is fine on either pool, so we no longer evict a
+                        // SW worker that owns a non-packed handle — that
+                        // change is what lets SW workers help on plain
+                        // H.264, instead of yielding back to the two NVDEC
+                        // workers and starving the cache during cold-start.
                         const bool nvdecHoldsAlpha =
                             (workerId < PREFETCH_NVDEC_WORKERS) && anyPackedAlpha;
-                        if (swHoldsNvdecCapable || nvdecHoldsAlpha) {
+                        if (nvdecHoldsAlpha) {
                             auto dit = decoders.find(it->first);
                             if (dit != decoders.end()) {
 #ifdef ROUNDTABLE_HAS_FFMPEG
@@ -234,9 +241,18 @@ void MediaPool::prefetchWorker(int workerId)
             }
 
             // Per-handle ownership: one worker per handle for sequential decode.
+            // Affinity:
+            //   - NVDEC workers (id < PREFETCH_NVDEC_WORKERS) refuse packed-alpha
+            //     tasks because NVDEC cannot decode them.
+            //   - SW workers (id >= PREFETCH_NVDEC_WORKERS) accept BOTH packed
+            //     and plain video. Previously SW workers refused non-packed
+            //     tasks, which meant only the 2 NVDEC workers could prefetch
+            //     plain H.264 — and per-handle ownership reduced that to 1
+            //     effective worker per file. The 8 SW workers sat idle during
+            //     cold-start, starving the FrameCache. With this relaxed rule
+            //     SW workers help fill the cache for plain video, particularly
+            //     when several H.264 clips are first encountered together.
             auto acceptable = [&](const PrefetchTask& t) -> bool {
-                if (workerId >= PREFETCH_NVDEC_WORKERS && !t.packedAlpha)
-                    return false;
                 if (workerId < PREFETCH_NVDEC_WORKERS && t.packedAlpha)
                     return false;
                 auto ownerIt = m_prefetchPackedOwner.find(t.handle);

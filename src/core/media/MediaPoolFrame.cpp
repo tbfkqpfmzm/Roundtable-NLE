@@ -56,11 +56,17 @@ PrefetchDecoderState& MediaPool::getScrubDecoder(
     auto& state = m_scrubDecoders[handle];
     if (!state.decoder) {
         state.decoder = std::make_unique<VideoDecoder>();
-        // forceSoftware=true (NVDEC cold-init is 650ms), maxThreads=2,
-        // sliceOnlyThreading=true (scrub decoders seek constantly —
+        // forceSoftware=false (use NVDEC if available): on H.264 NVDEC decodes
+        // ~5–10× faster per frame than 2-thread software, which is what cold
+        // scrubbing actually pays per position (keyframe seek + GOP forward).
+        // The trade is one 500–650 ms NVDEC init the first time this clip is
+        // scrubbed; every scrub after that is dramatically faster, instead of
+        // every scrub paying SW GOP cost forever. VideoDecoder::open falls
+        // back to software automatically if NVDEC/D3D11VA/QSV are all unavailable.
+        // sliceOnlyThreading=true is retained for the SW fallback path —
         // FF_THREAD_FRAME causes H.264 reference frame corruption after
-        // avcodec_flush_buffers, producing distorted multi-copy artifacts)
-        if (!state.decoder->open(path, /*forceSoftware=*/true, /*maxThreads=*/2, /*sliceOnlyThreading=*/true)) {
+        // avcodec_flush_buffers, producing distorted multi-copy artifacts.
+        if (!state.decoder->open(path, /*forceSoftware=*/false, /*maxThreads=*/2, /*sliceOnlyThreading=*/true)) {
             spdlog::warn("MediaPool: scrub decoder open failed for handle={}", handle);
             state.decoder.reset();
         }
