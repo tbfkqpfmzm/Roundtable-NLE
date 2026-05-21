@@ -251,13 +251,51 @@ bool shouldLogAudioPerfSnapshot(uint64_t value)
     return value > 0 && (value % 16) == 0;
 }
 
+// Compute how many ticks BEFORE this clip's natural start and AFTER its
+// natural end we should pre-roll source samples so cross-dissolve
+// transitions can actually crossfade (instead of fading down to silence
+// then back up). Only true cross-dissolves — those with BOTH a left and
+// a right clip — request extension; pure fade-in/fade-out transitions
+// fit inside the clip's range already.
+struct ClipTransitionExtension {
+    int64_t beforeTicks{0};
+    int64_t afterTicks{0};
+};
+ClipTransitionExtension computeClipTransitionExtension(const Track* track, uint64_t clipId)
+{
+    ClipTransitionExtension ext;
+    if (!track) return ext;
+    for (size_t i = 0; i < track->transitionCount(); ++i) {
+        const Transition* t = track->transition(i);
+        if (!t) continue;
+        // Need both sides for a true crossfade — pure fades don't need handles.
+        if (t->leftClipId == 0 || t->rightClipId == 0) continue;
+        int64_t tStart, tEnd;
+        t->getRange(tStart, tEnd);
+        if (t->leftClipId == clipId) {
+            const int64_t after = tEnd - t->editPointTick;
+            if (after > ext.afterTicks) ext.afterTicks = after;
+        }
+        if (t->rightClipId == clipId) {
+            const int64_t before = t->editPointTick - tStart;
+            if (before > ext.beforeTicks) ext.beforeTicks = before;
+        }
+    }
+    return ext;
+}
+
 std::optional<TimelineAudioRegion> computeTimelineAudioRegion(const AudioClip& clip,
-                                                              const TimelineAudioWindow* window)
+                                                              const TimelineAudioWindow* window,
+                                                              int64_t extendBeforeTicks = 0,
+                                                              int64_t extendAfterTicks  = 0)
 {
     const int64_t clipTimelineStart = clip.timelineIn();
     const int64_t clipTimelineEnd   = clipTimelineStart + clip.duration();
-    int64_t regionTimelineStart = clipTimelineStart;
-    int64_t regionTimelineEnd   = clipTimelineEnd;
+
+    // Expand the clip's playable timeline range to cover cross-dissolve
+    // handles, then let the window/source-file edges clip back.
+    int64_t regionTimelineStart = clipTimelineStart - extendBeforeTicks;
+    int64_t regionTimelineEnd   = clipTimelineEnd   + extendAfterTicks;
 
     if (window) {
         regionTimelineStart = std::max(regionTimelineStart, window->startFrame);
@@ -266,10 +304,25 @@ std::optional<TimelineAudioRegion> computeTimelineAudioRegion(const AudioClip& c
     }
 
     const double absSpeed = std::max(0.000001, std::abs(clip.speed()));
-    const int64_t clipTimelineOffset  = std::max<int64_t>(0, regionTimelineStart - clipTimelineStart);
-    const int64_t regionTimelineFrames = std::max<int64_t>(1, regionTimelineEnd - regionTimelineStart);
-    const int64_t sourceStartFrame = clip.sourceIn() + static_cast<int64_t>(std::floor(
+    // clipTimelineOffset is NEGATIVE when the region pre-rolls before
+    // the clip's natural start. The source frame can correspondingly
+    // sit before sourceIn — clamp to file start if there's not enough
+    // source handle, and shift regionTimelineStart to stay aligned.
+    int64_t clipTimelineOffset  = regionTimelineStart - clipTimelineStart;
+    int64_t sourceStartFrame = clip.sourceIn() + static_cast<int64_t>(std::floor(
         static_cast<double>(clipTimelineOffset) * absSpeed));
+    if (sourceStartFrame < 0) {
+        const int64_t deficitSrc = -sourceStartFrame;
+        const int64_t shiftTicks = static_cast<int64_t>(std::ceil(
+            static_cast<double>(deficitSrc) / absSpeed));
+        regionTimelineStart += shiftTicks;
+        clipTimelineOffset   = regionTimelineStart - clipTimelineStart;
+        sourceStartFrame = clip.sourceIn() + static_cast<int64_t>(std::floor(
+            static_cast<double>(clipTimelineOffset) * absSpeed));
+        if (sourceStartFrame < 0) sourceStartFrame = 0;
+        if (regionTimelineEnd <= regionTimelineStart) return std::nullopt;
+    }
+    const int64_t regionTimelineFrames = std::max<int64_t>(1, regionTimelineEnd - regionTimelineStart);
     const int64_t sourceFrameCount = std::max<int64_t>(1, static_cast<int64_t>(std::ceil(
         static_cast<double>(regionTimelineFrames) * absSpeed)));
 
@@ -277,7 +330,10 @@ std::optional<TimelineAudioRegion> computeTimelineAudioRegion(const AudioClip& c
     region.timelineStartFrame    = regionTimelineStart;
     region.sourceStartFrame      = sourceStartFrame;
     region.sourceFrameCount      = sourceFrameCount;
-    region.clipSourceOffsetFrames = std::max<int64_t>(0, sourceStartFrame - clip.sourceIn());
+    // Can be NEGATIVE when the buffer starts before sourceIn — the
+    // fade-envelope math relies on this so a cross-dissolve fade-in
+    // ramps up over the pre-roll handle.
+    region.clipSourceOffsetFrames = sourceStartFrame - clip.sourceIn();
     region.fullClipSourceFrames  = std::max<int64_t>(1, requestedClipSourceFrames(clip));
     return region;
 }
@@ -483,7 +539,13 @@ void AudioPlaybackService::loadSources(bool allowBlockingMisses)
             }
             auto provider = std::static_pointer_cast<TimelineAudioWindowProvider>(providerIt->second);
 
-            const auto region = computeTimelineAudioRegion(*audioClip, &audioWindow);
+            // Pre-roll source handles on either side so cross-dissolve
+            // transitions can actually overlap both clips' audio (without
+            // this, Ctrl+T crossfade audibly faded to silence at the cut).
+            const auto clipExt = computeClipTransitionExtension(track, clipId);
+            const auto region = computeTimelineAudioRegion(
+                *audioClip, &audioWindow,
+                clipExt.beforeTicks, clipExt.afterTicks);
             std::shared_ptr<std::vector<float>> buffer;
             uint32_t ch = 0;
             int64_t cachedFrames = 0;
@@ -637,16 +699,22 @@ void AudioPlaybackService::loadSources(bool allowBlockingMisses)
                     const int64_t tDur = tEnd - tStart;
                     if (tDur <= 0) continue;
 
+                    // NOTE: fadeStartFrame / fadeEndFrame are intentionally
+                    // NOT clamped to [0, fullClipSourceFrames]. A cross-dissolve
+                    // transition straddles the cut, so for the LEFT clip
+                    // fadeEnd lies PAST the clip's natural end (we pre-rolled
+                    // a source handle for it above), and for the RIGHT clip
+                    // fadeStart lies BEFORE its natural start. Clamping those
+                    // collapsed the crossfade into a fade-out-to-silence-then-
+                    // fade-in, which is what users were hearing.
                     if (trans->leftClipId == clipId) {
-                        const float fadeStartFrame = std::clamp<float>(
-                            static_cast<float>(tStart - tlIn), 0.0f, static_cast<float>(fullClipSourceFrames));
-                        const float fadeEndFrame = std::clamp<float>(
-                            static_cast<float>(tEnd - tlIn), 0.0f, static_cast<float>(fullClipSourceFrames));
+                        const float fadeStartFrame = static_cast<float>(tStart - tlIn);
+                        const float fadeEndFrame   = static_cast<float>(tEnd   - tlIn);
                         auto prevEnv = src.fadeEnvelope;
                         src.fadeEnvelope = [prevEnv, fadeStartFrame, fadeEndFrame, provider](float pos) {
                             float v = 1.0f;
                             const float clipFrame = provider->clipFrameForNormalizedPosition(pos);
-                            if (clipFrame >= 0.0f && clipFrame >= fadeStartFrame && fadeEndFrame > fadeStartFrame) {
+                            if (clipFrame >= fadeStartFrame && fadeEndFrame > fadeStartFrame) {
                                 const float t = (clipFrame - fadeStartFrame) / (fadeEndFrame - fadeStartFrame);
                                 v = 1.0f - std::clamp(t, 0.0f, 1.0f);
                             }
@@ -654,15 +722,13 @@ void AudioPlaybackService::loadSources(bool allowBlockingMisses)
                         };
                     }
                     if (trans->rightClipId == clipId) {
-                        const float fadeStartFrame = std::clamp<float>(
-                            static_cast<float>(tStart - tlIn), 0.0f, static_cast<float>(fullClipSourceFrames));
-                        const float fadeEndFrame = std::clamp<float>(
-                            static_cast<float>(tEnd - tlIn), 0.0f, static_cast<float>(fullClipSourceFrames));
+                        const float fadeStartFrame = static_cast<float>(tStart - tlIn);
+                        const float fadeEndFrame   = static_cast<float>(tEnd   - tlIn);
                         auto prevEnv = src.fadeEnvelope;
                         src.fadeEnvelope = [prevEnv, fadeStartFrame, fadeEndFrame, provider](float pos) {
                             float v = 1.0f;
                             const float clipFrame = provider->clipFrameForNormalizedPosition(pos);
-                            if (clipFrame >= 0.0f && clipFrame <= fadeEndFrame && fadeEndFrame > fadeStartFrame) {
+                            if (clipFrame <= fadeEndFrame && fadeEndFrame > fadeStartFrame) {
                                 const float t = (clipFrame - fadeStartFrame) / (fadeEndFrame - fadeStartFrame);
                                 v = std::clamp(t, 0.0f, 1.0f);
                             }

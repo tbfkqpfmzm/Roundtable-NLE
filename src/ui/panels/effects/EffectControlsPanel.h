@@ -334,6 +334,10 @@ private:
     void buildPropertyTree();
     void clearPropertyTree();
     void populateFromClip();
+    /// True when one of this panel's spinboxes currently has keyboard
+    /// focus — used to avoid clobbering a typed value with a playback
+    /// tick's evaluated value before the user commits.
+    [[nodiscard]] bool isAnySpinBoxBeingEdited() const;
     void deleteEffect(size_t index);
 
     /// Build Ultra Key grouped sections (key color, matte gen, cleanup, spill, CC)

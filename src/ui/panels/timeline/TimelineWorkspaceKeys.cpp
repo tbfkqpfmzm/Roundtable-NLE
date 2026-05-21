@@ -14,13 +14,20 @@
 #include "panels/timeline/TimelinePanel.h"
 
 #include "command/CommandStack.h"
+#include "command/CompoundCommand.h"
+#include "command/commands/ClipCommands.h"
 #include "command/commands/MarkerCommands.h"
 #include "command/commands/TransitionCmds.h"
 #include "media/MediaPool.h"
 #include "media/PlaybackController.h"
+#include "project/Project.h"
+#include "timeline/Clip.h"
 #include "timeline/EditOperations.h"
 #include "timeline/Timeline.h"
 #include "timeline/Track.h"
+
+#include <algorithm>
+#include <limits>
 
 #include <QApplication>
 #include <QCursor>
@@ -322,19 +329,72 @@ void TimelineWorkspace::keyPressEvent(QKeyEvent* event)
     }
 
     // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ , = Insert edit (paste-insert at playhead) ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
-    if (noMod && key == Qt::Key_Comma) {
-        if (m_timeline && m_playbackController && m_commandStack && m_timelinePanel) {
-            int64_t tick = m_playbackController->currentTick();
-            auto cmd = EditOperations::pasteInsert(
-                *m_timeline, m_timelinePanel->clipboard(), tick);
-            if (cmd) {
-                m_commandStack->execute(std::move(cmd));
-                m_timelinePanel->refreshTrackContents();
-                invalidateAudioSources();
-                invalidateCompositeCache();
-                updateTransformOverlay();
-                if (m_programMonitor) m_programMonitor->requestRefresh();
-                schedulePostEditWork();
+    // ── Nudge selected clips by frame(s) ────────────────────────────────
+    //   ,            — 1 frame left           .            — 1 frame right
+    //   Shift + ,    — 5 frames left          Shift + .    — 5 frames right
+    // Qt reports shifted comma/period as Less/Greater on most keyboards,
+    // so we accept both forms.
+    const bool keyLeft  = (key == Qt::Key_Comma  || key == Qt::Key_Less);
+    const bool keyRight = (key == Qt::Key_Period || key == Qt::Key_Greater);
+    if ((keyLeft || keyRight) && (noMod || shiftOnly)) {
+        if (m_timeline && m_commandStack && m_timelinePanel && m_project) {
+            const auto& selClips = m_timelinePanel->selection().clips();
+            if (!selClips.empty()) {
+                const int64_t ticksPerFrame = m_project->settings().ticksPerFrame();
+                const int frames = (shiftOnly ? 5 : 1) * (keyLeft ? -1 : 1);
+                int64_t deltaTicks = frames * ticksPerFrame;
+
+                // Group-floor clamp: never let the leftmost selected clip
+                // slide past tick 0 (matches the drag-move group clamp).
+                int64_t minIn = std::numeric_limits<int64_t>::max();
+                for (const auto& sel : selClips) {
+                    Track* tr = m_timeline->track(sel.trackIndex);
+                    if (!tr) continue;
+                    size_t ci = tr->findClipIndexById(sel.clipId);
+                    if (ci >= tr->clipCount()) continue;
+                    minIn = std::min(minIn, tr->clip(ci)->timelineIn());
+                }
+                if (minIn == std::numeric_limits<int64_t>::max()) {
+                    event->accept(); return;
+                }
+                if (deltaTicks < -minIn) deltaTicks = -minIn;
+
+                if (deltaTicks != 0) {
+                    auto compound = std::make_unique<CompoundCommand>(
+                        keyLeft ? "Nudge left" : "Nudge right");
+                    for (const auto& sel : selClips) {
+                        Track* tr = m_timeline->track(sel.trackIndex);
+                        if (!tr) continue;
+                        size_t ci = tr->findClipIndexById(sel.clipId);
+                        if (ci >= tr->clipCount()) continue;
+                        int64_t newIn = tr->clip(ci)->timelineIn() + deltaTicks;
+                        if (newIn < 0) newIn = 0;
+                        auto mv = std::make_unique<MoveClipCommand>(
+                            tr, sel.clipId, newIn);
+                        mv->execute();
+                        compound->addExecuted(std::move(mv));
+                    }
+                    // Resolve any overlaps with non-selected clips on the
+                    // touched tracks (Premiere-style overwrite for nudges
+                    // that bump into a neighbour).
+                    for (const auto& sel : selClips) {
+                        auto fix = EditOperations::resolveOverlaps(
+                            *m_timeline, sel.trackIndex, sel.clipId);
+                        if (fix) {
+                            fix->execute();
+                            compound->addExecuted(std::move(fix));
+                        }
+                    }
+                    if (compound->size() > 0) {
+                        m_commandStack->pushWithoutExecute(std::move(compound));
+                        m_timelinePanel->refreshTrackContents();
+                        invalidateAudioSources();
+                        invalidateCompositeCache();
+                        updateTransformOverlay();
+                        if (m_programMonitor) m_programMonitor->requestRefresh();
+                        schedulePostEditWork();
+                    }
+                }
             }
         }
         event->accept(); return;

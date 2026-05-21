@@ -23,6 +23,9 @@
 #include "command/commands/EffectCommands.h"
 #include "command/commands/KeyframeCmds.h"
 
+#include <QApplication>
+#include <QDoubleSpinBox>
+
 #include <cmath>
 
 namespace rt {
@@ -248,12 +251,30 @@ void EffectControlsPanel::setPlayheadTick(int64_t tick)
         m_footerTimecodeLabel->setText(QString::fromStdString(tc.toString()));
     }
 
-    // Update spin box values to reflect evaluated keyframes at current time
-    if (m_clip && !m_updating) {
+    // Update spin box values to reflect evaluated keyframes at current time.
+    // Skip if the user is mid-edit in one of our spinboxes (focused) —
+    // populateFromClip() calls setValue() which would clobber the typed
+    // text. Without this guard, typing a new audio volume during playback
+    // was silently reset on the next playback tick, so the change never
+    // made it through to the audio mixer.
+    if (m_clip && !m_updating && !isAnySpinBoxBeingEdited()) {
         m_updating = true;
         populateFromClip();
         m_updating = false;
     }
+}
+
+bool EffectControlsPanel::isAnySpinBoxBeingEdited() const
+{
+    QWidget* fw = QApplication::focusWidget();
+    if (!fw) return false;
+    // Spinbox's internal QLineEdit holds focus while editing — walk up
+    // until we either find a QDoubleSpinBox child of THIS panel or run out.
+    for (QWidget* w = fw; w; w = w->parentWidget()) {
+        if (qobject_cast<QDoubleSpinBox*>(w) && isAncestorOf(w))
+            return true;
+    }
+    return false;
 }
 
 int64_t EffectControlsPanel::clipRelativeTick() const noexcept

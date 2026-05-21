@@ -72,11 +72,12 @@ Track* Timeline::addAudioTrack(const std::string& name)
     return m_tracks.back().get();
 }
 
-Track* Timeline::addDividerTrack(size_t insertIndex)
+Track* Timeline::addDividerTrack(size_t insertIndex, bool permanent)
 {
     auto track = std::make_unique<Track>(TrackType::Video, "");
     track->setDivider(true);
-    track->setHeight(20.0f); // 1/4 of default 80
+    track->setPermanentDivider(permanent);
+    track->setHeight(10.0f);
     track->setTargeted(false);
     track->setSyncLocked(false);
     if (insertIndex > m_tracks.size()) insertIndex = m_tracks.size();
@@ -84,7 +85,7 @@ Track* Timeline::addDividerTrack(size_t insertIndex)
     m_tracks.insert(m_tracks.begin() + static_cast<ptrdiff_t>(insertIndex),
                     std::move(track));
     notifyTrackAdded(insertIndex);
-    spdlog::debug("Added divider track at index {}", insertIndex);
+    spdlog::debug("Added divider track at index {} permanent={}", insertIndex, permanent);
     return ptr;
 }
 
@@ -128,12 +129,25 @@ void Timeline::moveTrack(size_t from, size_t to)
 
 void Timeline::sortTracksByType()
 {
-    // Stable-partition: video tracks first, audio tracks second.
-    // Dividers are treated as video (sort with whichever section they
-    // currently sit in) — kept stable so they don't jump.
+    // Legacy migration: really old project files could end up with video
+    // and audio tracks interleaved. Stable-partition fixes that by pushing
+    // all video tracks above all audio tracks.
+    //
+    // BUT: dividers are TrackType::Video even when the user placed one
+    // in the audio section (e.g. between A1 and A2). Partitioning by type
+    // would yank audio-section dividers up to the video region — that
+    // was the "dividers reset to the middle on load" bug. The serializer
+    // now preserves track order anyway, so we only apply this migration
+    // when there are zero dividers (genuinely legacy files). With any
+    // divider present, trust the saved layout.
+    const bool anyDividers = std::any_of(
+        m_tracks.begin(), m_tracks.end(),
+        [](const std::unique_ptr<Track>& t) { return t && t->isDivider(); });
+    if (anyDividers) return;
+
     std::stable_partition(m_tracks.begin(), m_tracks.end(),
         [](const std::unique_ptr<Track>& t) {
-            return t->isDivider() || t->type() == TrackType::Video;
+            return t->type() == TrackType::Video;
         });
 }
 

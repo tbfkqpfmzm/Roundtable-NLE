@@ -206,6 +206,22 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
         // Compute the actual delta applied to the primary clip
         int64_t actualDelta = newIn - m_dragOriginalIn;
 
+        // Group-floor clamp: when multiple clips are dragged left as a
+        // unit, raise the delta so the leftmost selected clip lands at
+        // tick 0 instead of every clip individually clamping to 0 and
+        // collapsing into an overlap (rightmost ends up overwriting the
+        // leftmost).
+        {
+            int64_t minSelOrig = std::numeric_limits<int64_t>::max();
+            for (const auto& dcs : m_dragSelectedClips)
+                minSelOrig = std::min(minSelOrig, dcs.originalIn);
+            if (minSelOrig != std::numeric_limits<int64_t>::max()
+                    && actualDelta < -minSelOrig) {
+                actualDelta = -minSelOrig;
+                newIn = m_dragOriginalIn + actualDelta;
+            }
+        }
+
         // Detect cross-track target
         size_t targetTrack = hitTestTrack(pos.y());
         if (targetTrack < m_timeline->trackCount()) {
@@ -310,7 +326,11 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
 
         // Move clips DIRECTLY in the data model (no commands) for live visual feedback.
         for (auto& dcs : m_dragSelectedClips) {
-            int64_t clipNewIn = std::max<int64_t>(0, dcs.originalIn + actualDelta);
+            // No per-clip max(0,...): actualDelta is already group-floored
+            // above so the leftmost clip lands at tick 0 without others
+            // collapsing onto it.
+            int64_t clipNewIn = dcs.originalIn + actualDelta;
+            if (clipNewIn < 0) clipNewIn = 0;
 
             int dst = static_cast<int>(dcs.originalTrack) + trackDeltaLive;
             size_t dstTrack = static_cast<size_t>(dst);

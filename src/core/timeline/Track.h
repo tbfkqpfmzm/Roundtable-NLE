@@ -60,6 +60,12 @@ public:
     [[nodiscard]] bool isDivider() const noexcept { return m_isDivider; }
     void setDivider(bool v) noexcept { m_isDivider = v; }
 
+    /// Permanent divider — the auto-created V/A boundary separator. Cannot be
+    /// moved or deleted by the user; ensureSectionDivider keeps it pinned at
+    /// the boundary. NOT serialised (re-derived on every project load).
+    [[nodiscard]] bool isPermanentDivider() const noexcept { return m_isPermanentDivider; }
+    void setPermanentDivider(bool v) noexcept { m_isPermanentDivider = v; }
+
     [[nodiscard]] float height() const noexcept { return m_height; }
     void setHeight(float h) noexcept { m_height = h; }
 
@@ -115,6 +121,7 @@ private:
     bool                                   m_collapsed{false};
     bool                                   m_syncLocked{true}; // Sync lock on by default
     bool                                   m_isDivider{false}; // Visual separator track
+    bool                                   m_isPermanentDivider{false}; // Auto-managed V/A boundary divider (not persisted)
     float                                  m_height{80.0f};  // pixels
     uint32_t                               m_color{0};       // custom RGBA (0=none)
     float                                  m_volume{1.0f};   // linear gain

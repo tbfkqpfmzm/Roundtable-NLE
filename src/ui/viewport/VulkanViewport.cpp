@@ -419,9 +419,6 @@ void VulkanViewport::presentFrame(VkSemaphore waitSemaphore)
 
     vkCmdBeginRenderPass(m_commandBuffer, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
 
-    // Bind pipeline and draw fullscreen quad
-    vkCmdBindPipeline(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
-
     // Apply zoom/pan: expanding the VkViewport beyond the swapchain extent
     // makes the triangle render larger, and the scissor clips to the window.
     float swW = static_cast<float>(m_swapchain->extent().width);
@@ -445,11 +442,53 @@ void VulkanViewport::presentFrame(VkSemaphore waitSemaphore)
     const float baseX  = (swW - baseW) * 0.5f;
     const float baseY  = (swH - baseH) * 0.5f;
 
+    // Compute the actual on-screen video rect with zoom/pan applied.
+    // (Same math as VkViewport below — keep these two in sync.)
+    const float zoomedX = baseX + m_viewPanX + (1.0f - m_viewZoom) * baseW * 0.5f;
+    const float zoomedY = baseY + m_viewPanY + (1.0f - m_viewZoom) * baseH * 0.5f;
+    const float zoomedW = baseW * m_viewZoom;
+    const float zoomedH = baseH * m_viewZoom;
+
+    // Premiere-style monitor: clear the FRAME-AREA rectangle to BLACK
+    // over the grey background clear, so any transparent regions of the
+    // composited image read as black instead of the surrounding letterbox
+    // grey. Uses the zoomed/panned rect so the black box tracks the video
+    // as the user zooms or pans the viewport (not a static frame).
+    // Clamps to the swapchain extent — vkCmdClearAttachments needs the
+    // rect inside the framebuffer.
+    {
+        const float clampedX = std::max(0.0f, zoomedX);
+        const float clampedY = std::max(0.0f, zoomedY);
+        const float clampedR = std::min(swW, zoomedX + zoomedW);
+        const float clampedB = std::min(swH, zoomedY + zoomedH);
+        if (clampedR > clampedX && clampedB > clampedY) {
+            VkClearAttachment clearAtt{};
+            clearAtt.aspectMask      = VK_IMAGE_ASPECT_COLOR_BIT;
+            clearAtt.colorAttachment = 0;
+            clearAtt.clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+            VkClearRect clearRect{};
+            clearRect.rect.offset    = {
+                static_cast<int32_t>(std::floor(clampedX)),
+                static_cast<int32_t>(std::floor(clampedY))
+            };
+            clearRect.rect.extent    = {
+                static_cast<uint32_t>(std::ceil(clampedR - clampedX)),
+                static_cast<uint32_t>(std::ceil(clampedB - clampedY))
+            };
+            clearRect.baseArrayLayer = 0;
+            clearRect.layerCount     = 1;
+            vkCmdClearAttachments(m_commandBuffer, 1, &clearAtt, 1, &clearRect);
+        }
+    }
+
+    // Bind pipeline and draw fullscreen quad
+    vkCmdBindPipeline(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
+
     VkViewport vp{};
-    vp.x        = baseX + m_viewPanX + (1.0f - m_viewZoom) * baseW * 0.5f;
-    vp.y        = baseY + m_viewPanY + (1.0f - m_viewZoom) * baseH * 0.5f;
-    vp.width    = baseW * m_viewZoom;
-    vp.height   = baseH * m_viewZoom;
+    vp.x        = zoomedX;
+    vp.y        = zoomedY;
+    vp.width    = zoomedW;
+    vp.height   = zoomedH;
     vp.minDepth = 0.0f;
     vp.maxDepth = 1.0f;
 
@@ -851,6 +890,55 @@ void VulkanViewport::presentClearFrame()
     rpBegin.pClearValues      = &clearVal;
 
     vkCmdBeginRenderPass(m_commandBuffer, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
+
+    // Mirror the WITH-video path: clear the FRAME-AREA rectangle to black
+    // so the user sees a Premiere-style black video frame with grey
+    // letterbox even when no source image is loaded yet (e.g. project
+    // opened to an empty position on the timeline). Only kicks in once we
+    // know the sequence dimensions (m_srcW/m_srcH from a prior frame).
+    // Honours the user's current zoom/pan so the black box tracks the
+    // video viewport — same math as presentFrame.
+    if (m_srcW > 0 && m_srcH > 0) {
+        const float swW = static_cast<float>(m_swapchain->extent().width);
+        const float swH = static_cast<float>(m_swapchain->extent().height);
+        constexpr float kFitPadding = 0.90f;
+        const float availW = swW * kFitPadding;
+        const float availH = swH * kFitPadding;
+        const float srcW   = static_cast<float>(m_srcW);
+        const float srcH   = static_cast<float>(m_srcH);
+        const float scale  = std::min(availW / srcW, availH / srcH);
+        const float baseW  = srcW * scale;
+        const float baseH  = srcH * scale;
+        const float baseX  = (swW - baseW) * 0.5f;
+        const float baseY  = (swH - baseH) * 0.5f;
+        const float zoomedX = baseX + m_viewPanX + (1.0f - m_viewZoom) * baseW * 0.5f;
+        const float zoomedY = baseY + m_viewPanY + (1.0f - m_viewZoom) * baseH * 0.5f;
+        const float zoomedW = baseW * m_viewZoom;
+        const float zoomedH = baseH * m_viewZoom;
+        const float clampedX = std::max(0.0f, zoomedX);
+        const float clampedY = std::max(0.0f, zoomedY);
+        const float clampedR = std::min(swW, zoomedX + zoomedW);
+        const float clampedB = std::min(swH, zoomedY + zoomedH);
+        if (clampedR > clampedX && clampedB > clampedY) {
+            VkClearAttachment clearAtt{};
+            clearAtt.aspectMask      = VK_IMAGE_ASPECT_COLOR_BIT;
+            clearAtt.colorAttachment = 0;
+            clearAtt.clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+            VkClearRect clearRect{};
+            clearRect.rect.offset    = {
+                static_cast<int32_t>(std::floor(clampedX)),
+                static_cast<int32_t>(std::floor(clampedY))
+            };
+            clearRect.rect.extent    = {
+                static_cast<uint32_t>(std::ceil(clampedR - clampedX)),
+                static_cast<uint32_t>(std::ceil(clampedB - clampedY))
+            };
+            clearRect.baseArrayLayer = 0;
+            clearRect.layerCount     = 1;
+            vkCmdClearAttachments(m_commandBuffer, 1, &clearAtt, 1, &clearRect);
+        }
+    }
+
     vkCmdEndRenderPass(m_commandBuffer);
     vkEndCommandBuffer(m_commandBuffer);
 

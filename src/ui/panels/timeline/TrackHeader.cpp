@@ -78,11 +78,15 @@ void TrackHeader::paintEvent(QPaintEvent* event)
 
     const auto& tc = Theme::colors();
 
-    // ── Divider: flat bar, thin horizontal rule + muted label ──────────
+    // ── Divider: flat near-black bar, no label ────────────────────────
+    // Dividers are pure visual separators — no labels, ever. Even if a
+    // stale Track::name() leaked through from an older project file
+    // (e.g. "V3" before the isDivider flag was persisted), we don't
+    // render it.
     if (m_track->isDivider()) {
-        QColor divBg = (m_track->color() != 0)
-                           ? QColor::fromRgba(m_track->color())
-                           : tc.surface2;
+        const QColor divBg = (m_track->color() != 0)
+                                 ? QColor::fromRgba(m_track->color())
+                                 : QColor(10, 10, 12);   // near-black default
         painter.fillRect(rect(), divBg);
 
         // Side/top/bottom borders (match other tracks).
@@ -91,29 +95,6 @@ void TrackHeader::paintEvent(QPaintEvent* event)
         painter.drawLine(0, 0, w, 0);
         painter.drawLine(0, h - 1, w, h - 1);
 
-        // If the divider has a name, paint it centered over a short rule
-        // in a muted colour so it reads as a separator rather than a real
-        // track label. A nameless divider draws no rule at all — just the
-        // flat bar (avoids a stray line in the empty header area).
-        const QString label = QString::fromStdString(m_track->name());
-        if (!label.isEmpty()) {
-            QColor ruleColor = tc.trackDivider;
-            painter.setPen(ruleColor);
-            const int midY = h / 2;
-            painter.drawLine(6, midY, w - 6, midY);
-            QFont f("Segoe UI", 8, QFont::DemiBold);
-            painter.setFont(f);
-            QFontMetrics fm(f);
-            int textW = fm.horizontalAdvance(label) + 8; // padding
-            int textX = (w - textW) / 2;
-            // Paint a short background strip to "cut" the rule behind text.
-            painter.fillRect(QRect(textX, 0, textW, h), divBg);
-            QColor muted = tc.textSecondary;
-            muted.setAlpha(180);
-            painter.setPen(muted);
-            painter.drawText(QRect(textX, 0, textW, h),
-                             Qt::AlignVCenter | Qt::AlignHCenter, label);
-        }
         --s_paintDepth;
         return;
     }
@@ -257,8 +238,13 @@ void TrackHeader::mousePressEvent(QMouseEvent* event)
         return;
     }
 
-    // Dividers: any press (not resize) begins reorder drag
+    // Dividers: any press (not resize) begins reorder drag — EXCEPT for
+    // the permanent V/A boundary divider, which is locked in place.
     if (m_track->isDivider()) {
+        if (m_track->isPermanentDivider()) {
+            event->accept();
+            return;
+        }
         m_reorderPressed = true;
         m_reorderActive = false;
         m_reorderPressGlobal = event->globalPosition().toPoint();
@@ -377,19 +363,23 @@ void TrackHeader::contextMenuEvent(QContextMenuEvent* event)
 {
     if (!m_track) return;
 
-    // Dividers: minimal menu — Add/Delete only.
+    // Dividers: minimal menu — Add/Delete only. The permanent V/A
+    // boundary divider hides "Delete Divider" (it's auto-managed and
+    // can't be removed by hand).
     if (m_track->isDivider()) {
         QMenu dm(this);
         QMenu* addMenu = dm.addMenu("Add Track");
         QAction* aV  = addMenu->addAction("Add Video Track");
         QAction* aA  = addMenu->addAction("Add Audio Track");
         QAction* aD  = addMenu->addAction("Add Divider");
-        QAction* aDel = dm.addAction("Delete Divider");
+        QAction* aDel = m_track->isPermanentDivider()
+                            ? nullptr
+                            : dm.addAction("Delete Divider");
         QAction* chosen = dm.exec(event->globalPos());
         if      (chosen == aV)   emit addTrackRequested(true, true, m_trackIndex);
         else if (chosen == aA)   emit addTrackRequested(false, true, m_trackIndex);
         else if (chosen == aD)   emit addDividerRequested(true, m_trackIndex);
-        else if (chosen == aDel) emit deleteTrackRequested(m_trackIndex);
+        else if (aDel && chosen == aDel) emit deleteTrackRequested(m_trackIndex);
         return;
     }
 

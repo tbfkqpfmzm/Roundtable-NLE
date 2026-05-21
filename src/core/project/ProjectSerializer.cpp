@@ -140,6 +140,7 @@ std::vector<uint8_t> ProjectSerializer::serialize(const Project& project) const
             sec.writeF32(track->height());
             sec.writeU8(track->isSyncLocked() ? 1 : 0); // v5+
             sec.writeU8(track->isDivider() ? 1 : 0);    // v18+
+            sec.writeU8(track->isPermanentDivider() ? 1 : 0); // v20+
 
             // Clips for this track
             sec.writeU32(static_cast<uint32_t>(track->clipCount()));
@@ -215,6 +216,7 @@ std::vector<uint8_t> ProjectSerializer::serialize(const Project& project) const
                 sec.writeF32(track->height());
                 sec.writeU8(track->isSyncLocked() ? 1 : 0); // v5+
                 sec.writeU8(track->isDivider() ? 1 : 0);    // v18+
+                sec.writeU8(track->isPermanentDivider() ? 1 : 0); // v20+
 
                 sec.writeU32(static_cast<uint32_t>(track->clipCount()));
                 for (size_t ci = 0; ci < track->clipCount(); ++ci)
@@ -469,11 +471,14 @@ std::unique_ptr<Project> ProjectSerializer::deserialize(const std::vector<uint8_
                     bool soloed = sr.readU8() != 0;
                     float height = sr.readF32();
 
-                    Track* track;
-                    if (type == TrackType::Video)
-                        track = tl->addVideoTrack(name);
-                    else
-                        track = tl->addAudioTrack(name);
+                    // Build the track directly and APPEND in saved order.
+                    // Going through addVideoTrack/addAudioTrack used to
+                    // re-sort by type+divider, which dragged any user-added
+                    // divider sitting above the video stack down into the
+                    // V/A boundary slot on load.
+                    auto trackPtr = std::make_unique<Track>(type, name);
+                    Track* track = trackPtr.get();
+                    tl->insertTrack(tl->trackCount(), std::move(trackPtr));
 
                     track->setLocked(locked);
                     track->setMuted(muted);
@@ -493,6 +498,13 @@ std::unique_ptr<Project> ProjectSerializer::deserialize(const std::vector<uint8_
                         // unflagged divider a "V<N>" label before saving.
                         track->setDivider(true);
                     }
+                    if (version >= 20) {
+                        track->setPermanentDivider(sr.readU8() != 0);
+                    }
+                    // For v19 and older, leave isPermanentDivider=false —
+                    // ensureSectionDivider will promote whichever divider sits
+                    // at the V/A boundary on first rebuild (the legacy
+                    // "greedy" path, used only for one-time migration).
 
                     // Clips
                     uint32_t clipCount = sr.readU32();
@@ -592,11 +604,12 @@ std::unique_ptr<Project> ProjectSerializer::deserialize(const std::vector<uint8_
                     bool soloed = sr.readU8() != 0;
                     float height = sr.readF32();
 
-                    Track* track;
-                    if (type == TrackType::Video)
-                        track = tl->addVideoTrack(name);
-                    else
-                        track = tl->addAudioTrack(name);
+                    // Append in saved order; addVideoTrack/addAudioTrack would
+                    // re-sort and shuffle user-added dividers — see comment in
+                    // the Section_Tracks reader above.
+                    auto trackPtr = std::make_unique<Track>(type, name);
+                    Track* track = trackPtr.get();
+                    tl->insertTrack(tl->trackCount(), std::move(trackPtr));
 
                     track->setLocked(locked);
                     track->setMuted(muted);
@@ -612,6 +625,9 @@ std::unique_ptr<Project> ProjectSerializer::deserialize(const std::vector<uint8_
                         // v17 and older: auto-promote tracks matching the
                         // divider signature (see Section_Tracks reader above).
                         track->setDivider(true);
+                    }
+                    if (version >= 20) {
+                        track->setPermanentDivider(sr.readU8() != 0);
                     }
 
                     uint32_t clipCount = sr.readU32();

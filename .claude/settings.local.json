@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "PowerShell(powershell -ExecutionPolicy Bypass -File build.ps1 -Config RelWithDebInfo)"
+      "PowerShell(powershell -ExecutionPolicy Bypass -File build.ps1 -Config RelWithDebInfo)",
+      "Bash(git log *)"
     ]
   }
 }

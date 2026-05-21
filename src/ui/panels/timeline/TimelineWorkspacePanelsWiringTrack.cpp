@@ -109,6 +109,13 @@ void TimelineWorkspace::wireTrackSignals()
             if (m_destroying.load(std::memory_order_acquire)) return;
             if (!m_timeline || m_timeline->trackCount() <= 1) return;
             if (trackIndex >= m_timeline->trackCount()) return;
+            // The permanent V/A divider is auto-managed; if removed it
+            // would just be re-created by ensureSectionDivider on the
+            // next rebuild. Reject the delete so the result matches the
+            // user's intent (no flicker, no recreate).
+            if (auto* tr = m_timeline->track(trackIndex);
+                    tr && tr->isPermanentDivider())
+                return;
 
             // Clear selection state BEFORE removing the track so we don't
             // hold a dangling Clip* that belonged to the deleted track.

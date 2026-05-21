@@ -476,6 +476,13 @@ void TimelinePanel::rebuildTracks()
             if (srcIdx >= m_timeline->trackCount()) return;
             if (dst >= m_timeline->trackCount())
                 dst = m_timeline->trackCount() - 1;
+            // The permanent V/A boundary divider is auto-managed and
+            // cannot be reordered by the user. TrackHeader blocks the
+            // press, but defend here too in case the move came via some
+            // other path.
+            if (Track* src = m_timeline->track(srcIdx);
+                    src && src->isPermanentDivider())
+                return;
             // Defer past the mouseReleaseEvent so we don't delete the
             // TrackHeader that is currently on the stack.
             QTimer::singleShot(0, this, [this, srcIdx, dst]() {
@@ -845,6 +852,11 @@ void TimelinePanel::insertTrackWidgetIncremental(size_t trackIndex)
         size_t dst = computeReorderInsertionIndex(gp);
         if (dst != srcIdx && dst != SIZE_MAX) {
             if (m_timeline) {
+                // Permanent V/A divider is auto-managed — don't allow
+                // reordering it out of its slot.
+                if (Track* src = m_timeline->track(srcIdx);
+                        src && src->isPermanentDivider())
+                    return;
                 auto track = m_timeline->takeTrack(srcIdx);
                 if (track) {
                     size_t insertAt = dst;
@@ -900,91 +912,104 @@ void TimelinePanel::ensureDefaultTracks()
 void TimelinePanel::ensureSectionDivider()
 {
     if (!m_timeline) return;
-    const size_t n = m_timeline->trackCount();
 
-    // Dark grey (0xAARRGGBB) — noticeably darker than the empty track
-    // background (trackBg ~20,20,26) so the V/A split reads as a recessed
-    // separator rather than another track.
+    // Near-black background for the V/A separator — noticeably darker than
+    // the empty track background so the split reads as a recessed groove,
+    // matching the user-added divider look.
     constexpr uint32_t kSepColor = 0xFF0A0A0Cu;
 
+    // Helper: normalise a permanent divider's visual properties. Old
+    // project files may have persisted leftover names ("V3") or no color;
+    // clear / set them every pass so the boundary always renders cleanly.
+    auto normalizePermanent = [](Track* d) {
+        if (!d) return;
+        d->setName("");
+        d->setColor(kSepColor);
+        d->setHeight(10.0f);
+        d->setTargeted(false);
+        d->setSyncLocked(false);
+        d->setPermanentDivider(true);
+    };
+
     // Promote "shadow dividers" — Video tracks that look like dividers
-    // (height < 15px; real video tracks default to 80px) but lost their
-    // isDivider flag, e.g. through an older project file that didn't
-    // persist the flag and was saved after the auto-rename loop gave the
-    // unflagged divider a "V<N>" name. Without this, ensureSectionDivider
-    // adds a brand-new divider elsewhere and the user ends up with two
-    // divider-looking rows.
-    for (size_t i = 0; i < n; ++i) {
+    // (height < 15 px; real video tracks default to 80 px) but lost their
+    // isDivider flag in an older project file. Mark them as plain dividers
+    // (NOT permanent); the boundary-pick step below upgrades the one at
+    // the V/A seam to permanent.
+    const size_t n0 = m_timeline->trackCount();
+    for (size_t i = 0; i < n0; ++i) {
         Track* t = m_timeline->track(i);
         if (!t || t->isDivider()) continue;
         if (t->type() == TrackType::Video && t->height() < 15.0f) {
             t->setDivider(true);
             t->setName("");
-            t->setColor(kSepColor);
         }
     }
 
-    // Locate the V/A boundary on real tracks (dividers ignored), and find
-    // any existing divider rows.
+    // Locate the V/A boundary on real tracks (dividers ignored).
     size_t firstAudio = SIZE_MAX;
     bool hasVideo = false;
-    std::vector<size_t> existingDividers;
-    for (size_t i = 0; i < n; ++i) {
+    for (size_t i = 0; i < m_timeline->trackCount(); ++i) {
         Track* t = m_timeline->track(i);
-        if (!t) continue;
-        if (t->isDivider()) {
-            existingDividers.push_back(i);
-            continue;
-        }
+        if (!t || t->isDivider()) continue;
         if (t->type() == TrackType::Audio && firstAudio == SIZE_MAX) firstAudio = i;
         if (t->type() == TrackType::Video) hasVideo = true;
     }
 
-    // Need both a video and an audio section to separate. With no audio,
-    // any leftover divider is meaningless — drop it.
+    // Without both a video and an audio section, the V/A divider has no
+    // meaning — drop the permanent one (user-added dividers stay).
     if (firstAudio == SIZE_MAX || !hasVideo) {
-        for (auto it = existingDividers.rbegin(); it != existingDividers.rend(); ++it)
-            m_timeline->removeTrack(*it);
+        for (size_t i = m_timeline->trackCount(); i-- > 0; ) {
+            Track* t = m_timeline->track(i);
+            if (t && t->isPermanentDivider())
+                m_timeline->removeTrack(i);
+        }
         return;
     }
 
-    // A divider is "correctly placed" only when it sits immediately above
-    // the first real audio track. With ours-above-audio invariant from
-    // Timeline::addVideoTrack, the divider should end up at firstAudio - 1
-    // after every track-modifying operation. Repair otherwise — e.g. an
-    // older codepath inserted new video tracks BELOW the divider, leaving
-    // it stranded above the V-stack instead of between V and A.
-    if (existingDividers.size() == 1 &&
-        firstAudio > 0 &&
-        existingDividers.front() == firstAudio - 1)
-    {
-        Track* d = m_timeline->track(existingDividers.front());
-        if (d && d->name().empty() && d->color() != kSepColor)
-            d->setColor(kSepColor);
-        return;
-    }
-
-    // Drop misplaced / duplicate dividers (back-to-front so indices stay
-    // valid), then re-add a single divider at the correct V/A boundary.
-    for (auto it = existingDividers.rbegin(); it != existingDividers.rend(); ++it)
-        m_timeline->removeTrack(*it);
-
-    // Recompute firstAudio in case removals shifted indices.
-    firstAudio = SIZE_MAX;
+    // PERMANENT-DIVIDER POLICY
+    //
+    // Identity-first, position-second. The persisted Track::isPermanentDivider
+    // flag (v20+) tells us WHICH divider is the auto-managed boundary one;
+    // we move IT into the slot at firstAudio-1 if it's drifted. We never
+    // promote whatever divider happens to be sitting at the boundary slot —
+    // that previously hijacked user dividers (e.g. "Add Divider Above A1")
+    // by silently turning them into the new permanent and demoting the old.
+    //
+    // Adoption (promoting a non-permanent divider to permanent) only happens
+    // for legacy files that pre-date v20 OR for fresh timelines that never
+    // had a permanent divider — and even then we only adopt the one that's
+    // ALREADY at firstAudio-1 by chance, never relocating user dividers.
+    size_t existingPermIdx = SIZE_MAX;
     for (size_t i = 0; i < m_timeline->trackCount(); ++i) {
         Track* t = m_timeline->track(i);
-        if (t && !t->isDivider() && t->type() == TrackType::Audio) {
-            firstAudio = i;
-            break;
+        if (t && t->isPermanentDivider()) {
+            if (existingPermIdx == SIZE_MAX) existingPermIdx = i;
+            else t->setPermanentDivider(false); // demote duplicates
         }
     }
-    if (firstAudio == SIZE_MAX) return;
 
-    if (Track* d = m_timeline->addDividerTrack(firstAudio)) {
-        d->setName("");
-        d->setColor(kSepColor);
-        d->setHeight(10.0f);
+    Track* boundary = nullptr;
+    if (existingPermIdx != SIZE_MAX) {
+        // We know which divider IS permanent — move it back to the
+        // boundary slot if the user (or a recent insert) bumped it out.
+        if (existingPermIdx != firstAudio - 1) {
+            m_timeline->moveTrack(existingPermIdx, firstAudio - 1);
+        }
+        boundary = m_timeline->track(firstAudio - 1);
+    } else {
+        // No persisted permanent. Adopt the boundary divider if there
+        // happens to be one (legacy/v18-v19 migration); otherwise insert
+        // a fresh permanent divider. Never relocates other dividers.
+        if (firstAudio > 0) {
+            Track* slot = m_timeline->track(firstAudio - 1);
+            if (slot && slot->isDivider())
+                boundary = slot;
+        }
+        if (!boundary)
+            boundary = m_timeline->addDividerTrack(firstAudio, /*permanent*/true);
     }
+    normalizePermanent(boundary);
 }
 
 void TimelinePanel::refreshTrackContents()

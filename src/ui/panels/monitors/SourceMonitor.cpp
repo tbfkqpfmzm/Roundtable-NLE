@@ -331,6 +331,7 @@ void SourceMonitor::markIn()
 {
     if (!m_hasClip) return;
     m_miniTimeline->setInPoint(currentTick());
+    updateTimecodeDisplay();
     emit inOutChanged();
 }
 
@@ -338,12 +339,14 @@ void SourceMonitor::markOut()
 {
     if (!m_hasClip) return;
     m_miniTimeline->setOutPoint(currentTick());
+    updateTimecodeDisplay();
     emit inOutChanged();
 }
 
 void SourceMonitor::clearInOut()
 {
     m_miniTimeline->clearInOutPoints();
+    updateTimecodeDisplay();
     emit inOutChanged();
 }
 
@@ -649,10 +652,23 @@ void SourceMonitor::resizeEvent(QResizeEvent* event)
 
 void SourceMonitor::updateTimecodeDisplay()
 {
-    // Update duration timecode
+    if (!m_controller) return;
+
+    // Left timecode: current playhead position (updates every scrub /
+    // play tick). Without this the label was stuck at 00:00:00:00 the
+    // entire session.
+    if (m_timecodeLabel && !m_timecodeEdit->isVisible()) {
+        m_timecodeLabel->setText(QString::fromStdString(
+            m_controller->currentTimecodeString()));
+    }
+
+    // Right timecode: if the user marked in/out, show the selected
+    // range duration; otherwise show the full clip duration (Premiere
+    // parity).
     if (m_durationLabel) {
-        auto dur = tickToTimecode(m_controller->durationTicks(),
-                                  m_controller->frameRate());
+        const int64_t sel = m_miniTimeline ? m_miniTimeline->selectedDuration() : 0;
+        const int64_t shown = (sel > 0) ? sel : m_controller->durationTicks();
+        auto dur = tickToTimecode(shown, m_controller->frameRate());
         m_durationLabel->setText(QString::fromStdString(dur.toString()));
     }
 }

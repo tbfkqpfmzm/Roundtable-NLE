@@ -271,13 +271,13 @@ void TimelineTrackWidget::paintEvent(QPaintEvent* event)
     const auto& tc = Theme::colors();
     const QRect dirtyRect = event->rect();
 
-    // ── Divider track: flat separator bar, no clips ─────────────────────
+    // ── Divider track: flat near-black separator bar, no clips ──────────
     // Matches the divider styling on the header side so the separator
     // spans the full timeline width as its own row.
     if (m_track->isDivider()) {
-        QColor divBg = (m_track->color() != 0)
-                           ? QColor::fromRgba(m_track->color())
-                           : tc.surface2;
+        const QColor divBg = (m_track->color() != 0)
+                                 ? QColor::fromRgba(m_track->color())
+                                 : QColor(10, 10, 12);   // near-black default
         painter.fillRect(rect(), divBg);
         painter.setPen(tc.trackDivider);
         painter.drawLine(0, 0, width(), 0);

@@ -36,7 +36,10 @@ public:
     Track* addAudioTrack(const std::string& name = "");
     /// Add a visual-separator divider track (no clips, short, no controls).
     /// The divider is inserted at a specific index (defaults to end).
-    Track* addDividerTrack(size_t insertIndex = static_cast<size_t>(-1));
+    /// `permanent=true` marks it as the auto-managed V/A boundary divider —
+    /// reserved for ensureSectionDivider; user-added dividers stay non-permanent.
+    Track* addDividerTrack(size_t insertIndex = static_cast<size_t>(-1),
+                           bool permanent = false);
     void   removeTrack(size_t index);
     void   moveTrack(size_t from, size_t to);
     [[nodiscard]] size_t       trackCount() const noexcept;

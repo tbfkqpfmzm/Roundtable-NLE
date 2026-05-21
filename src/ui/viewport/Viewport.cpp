@@ -277,13 +277,16 @@ void Viewport::paintEvent(QPaintEvent* event)
     QPainter painter(this);
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
 
-    // Background
+    // Background: dark grey outside the frame box, BLACK inside the
+    // frame box — matches Premiere Pro's monitor styling where the
+    // letterbox/empty area is grey but the video frame itself is black
+    // (visible behind any transparent areas of the rendered image).
     painter.fillRect(rect(), Theme::colors().surface0);
-
-    // Draw frame
-    if (m_hasFrame && !m_image.isNull() && !m_drawRect.isEmpty())
+    if (!m_drawRect.isEmpty())
     {
-        painter.drawImage(m_drawRect, m_image);
+        painter.fillRect(m_drawRect, Qt::black);
+        if (m_hasFrame && !m_image.isNull())
+            painter.drawImage(m_drawRect, m_image);
     }
 
     // Safe areas
