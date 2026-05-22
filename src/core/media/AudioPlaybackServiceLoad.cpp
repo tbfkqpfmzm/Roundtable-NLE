@@ -802,8 +802,23 @@ void AudioPlaybackService::loadSources(bool allowBlockingMisses)
     m_audioEngine->resetStretchers();
     m_audioBuffers = std::move(newBuffers);
     m_sourcesLoaded          = true;
-    m_loadedWindowStartFrame = audioWindow.startFrame;
-    m_loadedWindowEndFrame   = audioWindow.endFrame;
+
+    // Audio dropout fix (2026-05-21): only advance the loaded-window
+    // markers when the load actually populated all clips' buffers. If
+    // we ran with allowBlockingMisses=false (the periodic playback
+    // refresh path) AND any clip had a cache miss that got deferred to
+    // the async warm, the affected providers still hold their OLD
+    // window. Recording the NEW audioWindow here would suppress
+    // needsPlaybackWindowRefresh until the playhead crossed the new
+    // window edge — by which point we'd be many seconds into silent
+    // playback. Leave the markers unchanged so the next position
+    // change re-triggers the refresh; once warmCacheAsync completes
+    // and the cache is populated, that retry succeeds and audio
+    // resumes in sync.
+    if (allowBlockingMisses || deferredCacheMisses == 0) {
+        m_loadedWindowStartFrame = audioWindow.startFrame;
+        m_loadedWindowEndFrame   = audioWindow.endFrame;
+    }
 }
 
 } // namespace rt

@@ -15,6 +15,8 @@ GpuTextureCache::GpuTextureCache(size_t vramBudgetBytes)
 
 GpuTextureCache::~GpuTextureCache()
 {
+    // clear() acquires m_mtx — safe because the destructor implies no
+    // other thread holds a reference to this object any more.
     clear();
 }
 
@@ -23,6 +25,7 @@ GpuTextureCache::~GpuTextureCache()
 GpuTextureCache::LookupResult GpuTextureCache::get(
     uint64_t mediaId, int64_t frameNumber, uint8_t tier)
 {
+    std::lock_guard lk(m_mtx);
     CacheKey key{mediaId, frameNumber, tier};
     auto it = m_map.find(key);
     if (it == m_map.end()) {
@@ -71,6 +74,7 @@ void GpuTextureCache::put(uint64_t mediaId, int64_t frameNumber, uint8_t tier,
 {
     if (!tex) return;
 
+    std::lock_guard lk(m_mtx);
     CacheKey key{mediaId, frameNumber, tier};
 
     // If already cached, keep the existing entry (first decode wins).
@@ -115,6 +119,7 @@ void GpuTextureCache::putShared(uint64_t mediaId, int64_t frameNumber, uint8_t t
 {
     if (!sharedOwner) return;
 
+    std::lock_guard lk(m_mtx);
     CacheKey key{mediaId, frameNumber, tier};
 
     // If already cached, skip (don't replace existing entries)
@@ -145,6 +150,7 @@ void GpuTextureCache::putShared(uint64_t mediaId, int64_t frameNumber, uint8_t t
 
 void GpuTextureCache::clear()
 {
+    std::lock_guard lk(m_mtx);
     m_map.clear();
     m_lru.clear();
     m_used = 0;
@@ -152,6 +158,7 @@ void GpuTextureCache::clear()
 
 void GpuTextureCache::evictMedia(uint64_t mediaId)
 {
+    std::lock_guard lk(m_mtx);
     for (auto it = m_map.begin(); it != m_map.end(); ) {
         if (it->first.mediaId == mediaId) {
             m_used -= it->second.bytes;
@@ -165,6 +172,7 @@ void GpuTextureCache::evictMedia(uint64_t mediaId)
 
 void GpuTextureCache::setBudget(size_t bytes)
 {
+    std::lock_guard lk(m_mtx);
     m_budget = bytes;
     evictUntilFits(0);
 }
@@ -173,6 +181,7 @@ void GpuTextureCache::setBudget(size_t bytes)
 
 void GpuTextureCache::pin(uint64_t mediaId, int64_t frameNumber, uint8_t tier)
 {
+    std::lock_guard lk(m_mtx);
     CacheKey key{mediaId, frameNumber, tier};
     auto it = m_map.find(key);
     if (it != m_map.end()) {
@@ -182,6 +191,7 @@ void GpuTextureCache::pin(uint64_t mediaId, int64_t frameNumber, uint8_t tier)
 
 void GpuTextureCache::unpin(uint64_t mediaId, int64_t frameNumber, uint8_t tier)
 {
+    std::lock_guard lk(m_mtx);
     CacheKey key{mediaId, frameNumber, tier};
     auto it = m_map.find(key);
     if (it != m_map.end() && it->second.pinCount > 0) {
@@ -191,12 +201,71 @@ void GpuTextureCache::unpin(uint64_t mediaId, int64_t frameNumber, uint8_t tier)
 
 void GpuTextureCache::unpinAll()
 {
+    std::lock_guard lk(m_mtx);
     for (auto& [key, entry] : m_map)
         entry.pinCount = 0;
 }
 
+// ── Statistics ──────────────────────────────────────────────────────────────
+//
+// These lock so that callers see consistent values during concurrent put /
+// evict.  Contention is negligible (O(1) reads), but the lock matters for
+// memoryUsed() / isUnderPressure() during eviction storms — without it the
+// caller could see a transient over-budget value.
+
+size_t GpuTextureCache::entryCount() const
+{
+    std::lock_guard lk(m_mtx);
+    return m_map.size();
+}
+
+size_t GpuTextureCache::memoryUsed() const
+{
+    std::lock_guard lk(m_mtx);
+    return m_used;
+}
+
+size_t GpuTextureCache::budget() const
+{
+    std::lock_guard lk(m_mtx);
+    return m_budget;
+}
+
+size_t GpuTextureCache::hits() const
+{
+    std::lock_guard lk(m_mtx);
+    return m_hits;
+}
+
+size_t GpuTextureCache::misses() const
+{
+    std::lock_guard lk(m_mtx);
+    return m_misses;
+}
+
+bool GpuTextureCache::isUnderPressure() const
+{
+    std::lock_guard lk(m_mtx);
+    return m_used > (m_budget * 9 / 10);
+}
+
+int GpuTextureCache::usagePercent() const
+{
+    std::lock_guard lk(m_mtx);
+    return m_budget > 0 ? static_cast<int>(m_used * 100 / m_budget) : 0;
+}
+
+void GpuTextureCache::setRecycleFn(RecycleFn fn)
+{
+    std::lock_guard lk(m_mtx);
+    m_recycleFn = std::move(fn);
+}
+
 // ── Eviction ────────────────────────────────────────────────────────────────
 
+// Requires m_mtx held — called from put() and setBudget() which take the
+// lock at entry.  Do NOT take m_mtx here; doing so would deadlock on a
+// non-recursive mutex.
 void GpuTextureCache::evictUntilFits(size_t needed)
 {
     // Pass 1: evict only non-loop, non-pinned frames from the LRU back.

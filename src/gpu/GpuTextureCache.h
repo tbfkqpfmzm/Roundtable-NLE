@@ -7,7 +7,10 @@
  * Keyed by (mediaId, frameNumber, tier).  The cache owns the GPU memory
  * and evicts the least-recently-used textures when VRAM budget is exceeded.
  *
- * Thread safety: NOT thread-safe — must be called from the composite thread.
+ * Thread safety: all public methods acquire an internal mutex.  Pin/unpin
+ * and lookup are O(1) hash lookups; contention is negligible.  Required by
+ * the UPGRADE_PLAN GPU-resident decode pipeline, where prefetch workers
+ * call putShared() concurrently with the compositor thread calling get().
  */
 
 #pragma once
@@ -19,6 +22,7 @@
 #include <functional>
 #include <list>
 #include <memory>
+#include <mutex>
 #include <unordered_map>
 
 namespace rt {
@@ -99,22 +103,22 @@ public:
     void setBudget(size_t bytes);
 
     // ── Statistics ──────────────────────────────────────────────────────
+    //
+    // noexcept dropped because std::lock_guard's constructor may throw
+    // (std::system_error on a mutex failure).  In practice these calls
+    // do not throw; the change is for spec correctness.
 
-    [[nodiscard]] size_t entryCount() const noexcept { return m_map.size(); }
-    [[nodiscard]] size_t memoryUsed() const noexcept { return m_used; }
-    [[nodiscard]] size_t budget()     const noexcept { return m_budget; }
-    [[nodiscard]] size_t hits()       const noexcept { return m_hits; }
-    [[nodiscard]] size_t misses()     const noexcept { return m_misses; }
+    [[nodiscard]] size_t entryCount() const;
+    [[nodiscard]] size_t memoryUsed() const;
+    [[nodiscard]] size_t budget()     const;
+    [[nodiscard]] size_t hits()       const;
+    [[nodiscard]] size_t misses()     const;
 
     /// Returns true if VRAM usage exceeds 90% of budget (pressure state).
-    [[nodiscard]] bool isUnderPressure() const noexcept {
-        return m_used > (m_budget * 9 / 10);
-    }
+    [[nodiscard]] bool isUnderPressure() const;
 
     /// Returns VRAM usage as a percentage 0-100.
-    [[nodiscard]] int usagePercent() const noexcept {
-        return m_budget > 0 ? static_cast<int>(m_used * 100 / m_budget) : 0;
-    }
+    [[nodiscard]] int usagePercent() const;
 
     // ── Recycling hook (A4) ────────────────────────────────────────────
     /// When the LRU evicts an entry, invoke this callback with the
@@ -123,8 +127,12 @@ public:
     /// vmaCreateImage/vmaDestroyImage churn that fresh allocations cause
     /// during heavy scrubbing.  Whatever the callback leaves in the
     /// unique_ptr is destroyed normally.  Default: null (no recycling).
+    ///
+    /// The callback runs while m_mtx is held (it fires from evictUntilFits).
+    /// Implementations must not re-enter GpuTextureCache.  GpuUploadManager
+    /// only pushes to its own pool vector, so this is safe.
     using RecycleFn = std::function<void(std::unique_ptr<Texture>&)>;
-    void setRecycleFn(RecycleFn fn) noexcept { m_recycleFn = std::move(fn); }
+    void setRecycleFn(RecycleFn fn);
 
 private:
     struct CacheKey {
@@ -163,7 +171,16 @@ private:
         LruIter                  lruIt;
     };
 
+    /// Requires m_mtx held.  Walks the LRU back-to-front and evicts
+    /// entries until VRAM usage + `needed` ≤ budget.  Skips pinned
+    /// entries and (on the first pass) loop frames.
     void evictUntilFits(size_t needed);
+
+    /// Serialises every public method.  Marked mutable so the const
+    /// statistics accessors can lock.  Recursive locking is forbidden:
+    /// internal helpers (evictUntilFits) are documented as
+    /// "requires m_mtx held" and must not re-enter via a public method.
+    mutable std::mutex m_mtx;
 
     std::unordered_map<CacheKey, Entry, CacheKeyHash> m_map;
     LruList m_lru;

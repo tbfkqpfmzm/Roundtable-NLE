@@ -4,6 +4,7 @@
  */
 
 #include "MediaPool.h"
+#include "GpuUploadManager.h"
 
 #include <spdlog/spdlog.h>
 
@@ -46,6 +47,39 @@ void MediaPool::logPerfReport()
                  cacheStats.memoryUsed / 1048576.0,
                  cacheStats.memoryCapacity / 1048576.0,
                  cacheStats.hitRate() * 100.0);
+
+    // UPGRADE_PLAN Phase 0 D.1: cold-frame composite-upload cost.  Should
+    // drop sharply once the GPU-resident decode path (Phase 4-5) lands.
+    const uint64_t firstUploadUs    = GpuUploadManager::firstUploadTotalUs();
+    const uint64_t firstUploadCount = GpuUploadManager::firstUploadCount();
+    if (firstUploadCount > 0) {
+        spdlog::info("  GPU first uploads:   {} ({:.2f} ms total, {:.2f} ms avg)",
+                     firstUploadCount,
+                     firstUploadUs / 1000.0,
+                     (firstUploadUs / 1000.0) / firstUploadCount);
+    } else {
+        spdlog::info("  GPU first uploads:   0");
+    }
+    GpuUploadManager::resetFirstUploadStats();
+
+    // UPGRADE_PLAN Phase 9: dispatch ratio so an operator can see at a
+    // glance whether GPU-resident is actually firing.  Bumped to warn so
+    // it survives the warn+ logger filter — these counters are the main
+    // signal that the pipeline change is doing what it claims.
+    const uint64_t gpuResident = m_perf.gpuResidentDecoded.exchange(0, std::memory_order_relaxed);
+    const uint64_t cpuConvert  = m_perf.cpuConvertDecoded.exchange(0, std::memory_order_relaxed);
+    const uint64_t convertTotal = gpuResident + cpuConvert;
+    if (convertTotal > 0) {
+        const double gpuPct = 100.0 * gpuResident / convertTotal;
+        spdlog::warn("[UPGRADE_PLAN PERF] decode dispatch: GPU={} CPU={} "
+                     "({:.1f}% GPU-resident) | first-uploads={} ({:.2f}ms avg)",
+                     gpuResident, cpuConvert, gpuPct,
+                     firstUploadCount,
+                     firstUploadCount > 0
+                         ? (firstUploadUs / 1000.0) / firstUploadCount
+                         : 0.0);
+    }
+
     spdlog::info("====================================================");
 }
 

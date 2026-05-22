@@ -634,6 +634,12 @@ bool GpuContext::readbackTexture(void* texturePtr,
 {
     if (!m_initialized || !texturePtr) return false;
 
+    // UPGRADE_PLAN Phase 7 K.4: serialise concurrent readbacks.  m_cmdPool
+    // is host-externally-synchronised; without this, the disk cache worker
+    // and an export thread racing on a freshly-decoded GPU-resident frame
+    // would crash in vkAllocateCommandBuffers / vkBeginCommandBuffer.
+    std::lock_guard lk(m_readbackMutex);
+
     auto* tex = static_cast<Texture*>(texturePtr);
     const VkDeviceSize bufSz = static_cast<VkDeviceSize>(width) * height * 4;
 

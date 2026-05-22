@@ -348,21 +348,24 @@ std::unique_ptr<Command> EditOperations::rollingEdit(
         }
     }
 
-    // Clamp source limit for right clip (non-looping)
-    int64_t rightMaxDur = INT64_MAX;
+    // Clamp source limit for right clip (non-looping).
+    // In a rolling edit the right clip's tail is fixed; only its head
+    // moves, so the source extent [sourceIn, sourceIn+duration] is
+    // constant.  The only source-side constraint is sourceIn >= 0
+    // (can't roll the right-clip head left past the start of its media).
+    bool  rightHasSourceLimit = false;
     {
         int64_t srcDur = 0;
         if (auto* vc = dynamic_cast<const VideoClip*>(rightClip)) {
-            if (!vc->isVideoCharacter())
+            if (!vc->isVideoCharacter()) {
                 srcDur = vc->sourceDuration();
+                rightHasSourceLimit = true;
+            }
         } else if (auto* ac = dynamic_cast<const AudioClip*>(rightClip)) {
             srcDur = ac->sourceDuration();
+            rightHasSourceLimit = true;
         }
-        if (srcDur > 0) {
-            // Right clip's source remaining from original sourceIn
-            rightMaxDur = srcDur - rightClip->sourceIn();
-            if (rightMaxDur < kMinClipDuration) rightMaxDur = kMinClipDuration;
-        }
+        (void)srcDur;
     }
 
     int64_t rightNewDuration = rightEnd - newEditPoint;
@@ -394,7 +397,7 @@ std::unique_ptr<Command> EditOperations::rollingEdit(
         int64_t rightNewSourceIn = rightClip->sourceIn() + rightSrcDelta;
 
         // Clamp right source to source limit
-        if (rightMaxDur < INT64_MAX) {
+        if (rightHasSourceLimit) {
             // The right clip's source can't go negative
             int64_t maxBackShift = rightClip->sourceIn();
             if (rightSrcDelta < -maxBackShift) {
@@ -429,11 +432,19 @@ std::unique_ptr<Command> EditOperations::rollingEdit(
         newEditPoint = leftClip->timelineIn() + leftNewDuration;
         rightNewDuration = rightEnd - newEditPoint;
     }
-    if (rightNewDuration > rightMaxDur)
-    {
-        rightNewDuration = rightMaxDur;
-        newEditPoint = rightEnd - rightNewDuration;
-        leftNewDuration = newEditPoint - leftClip->timelineIn();
+    // Right clip head can't roll left past source start (sourceIn >= 0).
+    // Its tail is fixed, so the duration check used for regular trims
+    // doesn't apply — rolling only shifts the head.
+    if (rightHasSourceLimit) {
+        int64_t rightSrcDelta = newEditPoint - rightClip->timelineIn();
+        int64_t rightNewSourceIn = rightClip->sourceIn() + rightSrcDelta;
+        if (rightNewSourceIn < 0) {
+            // Clamp: move the edit point right until sourceIn reaches 0
+            int64_t maxLeftShift = rightClip->sourceIn();
+            newEditPoint = rightClip->timelineIn() - maxLeftShift;
+            leftNewDuration = newEditPoint - leftClip->timelineIn();
+            rightNewDuration = rightEnd - newEditPoint;
+        }
     }
     if (rightNewDuration < kMinClipDuration)
     {

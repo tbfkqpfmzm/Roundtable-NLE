@@ -229,33 +229,29 @@ bool Nv12Converter::convertYuv420pSync(const uint8_t* yData, int yLinesize,
 //  Scaled YUV420P→BGRA (upload at srcW×srcH, output at dstW×dstH)
 //══════════════════════════════════════════════════════════════════════════
 
-bool Nv12Converter::convertYuv420pSyncScaled(
+// UPGRADE_PLAN Phase 4: recording body of convertYuv420pSyncScaled.
+// See Nv12ConverterConvert.cpp::recordConvertScaled for the rationale.
+bool Nv12Converter::recordConvertYuv420pScaled(
+    VkCommandBuffer cmd,
     const uint8_t* yData, int yLinesize,
     const uint8_t* uData, int uLinesize,
     const uint8_t* vData, int vLinesize,
     uint32_t srcW, uint32_t srcH,
-    uint32_t dstW, uint32_t dstH)
+    uint32_t dstW, uint32_t dstH,
+    std::vector<Texture::StagingCleanup>& stagingOut)
 {
-    if (!m_initialized || !m_cmdPool) return false;
-
-    // Same-size: delegate to non-scaled path
-    if (srcW == dstW && srcH == dstH)
-        return convertYuv420pSync(yData, yLinesize, uData, uLinesize,
-                                  vData, vLinesize, srcW, srcH);
+    if (!m_initialized) return false;
+    if (cmd == VK_NULL_HANDLE) return false;
 
     // Lazy pipeline creation
     if (m_yuv420pPipeline == VK_NULL_HANDLE) {
         if (!createYuv420pPipeline()) return false;
     }
 
-    // Ensure output texture is at target (downscaled) size
     if (!ensureOutputSize(dstW, dstH)) return false;
 
     const uint32_t cw = srcW / 2;
     const uint32_t ch = srcH / 2;
-
-    VkCommandBuffer cmd = m_cmdPool->beginSingleTime();
-    std::vector<Texture::StagingCleanup> staging;
 
     // ── Upload Y plane at source resolution ─────────────────────────────
     {
@@ -277,12 +273,12 @@ bool Nv12Converter::convertYuv420pSyncScaled(
             if (!m_yTexture.createFromDataBatched(
                     m_allocator->handle(), m_device->handle(), cfg,
                     yPacked.data(), ySize, cmd, stg))
-                { m_cmdPool->endSingleTime(cmd, m_queue); return false; }
+                return false;
         } else {
             if (!m_yTexture.updateDataBatched(yPacked.data(), ySize, cmd, stg))
-                { m_cmdPool->endSingleTime(cmd, m_queue); return false; }
+                return false;
         }
-        if (stg.buffer != VK_NULL_HANDLE) staging.push_back(stg);
+        if (stg.buffer != VK_NULL_HANDLE) stagingOut.push_back(stg);
     }
 
     // ── Upload U plane at source resolution ─────────────────────────────
@@ -305,12 +301,12 @@ bool Nv12Converter::convertYuv420pSyncScaled(
             if (!m_uTexture.createFromDataBatched(
                     m_allocator->handle(), m_device->handle(), cfg,
                     uPacked.data(), uSize, cmd, stg))
-                { m_cmdPool->endSingleTime(cmd, m_queue); return false; }
+                return false;
         } else {
             if (!m_uTexture.updateDataBatched(uPacked.data(), uSize, cmd, stg))
-                { m_cmdPool->endSingleTime(cmd, m_queue); return false; }
+                return false;
         }
-        if (stg.buffer != VK_NULL_HANDLE) staging.push_back(stg);
+        if (stg.buffer != VK_NULL_HANDLE) stagingOut.push_back(stg);
     }
 
     // ── Upload V plane at source resolution ─────────────────────────────
@@ -333,12 +329,12 @@ bool Nv12Converter::convertYuv420pSyncScaled(
             if (!m_vTexture.createFromDataBatched(
                     m_allocator->handle(), m_device->handle(), cfg,
                     vPacked.data(), vSize, cmd, stg))
-                { m_cmdPool->endSingleTime(cmd, m_queue); return false; }
+                return false;
         } else {
             if (!m_vTexture.updateDataBatched(vPacked.data(), vSize, cmd, stg))
-                { m_cmdPool->endSingleTime(cmd, m_queue); return false; }
+                return false;
         }
-        if (stg.buffer != VK_NULL_HANDLE) staging.push_back(stg);
+        if (stg.buffer != VK_NULL_HANDLE) stagingOut.push_back(stg);
     }
 
     // ── Barrier: transfer → compute ─────────────────────────────────────
@@ -423,12 +419,38 @@ bool Nv12Converter::convertYuv420pSyncScaled(
             0, 1, &barrier, 0, nullptr, 0, nullptr);
     }
 
+    return true;
+}
+
+bool Nv12Converter::convertYuv420pSyncScaled(
+    const uint8_t* yData, int yLinesize,
+    const uint8_t* uData, int uLinesize,
+    const uint8_t* vData, int vLinesize,
+    uint32_t srcW, uint32_t srcH,
+    uint32_t dstW, uint32_t dstH)
+{
+    if (!m_initialized || !m_cmdPool) return false;
+
+    // Same-size: delegate to non-scaled path
+    if (srcW == dstW && srcH == dstH)
+        return convertYuv420pSync(yData, yLinesize, uData, uLinesize,
+                                  vData, vLinesize, srcW, srcH);
+
+    VkCommandBuffer cmd = m_cmdPool->beginSingleTime();
+    std::vector<Texture::StagingCleanup> staging;
+
+    const bool ok = recordConvertYuv420pScaled(
+        cmd,
+        yData, yLinesize, uData, uLinesize, vData, vLinesize,
+        srcW, srcH, dstW, dstH,
+        staging);
+
     m_cmdPool->endSingleTime(cmd, m_queue);
 
     for (auto& s : staging)
         s.destroy();
 
-    return true;
+    return ok;
 }
 
 } // namespace rt

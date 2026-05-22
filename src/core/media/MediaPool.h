@@ -39,6 +39,17 @@
 
 namespace rt {
 
+// Forward declaration: PrefetchTexturePool drags in Vulkan headers, and
+// MediaPool.h is included widely. The unique_ptr<PrefetchTexturePool>
+// member below only needs the complete type at the point its destructor
+// is instantiated (MediaPool.cpp).
+class PrefetchTexturePool;
+
+// UPGRADE_PLAN Phase 4: convertDecodedToCacheGpu takes a reference to
+// per-worker Vulkan state.  Definition lives in MediaPoolPrefetchGpu.h
+// (Vulkan-tainted); forward-declared here to keep MediaPool.h clean.
+struct WorkerGpuState;
+
 /// Handle returned by MediaPool when media is opened.
 using MediaHandle = uint64_t;
 constexpr MediaHandle InvalidMedia = 0;
@@ -282,6 +293,14 @@ public:
         std::atomic<uint64_t> totalRequests{0};     // total getFrame + tryGetFrame calls
         std::atomic<uint64_t> prefetchScheduled{0}; // prefetch tasks enqueued
         std::atomic<uint64_t> avgDecodeUs{0};       // rolling average decode time in microseconds
+        // UPGRADE_PLAN Phase 9: per-window counts of decode dispatch.
+        // gpuResidentDecoded covers convertDecodedToCacheGpu successes;
+        // cpuConvertDecoded covers convertDecodedToCache. The ratio tells
+        // an operator whether the GPU-resident path is actually firing
+        // (high ratio = working), or being skipped (low ratio = eligibility
+        // failure, e.g. packed-alpha, headless, or flag off).
+        std::atomic<uint64_t> gpuResidentDecoded{0};
+        std::atomic<uint64_t> cpuConvertDecoded{0};
 
         void reset() {
             cacheHits.store(0, std::memory_order_relaxed);
@@ -293,6 +312,8 @@ public:
             totalRequests.store(0, std::memory_order_relaxed);
             prefetchScheduled.store(0, std::memory_order_relaxed);
             avgDecodeUs.store(0, std::memory_order_relaxed);
+            gpuResidentDecoded.store(0, std::memory_order_relaxed);
+            cpuConvertDecoded.store(0, std::memory_order_relaxed);
         }
     };
     PerfMetrics m_perf;
@@ -368,11 +389,42 @@ private:
     void startPrefetchThread();
     void stopPrefetchThread();
     void prefetchWorker(int workerId);
+    /// Per-worker GPU state is passed in as a pointer so it can be null
+    /// for the scrub-path caller (MediaPoolFrame.cpp) that has no worker.
+    /// Defined nullable for forward-compatibility; the dispatch helper
+    /// short-circuits to the CPU path on null + feature-flag-off.
     std::shared_ptr<CachedFrame> decodePrefetchFrame(
-        PrefetchDecoderState& state, const PrefetchTask& task);
+        PrefetchDecoderState& state, const PrefetchTask& task,
+        WorkerGpuState* wgs = nullptr);
     std::shared_ptr<CachedFrame> convertDecodedToCache(
         PrefetchDecoderState& state, const PrefetchTask& task,
         DecodedFrame& decoded, int64_t frameNumber);
+
+public:
+    /// UPGRADE_PLAN Phase 4: GPU-resident sibling of convertDecodedToCache.
+    /// Routes the NV12/YUV420P → BGRA conversion through Nv12Converter and
+    /// writes the result into a per-frame pooled VkImage, so the
+    /// compositor can sample without a CPU↔GPU round-trip.  Falls back to
+    /// nullptr on any eligibility failure (packed-alpha, headless build,
+    /// unsupported format, device-lost, etc.); callers must respond by
+    /// calling the CPU convertDecodedToCache.  Definition in
+    /// MediaPoolPrefetchConvertGpu.cpp.
+    ///
+    /// Public so the free dispatch helper tryConvertDecodedToCacheGpu
+    /// (MediaPoolPrefetchGpu.h) can call it without `friend` noise.
+    std::shared_ptr<CachedFrame> convertDecodedToCacheGpu(
+        PrefetchDecoderState& state, const PrefetchTask& task,
+        DecodedFrame& decoded, int64_t frameNumber,
+        WorkerGpuState& wgs);
+
+    /// UPGRADE_PLAN: App calls this after GpuContext::init() succeeds.
+    /// Allocates m_prefetchTexPool, which the ctor could not create
+    /// because GpuContext was not initialised at that point.  Idempotent;
+    /// safe to call multiple times.  Without this call, the GPU-resident
+    /// prefetch path stays disabled and every frame takes the CPU path.
+    void onGpuContextReady();
+
+private:
 
     // ── Loop pre-decode ─────────────────────────────────────────────────
     // For short looping videos (idle character animations), decode ALL
@@ -393,6 +445,12 @@ private:
     std::shared_ptr<PixelBufferPool>                m_pixelPool;
     FrameScheduler                                  m_scheduler;
     uint64_t                                        m_nextHandle{1};
+
+    // UPGRADE_PLAN Phase 3: recycled VkImage pool for the GPU-resident
+    // prefetch decode path. Null when GpuContext is not initialised
+    // (headless / no-Vulkan builds) — prefetch workers must tolerate
+    // null and fall back to the CPU path. Phase 4 is the first consumer.
+    std::unique_ptr<PrefetchTexturePool>            m_prefetchTexPool;
 
     // Prefetch thread pool state
     std::vector<std::thread>                         m_prefetchThreads;

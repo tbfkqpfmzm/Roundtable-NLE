@@ -1,4 +1,5 @@
 @echo off
+set ROUNDTABLE_GPU_RESIDENT_DECODE=1
 setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
 

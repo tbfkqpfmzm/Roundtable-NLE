@@ -3,6 +3,7 @@
  */
 
 #include "MediaPool.h"
+#include "PrefetchTexturePool.h"
 
 #include <cstring>
 #include <algorithm>
@@ -78,8 +79,27 @@ MediaPool::MediaPool(std::shared_ptr<FrameCache> cache)
     m_scheduler.setMaxLookahead(PREFETCH_AHEAD_COUNT);
     m_scheduler.setMaxWorkers(PREFETCH_THREAD_COUNT);
 
+    // UPGRADE_PLAN Phase 3: try to allocate the GPU-resident texture pool
+    // here.  In the typical App startup MediaPool is constructed BEFORE
+    // GpuContext::init() runs (App.cpp), so this branch is rarely taken
+    // — App calls onGpuContextReady() once init succeeds to retry the
+    // allocation.  Keeping the eager attempt for headless test paths
+    // that init GpuContext earlier.
+    if (GpuContext::get().isInitialized()) {
+        m_prefetchTexPool = std::make_unique<PrefetchTexturePool>();
+    }
+
     startPrefetchThread();
     startOpenWorker();
+}
+
+void MediaPool::onGpuContextReady()
+{
+    if (m_prefetchTexPool) return;
+    if (!GpuContext::get().isInitialized()) return;
+    m_prefetchTexPool = std::make_unique<PrefetchTexturePool>();
+    spdlog::warn("MediaPool: PrefetchTexturePool allocated post-GpuContext init "
+                 "— GPU-resident prefetch decode path now armed");
 }
 
 MediaPool::~MediaPool()

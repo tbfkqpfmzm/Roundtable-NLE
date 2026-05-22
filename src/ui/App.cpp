@@ -269,6 +269,13 @@ bool App::init()
                     gi.vendorId, gi.deviceId, gi.name, gi.vramSize);
                 HardwareDiagnostics::logAtStartup(m_diagnosticsGpu,
                                                   m_diagnosticsHooks);
+
+                // UPGRADE_PLAN: arm the GPU-resident prefetch decode
+                // path now that GpuContext is up.  MediaPool was
+                // constructed earlier (above) without access to GPU
+                // resources, so it deferred allocating PrefetchTexturePool
+                // until this call.
+                if (m_mediaPool) m_mediaPool->onGpuContextReady();
             }
         } else {
             spdlog::info("App: skipping GPU init (--capture-workspace mode)");

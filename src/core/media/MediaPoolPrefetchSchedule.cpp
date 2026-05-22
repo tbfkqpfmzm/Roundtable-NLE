@@ -7,11 +7,15 @@
 
 #include "MediaPool.h"
 #include "MediaPoolPrefetchInternal.h"
+#include "MediaPoolPrefetchGpu.h"
+#include "GpuContext.h"
 
 #include <spdlog/spdlog.h>
 #include <cstring>
 #include <chrono>
 #include <thread>
+
+#include <volk.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -28,6 +32,10 @@ extern "C" {
 #include <unordered_map>
 
 namespace rt {
+
+// UPGRADE_PLAN Phase 1 — per-prefetch-worker Vulkan state.
+// WorkerGpuState is defined in MediaPoolPrefetchGpu.h so it can be shared
+// with the convertDecodedToCacheGpu translation unit (Phase 4).
 
 void MediaPool::schedulePrefetch(MediaHandle handle, int64_t afterFrame, int count, bool urgent, ResolutionTier tier)
 {
@@ -175,12 +183,68 @@ void MediaPool::prefetchWorker(int workerId)
 #endif
     spdlog::info("MediaPool: prefetch worker {} started (ABOVE_NORMAL priority)", workerId);
 
+    // UPGRADE_PLAN: per-worker Vulkan state.  MediaPool is constructed
+    // BEFORE GpuContext::init runs in the typical App startup, so this
+    // first attempt usually fails (GpuContext not yet initialised).
+    // The worker re-tries lazily at the top of each loop iteration
+    // until init succeeds, after which the GPU-resident decode path
+    // becomes eligible.  This avoids any worker-restart dance.
+    WorkerGpuState wgs;
+    auto tryInitWgs = [&]() {
+        if (wgs.ready()) return;
+        if (!GpuContext::get().isInitialized()) return;
+        auto& dev = GpuContext::get().device();
+        const auto& qf = dev.queueFamilies();
+        const uint32_t computeFamily =
+            qf.compute.value_or(qf.graphics.value_or(0));
+        if (wgs.cmdPool.handle() == VK_NULL_HANDLE) {
+            if (!wgs.cmdPool.create(dev.handle(), computeFamily)) {
+                // Surface as warn so we notice; retry won't help if the
+                // device is wedged.  Mark the worker permanently CPU-only.
+                static thread_local bool s_warned = false;
+                if (!s_warned) {
+                    spdlog::warn("MediaPool prefetch[{}]: per-worker "
+                                 "CommandPool create failed", workerId);
+                    s_warned = true;
+                }
+                return;
+            }
+            wgs.device = dev.handle();
+        }
+        if (wgs.signalSem == VK_NULL_HANDLE) {
+            VkSemaphoreCreateInfo semInfo{};
+            semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+            const VkResult semRc = vkCreateSemaphore(dev.handle(), &semInfo,
+                                                     nullptr, &wgs.signalSem);
+            if (semRc != VK_SUCCESS) {
+                static thread_local bool s_warned = false;
+                if (!s_warned) {
+                    spdlog::warn("MediaPool prefetch[{}]: vkCreateSemaphore "
+                                 "failed ({})", workerId,
+                                 static_cast<int>(semRc));
+                    s_warned = true;
+                }
+                wgs.signalSem = VK_NULL_HANDLE;
+                return;
+            }
+        }
+        if (wgs.ready()) {
+            spdlog::warn("MediaPool prefetch[{}]: WorkerGpuState ready "
+                         "— GPU-resident decode path now eligible", workerId);
+        }
+    };
+    tryInitWgs();
+
     std::unordered_map<MediaHandle, PrefetchDecoderState> decoders;
     size_t queueSize = 0;
     int skippedCached = 0;
     int decodedCount = 0;
 
     while (m_prefetchRunning) {
+        // Lazy retry: if GpuContext became initialised since worker start,
+        // arm WorkerGpuState now.  No-op when already ready.
+        if (!wgs.ready()) tryInitWgs();
+
         PrefetchTask task;
         {
             std::unique_lock lock(m_prefetchMutex);
@@ -346,7 +410,7 @@ void MediaPool::prefetchWorker(int workerId)
         }
 
         auto decT0 = std::chrono::steady_clock::now();
-        auto frame = decodePrefetchFrame(state, task);
+        auto frame = decodePrefetchFrame(state, task, &wgs);
         auto decMs = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - decT0).count();
         if (decMs > 80.0) {
@@ -413,7 +477,7 @@ void MediaPool::prefetchWorker(int workerId)
                 followTask.tier        = followTier;
                 followTask.urgent      = false;
 
-                auto followFrame = decodePrefetchFrame(state, followTask);
+                auto followFrame = decodePrefetchFrame(state, followTask, &wgs);
                 if (followFrame) {
                     m_cache->put(followFrame);
                     if (m_diskCache) m_diskCache->putAsync(followFrame);

@@ -88,6 +88,27 @@ public:
                            uint32_t srcW, uint32_t srcH,
                            uint32_t dstW, uint32_t dstH);
 
+    /// Record (only) NV12→BGRA + downscale into a caller-provided command
+    /// buffer.  Does NOT submit and does NOT wait.  The caller is
+    /// responsible for:
+    ///   - calling ensureOutputSize(dstW, dstH) beforehand (or using the
+    ///     overload below that does it for them);
+    ///   - keeping the returned staging buffers alive until the submitted
+    ///     command buffer completes, then calling StagingCleanup::destroy();
+    ///   - synchronising the call across threads via the same m_apiMutex
+    ///     that convertAndReadback* takes — this method does NOT lock.
+    ///
+    /// Used by the GPU-resident prefetch path (UPGRADE_PLAN Phase 4) so
+    /// the prefetch worker can record convert + downstream vkCmdCopyImage
+    /// into a single per-worker command buffer and submit once with a
+    /// compositor-bound signal semaphore.
+    bool recordConvertScaled(VkCommandBuffer cmd,
+                             const uint8_t* yData, int yLinesize,
+                             const uint8_t* uvData, int uvLinesize,
+                             uint32_t srcW, uint32_t srcH,
+                             uint32_t dstW, uint32_t dstH,
+                             std::vector<Texture::StagingCleanup>& stagingOut);
+
     // ── YUV420P (3-plane) conversion ─────────────────────────────────
 
     /// Synchronous YUV420P→BGRA conversion.  3 separate planes.
@@ -102,6 +123,16 @@ public:
                                   const uint8_t* vData, int vLinesize,
                                   uint32_t srcW, uint32_t srcH,
                                   uint32_t dstW, uint32_t dstH);
+
+    /// Record-only YUV420P→BGRA + downscale.  See recordConvertScaled
+    /// for the full contract.
+    bool recordConvertYuv420pScaled(VkCommandBuffer cmd,
+                                    const uint8_t* yData, int yLinesize,
+                                    const uint8_t* uData, int uLinesize,
+                                    const uint8_t* vData, int vLinesize,
+                                    uint32_t srcW, uint32_t srcH,
+                                    uint32_t dstW, uint32_t dstH,
+                                    std::vector<Texture::StagingCleanup>& stagingOut);
 
     /// Convert NV12 data from a Vulkan buffer (GPU→GPU, no CPU staging).
     /// Used for CUDA-Vulkan interop: NVDEC writes NV12 to a shared VkBuffer,
@@ -162,6 +193,15 @@ public:
                                           uint32_t srcW, uint32_t srcH,
                                           uint32_t dstW, uint32_t dstH,
                                           std::vector<uint8_t>& outPixels);
+
+    /// Public accessor on the converter's internal API mutex (the one that
+    /// convertAndReadback* lock).  Required by external callers (e.g. the
+    /// GPU-resident prefetch path, UPGRADE_PLAN Phase 4) that want to
+    /// record into a caller-provided command buffer alongside downstream
+    /// commands and submit once — the lock protects the shared internal
+    /// textures (m_yTexture/m_uvTexture/m_uTexture/m_vTexture/
+    /// m_outputTexture) and the descriptor sets from concurrent recorders.
+    [[nodiscard]] std::mutex& apiMutex() const noexcept { return m_apiMutex; }
 
 private:
     bool createTextures();

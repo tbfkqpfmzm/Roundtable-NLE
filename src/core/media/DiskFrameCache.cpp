@@ -159,7 +159,14 @@ bool DiskFrameCache::contains(uint64_t mediaId, int64_t frameNumber,
 
 void DiskFrameCache::putAsync(std::shared_ptr<CachedFrame> frame)
 {
-    if (!frame || frame->pixels.empty()) return;
+    if (!frame) return;
+    // UPGRADE_PLAN Phase 7 K.2: GPU-resident frames arrive with empty
+    // pixels and a lazyReadback closure that materialises on demand.
+    // Skip only when there is truly nothing to write (neither CPU pixels
+    // nor a way to get them).  The writer thread will call ensurePixels()
+    // on lazy frames before writeFrame() so the synchronous GPU readback
+    // happens off the prefetch hot path.
+    if (frame->pixels.empty() && !frame->lazyReadback) return;
 
     auto hash = getPathHash(frame->mediaId);
     if (hash.empty()) return;
@@ -217,6 +224,18 @@ void DiskFrameCache::writerThread()
         std::error_code ec;
         std::filesystem::create_directories(path.parent_path(), ec);
         if (ec) continue;
+
+        // UPGRADE_PLAN Phase 7 K.2: GPU-resident frames defer CPU pixels.
+        // Materialise them here (off the prefetch worker's hot path) so
+        // writeFrame can serialise the BGRA buffer.  ensurePixels is
+        // thread-safe and one-shot — subsequent disk reads see the
+        // populated buffer directly.
+        if (frame->pixels.empty() && !frame->ensurePixels()) {
+            spdlog::warn("DiskFrameCache: lazy readback failed for "
+                         "mediaId={} frame={}, skipping disk write",
+                         frame->mediaId, frame->frameNumber);
+            continue;
+        }
 
         if (writeFrame(path, *frame)) {
             auto bytes = std::filesystem::file_size(path, ec);

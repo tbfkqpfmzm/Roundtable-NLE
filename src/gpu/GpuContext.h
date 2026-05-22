@@ -278,6 +278,14 @@ private:
     mutable std::mutex m_computeQueueMutex;   ///< Serialise compute queue submits
     mutable std::mutex m_transferQueueMutex;  ///< Serialise transfer queue submits (P1)
     mutable std::mutex m_subsystemMutex;      ///< Serialise lazy subsystem creation
+    /// UPGRADE_PLAN Phase 7 K.4: serialises GpuContext::readbackTexture
+    /// across threads.  Lazy CPU readback (CachedFrame::lazyReadback) can
+    /// fire from the disk cache worker, the export thread, or anywhere
+    /// that calls ensurePixels() — all share m_cmdPool, which is
+    /// host-externally-synchronised per Vulkan spec.  Single mutex is
+    /// fine: readback is a slow path (only when CPU pixels are demanded
+    /// after GPU-resident decode), so contention is irrelevant.
+    mutable std::mutex m_readbackMutex;
 
     /// Central GPU submission authority — see GpuScheduler.h.
     /// Default-constructed; init()/shutdown() are tied to GpuContext's

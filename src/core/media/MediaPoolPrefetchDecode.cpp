@@ -8,6 +8,7 @@
 
 #include "MediaPool.h"
 #include "MediaPoolPrefetchInternal.h"
+#include "MediaPoolPrefetchGpu.h"     // tryConvertDecodedToCacheGpu
 
 #include <spdlog/spdlog.h>
 #include <chrono>
@@ -39,7 +40,8 @@ void releaseStillDecoder(PrefetchDecoderState& state, const PrefetchTask& task)
 } // namespace
 
 std::shared_ptr<CachedFrame> MediaPool::decodePrefetchFrame(
-    PrefetchDecoderState& state, const PrefetchTask& task)
+    PrefetchDecoderState& state, const PrefetchTask& task,
+    WorkerGpuState* wgs)
 {
     auto perfDecodeT0 = std::chrono::high_resolution_clock::now();
     auto& decoder = *state.decoder;
@@ -87,7 +89,13 @@ std::shared_ptr<CachedFrame> MediaPool::decodePrefetchFrame(
         state.lastDecodedFrame = task.frameNumber;
 
         auto perfDecodeT1a = std::chrono::high_resolution_clock::now();
-        auto cached = convertDecodedToCache(state, task, fwd, task.frameNumber);
+        // UPGRADE_PLAN Phase 4: try GPU-resident path first; fall back to
+        // CPU on any eligibility failure (feature flag off, headless,
+        // packed-alpha, unsupported pixel format, device-lost, etc.).
+        auto cached = tryConvertDecodedToCacheGpu(
+            *this, state, task, fwd, task.frameNumber, wgs);
+        if (!cached)
+            cached = convertDecodedToCache(state, task, fwd, task.frameNumber);
         if (!cached) return nullptr;
 
         auto perfDecodeT1 = std::chrono::high_resolution_clock::now();
@@ -109,7 +117,11 @@ std::shared_ptr<CachedFrame> MediaPool::decodePrefetchFrame(
     state.lastDecodedFrame = task.frameNumber;
 
     auto perfDecodeT1a = std::chrono::high_resolution_clock::now();
-    auto cached = convertDecodedToCache(state, task, decoded, task.frameNumber);
+    // UPGRADE_PLAN Phase 4: GPU-resident path first; CPU fallback.
+    auto cached = tryConvertDecodedToCacheGpu(
+        *this, state, task, decoded, task.frameNumber, wgs);
+    if (!cached)
+        cached = convertDecodedToCache(state, task, decoded, task.frameNumber);
     if (!cached)
         return nullptr;
 

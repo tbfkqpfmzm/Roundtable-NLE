@@ -16,9 +16,37 @@
 
 #include <spdlog/spdlog.h>
 
+#include <atomic>
+#include <chrono>
 #include <cstring>
 
 namespace rt {
+
+// ── First-upload telemetry (UPGRADE_PLAN Phase 0 D.1) ────────────────────
+//
+// File-scope atomics rather than members: GpuUploadManager is owned by
+// CompositeEngine and MediaPoolPerf has no handle to it, so static counters
+// avoid plumbing a pointer across subsystems.
+namespace {
+std::atomic<uint64_t> g_firstUploadTotalUs{0};
+std::atomic<uint64_t> g_firstUploadCount{0};
+} // namespace
+
+uint64_t GpuUploadManager::firstUploadTotalUs() noexcept
+{
+    return g_firstUploadTotalUs.load(std::memory_order_relaxed);
+}
+
+uint64_t GpuUploadManager::firstUploadCount() noexcept
+{
+    return g_firstUploadCount.load(std::memory_order_relaxed);
+}
+
+void GpuUploadManager::resetFirstUploadStats() noexcept
+{
+    g_firstUploadTotalUs.store(0, std::memory_order_relaxed);
+    g_firstUploadCount.store(0, std::memory_order_relaxed);
+}
 
 // ── Constructor / Destructor ──────────────────────────────────────────────
 
@@ -106,6 +134,72 @@ GpuUploadResult GpuUploadManager::uploadLayer(
         }
     }
 
+    // ── GPU-resident CachedFrame path (UPGRADE_PLAN Phase 5) ────────────
+    // The prefetch worker (Phase 4 convertDecodedToCacheGpu) wrote BGRA
+    // directly into a per-frame pooled VkImage and tagged the CachedFrame
+    // with gpuReady=true.  Skip the CPU upload entirely: pull the
+    // descriptor straight from the CachedFrame and promote into
+    // GpuTextureCache via putShared so subsequent composites (and the
+    // eviction policy) treat it as a normal cache entry.
+    //
+    // Gated implicitly by CompositeService::s_gpuResidentDecode — when
+    // the flag is off, no prefetched CachedFrame ever has gpuReady=true,
+    // so this branch is dead code at runtime.  When the flag is on, the
+    // branch fires on first composite of every prefetched frame, dropping
+    // the cacheable-miss upload counter (Phase 0 D.1) toward zero.
+    if (m_texCache
+        && layer.frame
+        && layer.frame->gpuReady
+        && layer.frame->gpuImageView != 0
+        && layer.frame->gpuSampler   != 0
+        && layer.frame->gpuTextureOwner
+        && layer.frame->mediaId != 0)
+    {
+        VkDescriptorImageInfo desc{};
+        desc.imageView   = reinterpret_cast<VkImageView>(layer.frame->gpuImageView);
+        desc.sampler     = reinterpret_cast<VkSampler>(layer.frame->gpuSampler);
+        desc.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        const size_t bytes = static_cast<size_t>(layer.frame->width)
+                             * layer.frame->height * 4;
+
+        // putShared is idempotent (skip if already cached) — see
+        // GpuTextureCache.cpp.  Subsequent composites of the same frame
+        // take the cache-hit path above instead of this one.
+        m_texCache->putShared(
+            layer.frame->mediaId,
+            layer.frame->frameNumber,
+            static_cast<uint8_t>(layer.frame->tier),
+            layer.frame->gpuTextureOwner,         // shared_ptr<void>
+            desc,
+            layer.frame->width,
+            layer.frame->height,
+            bytes,
+            /*isPacked=*/ false,                  // Phase 4 eligibility
+                                                  // forbids packed-alpha
+            /*isPMA=*/    layer.frame->premultipliedAlpha,
+            /*isLoopFrame=*/ layer.frame->isLoopFrame);
+
+        recordPin(layer.frame->mediaId,
+                  layer.frame->frameNumber,
+                  static_cast<uint8_t>(layer.frame->tier));
+
+        // NB: this is where a Phase 6 (cross-queue semaphore) impl would
+        // atomic-exchange layer.frame->gpuSemaphore to zero and push the
+        // popped semaphore onto m_pendingWaitSems, for CompositeEngine to
+        // attach as a wait-sem on its graphics-queue submit.  Not needed
+        // for PR-4's inline-wait design: by the time we get here, the
+        // prefetch worker already vkWaitForFences'd the convert+copy
+        // submission, so the texture is fully resident.
+
+        result.descriptor = desc;
+        result.success    = true;
+        result.cacheHit   = true;     // treat as hit for stats
+        result.srcW       = layer.frame->width;
+        result.srcH       = layer.frame->height;
+        return result;
+    }
+
     // No frame data — cannot upload.
     if (!layer.frame || layer.frame->pixels.empty()) {
         return result;  // success=false
@@ -160,6 +254,7 @@ GpuUploadResult GpuUploadManager::uploadLayer(
 
         bool usedRing = false;
         bool uploadOk = false;
+        const auto uploadT0 = std::chrono::steady_clock::now();
         if (poolHit) {
             // Reuse the existing VkImage — just stream new pixels via the
             // staging ring.  Skips vmaCreateImage entirely.
@@ -172,6 +267,14 @@ GpuUploadResult GpuUploadManager::uploadLayer(
                 layer.frame->pixels.data(), dataSize,
                 cfg.width, cfg.height, cfg.format, cfg.usage, true);
             usedRing = uploadOk;
+        }
+        if (uploadOk) {
+            const auto uploadUs =
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - uploadT0).count();
+            g_firstUploadTotalUs.fetch_add(static_cast<uint64_t>(uploadUs),
+                                           std::memory_order_relaxed);
+            g_firstUploadCount.fetch_add(1, std::memory_order_relaxed);
         }
         if (!uploadOk) {
             spdlog::warn("[UPLOAD] cache texture upload failed for mediaId={} frame={}",

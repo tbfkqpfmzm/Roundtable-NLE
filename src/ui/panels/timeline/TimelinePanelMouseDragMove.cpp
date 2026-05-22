@@ -593,8 +593,15 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
             size_t ri = rollTrack->findClipIndexById(m_rollRightClipId);
             if (li < rollTrack->clipCount() && ri < rollTrack->clipCount()) {
                 int64_t rightEnd = m_rollRightOrigIn + m_rollRightOrigDur;
+                // Minimum: left clip's original in-point AND right clip's
+                // sourceIn can't go below 0 (head can't roll past source start).
+                int64_t minEditPoint = m_rollLeftOrigIn;
+                if (m_rollRightOrigSrcIn > 0) {
+                    int64_t srcLimit = m_rollRightOrigIn - m_rollRightOrigSrcIn;
+                    if (srcLimit > minEditPoint) minEditPoint = srcLimit;
+                }
                 // Allow rolling all the way to boundaries (no min-duration clamp)
-                newEditPoint = std::clamp(newEditPoint, m_rollLeftOrigIn, rightEnd);
+                newEditPoint = std::clamp(newEditPoint, minEditPoint, rightEnd);
                 int64_t leftNewDur = newEditPoint - m_rollLeftOrigIn;
                 int64_t rightNewDur = rightEnd - newEditPoint;
                 int64_t rightSrcDelta = newEditPoint - m_rollRightOrigIn;

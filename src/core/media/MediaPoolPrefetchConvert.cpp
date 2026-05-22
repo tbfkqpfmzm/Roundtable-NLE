@@ -165,6 +165,7 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCache(
 #endif
     }
 
+    m_perf.cpuConvertDecoded.fetch_add(1, std::memory_order_relaxed);
     return cached;
 }
 

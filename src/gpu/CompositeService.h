@@ -93,8 +93,32 @@ public:
         return s_depth;
     }
 
+    // ── UPGRADE_PLAN Phase 4-5 feature flag ─────────────────────────────
+    //
+    // Master switch for the GPU-resident prefetch decode + compositor
+    // consumption pipeline. While false (default), the prefetch path
+    // produces CPU-pixel CachedFrames exactly as it does today and the
+    // compositor upload path runs unchanged — the new code is dormant.
+    //
+    // PR-4 and PR-5 land code behind this flag. The plan mandates that
+    // both land BEFORE the flag is flipped; either alone is not viable:
+    //   - PR-4 alone: prefetch produces GPU-resident frames but the
+    //     compositor still expects CPU pixels; frames render blank.
+    //   - PR-5 alone: compositor reads GPU-resident fields that the
+    //     prefetch path never populates; harmless no-op but pointless.
+    //
+    // Flip to true only after BOTH PRs are merged and the validation
+    // suite in UPGRADE_PLAN Section M (Phase 9) has been run cleanly.
+    static void setGpuResidentDecode(bool on) noexcept {
+        s_gpuResidentDecode.store(on, std::memory_order_release);
+    }
+    [[nodiscard]] static bool gpuResidentDecodeEnabled() noexcept {
+        return s_gpuResidentDecode.load(std::memory_order_acquire);
+    }
+
 private:
     static std::atomic<bool> s_modalDialogActive;
+    static std::atomic<bool> s_gpuResidentDecode;
 
 public:
     // Non-copyable

@@ -256,22 +256,28 @@ bool Nv12Converter::ensureOutputSize(uint32_t w, uint32_t h)
 //  Scaled NV12→BGRA (upload at srcW×srcH, output at dstW×dstH)
 //══════════════════════════════════════════════════════════════════════════
 
-bool Nv12Converter::convertSyncScaled(const uint8_t* yData, int yLinesize,
-                                       const uint8_t* uvData, int uvLinesize,
-                                       uint32_t srcW, uint32_t srcH,
-                                       uint32_t dstW, uint32_t dstH)
+// UPGRADE_PLAN Phase 4: this is the recording body of convertSyncScaled.
+// Lifted into its own method so the GPU-resident prefetch path can record
+// it into a caller-provided command buffer (alongside downstream
+// vkCmdCopyImage to a per-frame destination texture) and submit once.
+// convertSyncScaled below is now a thin wrapper that opens / closes its
+// own single-time cmd around this call.  Behaviour is unchanged for the
+// existing callers (convertSync, convertAndReadback*).
+bool Nv12Converter::recordConvertScaled(
+    VkCommandBuffer cmd,
+    const uint8_t* yData, int yLinesize,
+    const uint8_t* uvData, int uvLinesize,
+    uint32_t srcW, uint32_t srcH,
+    uint32_t dstW, uint32_t dstH,
+    std::vector<Texture::StagingCleanup>& stagingOut)
 {
-    if (!m_initialized || !m_cmdPool) return false;
+    if (!m_initialized) return false;
+    if (cmd == VK_NULL_HANDLE) return false;
 
-    // Same-size: delegate to non-scaled path
-    if (srcW == dstW && srcH == dstH)
-        return convertSync(yData, yLinesize, uvData, uvLinesize, srcW, srcH);
-
-    // Ensure output texture is at target (downscaled) size
+    // Ensure output texture is at target (downscaled) size.  Note this
+    // can call vkDeviceWaitIdle + open its own single-time cmd via
+    // m_cmdPool — those operations are independent of `cmd`.
     if (!ensureOutputSize(dstW, dstH)) return false;
-
-    VkCommandBuffer cmd = m_cmdPool->beginSingleTime();
-    std::vector<Texture::StagingCleanup> staging;
 
     // ── Upload Y plane at source resolution ─────────────────────────────
     {
@@ -293,16 +299,14 @@ bool Nv12Converter::convertSyncScaled(const uint8_t* yData, int yLinesize,
             if (!m_yTexture.createFromDataBatched(
                     m_allocator->handle(), m_device->handle(), cfg,
                     yPacked.data(), ySize, cmd, stg)) {
-                m_cmdPool->endSingleTime(cmd, m_queue);
                 return false;
             }
         } else {
             if (!m_yTexture.updateDataBatched(yPacked.data(), ySize, cmd, stg)) {
-                m_cmdPool->endSingleTime(cmd, m_queue);
                 return false;
             }
         }
-        if (stg.buffer != VK_NULL_HANDLE) staging.push_back(stg);
+        if (stg.buffer != VK_NULL_HANDLE) stagingOut.push_back(stg);
     }
 
     // ── Upload UV plane at source resolution ────────────────────────────
@@ -329,16 +333,14 @@ bool Nv12Converter::convertSyncScaled(const uint8_t* yData, int yLinesize,
             if (!m_uvTexture.createFromDataBatched(
                     m_allocator->handle(), m_device->handle(), cfg,
                     uvPacked.data(), uvSize, cmd, stg)) {
-                m_cmdPool->endSingleTime(cmd, m_queue);
                 return false;
             }
         } else {
             if (!m_uvTexture.updateDataBatched(uvPacked.data(), uvSize, cmd, stg)) {
-                m_cmdPool->endSingleTime(cmd, m_queue);
                 return false;
             }
         }
-        if (stg.buffer != VK_NULL_HANDLE) staging.push_back(stg);
+        if (stg.buffer != VK_NULL_HANDLE) stagingOut.push_back(stg);
     }
 
     // ── Barrier: transfer → compute ─────────────────────────────────────
@@ -415,12 +417,34 @@ bool Nv12Converter::convertSyncScaled(const uint8_t* yData, int yLinesize,
             0, 1, &barrier, 0, nullptr, 0, nullptr);
     }
 
+    return true;
+}
+
+bool Nv12Converter::convertSyncScaled(const uint8_t* yData, int yLinesize,
+                                       const uint8_t* uvData, int uvLinesize,
+                                       uint32_t srcW, uint32_t srcH,
+                                       uint32_t dstW, uint32_t dstH)
+{
+    if (!m_initialized || !m_cmdPool) return false;
+
+    // Same-size: delegate to non-scaled path
+    if (srcW == dstW && srcH == dstH)
+        return convertSync(yData, yLinesize, uvData, uvLinesize, srcW, srcH);
+
+    VkCommandBuffer cmd = m_cmdPool->beginSingleTime();
+    std::vector<Texture::StagingCleanup> staging;
+
+    const bool ok = recordConvertScaled(cmd,
+                                        yData, yLinesize,
+                                        uvData, uvLinesize,
+                                        srcW, srcH, dstW, dstH, staging);
+
     m_cmdPool->endSingleTime(cmd, m_queue);
 
     for (auto& s : staging)
         s.destroy();
 
-    return true;
+    return ok;
 }
 
 

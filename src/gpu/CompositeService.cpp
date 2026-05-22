@@ -65,6 +65,45 @@
 namespace rt {
 
 std::atomic<bool> CompositeService::s_modalDialogActive{false};
+std::atomic<bool> CompositeService::s_gpuResidentDecode{false};
+
+namespace {
+// UPGRADE_PLAN: env-var toggle for the GPU-resident decode flag so it
+// can be flipped at startup without recompiling.  Read once at first
+// CompositeService construction.  Accepts "1", "true", "TRUE", "on",
+// "yes" as true; anything else (including unset) leaves the flag at
+// its compile-time default of false.
+void initGpuResidentDecodeFromEnv()
+{
+    static std::once_flag once;
+    std::call_once(once, []() {
+#ifdef _WIN32
+        char buf[16] = {};
+        size_t len = 0;
+        if (getenv_s(&len, buf, sizeof(buf),
+                     "ROUNDTABLE_GPU_RESIDENT_DECODE") != 0 || len == 0)
+            return;
+        const std::string v(buf);
+#else
+        const char* e = std::getenv("ROUNDTABLE_GPU_RESIDENT_DECODE");
+        if (!e) return;
+        const std::string v(e);
+#endif
+        const bool on = v == "1" || v == "true" || v == "TRUE"
+                     || v == "on" || v == "yes";
+        if (on) {
+            CompositeService::setGpuResidentDecode(true);
+            // warn so it survives the warn+ logger filter and you can
+            // confirm at a glance that the flag actually flipped.
+            spdlog::warn("UPGRADE_PLAN: GPU-resident decode ENABLED "
+                         "via ROUNDTABLE_GPU_RESIDENT_DECODE={}", v);
+        } else {
+            spdlog::warn("UPGRADE_PLAN: ROUNDTABLE_GPU_RESIDENT_DECODE={} "
+                         "(not enabled — set to 1/true/on to flip)", v);
+        }
+    });
+}
+} // namespace
 
 // ---------------------------------------------------------------------------
 // Lifecycle
@@ -72,6 +111,8 @@ std::atomic<bool> CompositeService::s_modalDialogActive{false};
 
 CompositeService::CompositeService()
 {
+    initGpuResidentDecodeFromEnv();
+
     // Create the composite engine (owns GPU compositing pipeline).
     m_engine = std::make_unique<CompositeEngine>();
     if (GpuContext::get().isInitialized()) {

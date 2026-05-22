@@ -59,7 +59,9 @@ add_library(roundtable_core STATIC
     media/MediaPoolPrefetchLoop.cpp
     media/MediaPoolPrefetchSchedule.cpp
     media/MediaPoolPrefetchConvert.cpp
+    media/MediaPoolPrefetchConvertGpu.cpp
     media/MediaPoolPrefetchDecode.cpp
+    media/PrefetchTexturePool.cpp
     media/VideoDecoder.cpp
     media/VideoDecoderInit.cpp
     media/VideoDecoderDecode.cpp

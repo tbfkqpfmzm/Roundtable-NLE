@@ -118,6 +118,22 @@ public:
     /// Get the current GPU texture cache (may be null).
     [[nodiscard]] GpuTextureCache* textureCache() const noexcept { return m_texCache; }
 
+    // ── First-upload telemetry (UPGRADE_PLAN Phase 0 D.1) ───────────────
+    //
+    // Tracks the cost of the "cacheable miss" branch of uploadLayer — i.e.
+    // a layer.frame that the GpuTextureCache did NOT have, and so had to be
+    // uploaded from CPU pixels before the compositor could sample it. This
+    // is exactly the per-cold-frame cost the GPU-resident decode pipeline
+    // (Phase 4-5) is designed to eliminate. The counters are process-wide
+    // (there is one GpuUploadManager today, but statics keep the perf-
+    // surface readable from MediaPoolPerf without plumbing a pointer
+    // across subsystems). Reset by MediaPoolPerf::logPerfReport on each
+    // emission so the numbers are per-report-window, matching the other
+    // counters in that report.
+    [[nodiscard]] static uint64_t firstUploadTotalUs() noexcept;
+    [[nodiscard]] static uint64_t firstUploadCount()   noexcept;
+    static void resetFirstUploadStats() noexcept;
+
     // ── Shutdown ────────────────────────────────────────────────────────
 
     /// Release all resources.  Safe to call multiple times.
