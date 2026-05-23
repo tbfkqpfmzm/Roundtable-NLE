@@ -188,4 +188,26 @@ private:
 void setForceSoftwareDecode(bool force);
 bool forceSoftwareDecode();
 
+// ── Hardware-decoder pre-warm pool (UPGRADE_PLAN item 3) ────────────────
+//
+// The first NVDEC/CUDA decoder ever opened in a process pays a 100-200 ms
+// "cold init" cost — av_hwdevice_ctx_create() loads nvcuda.dll / nvcuvid.dll,
+// creates a CUcontext, and probes the NVDEC engine.  Premiere amortises
+// this by holding the GPU decoder session alive across opens.
+//
+// prewarmHardwareDecoders() does the same: at app startup it creates one
+// shared AVBufferRef* per device type and caches it.  Subsequent
+// VideoDecoder::initHardwareDecoder() calls take an av_buffer_ref of the
+// cached handle instead of paying the create cost again.  All decoders
+// share the same CUDA context — which is what FFmpeg expects anyway, and
+// what makes cross-decoder zero-copy work correctly.
+//
+// Safe to call multiple times — only the first call does real work.  No-op
+// if FFmpeg or CUDA are unavailable.  Call after GpuContext::init() so
+// the CUDA runtime is already loaded.
+void prewarmHardwareDecoders();
+
+/// Release cached hw device contexts.  Call before FFmpeg / CUDA teardown.
+void shutdownHardwareDecoders() noexcept;
+
 } // namespace rt

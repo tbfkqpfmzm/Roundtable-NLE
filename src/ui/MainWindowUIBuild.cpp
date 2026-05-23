@@ -36,6 +36,7 @@
 #include "panels/project/HistoryPanel.h"
 #include "panels/effects/KeyframeEditor.h"
 #include "panels/monitors/ProgramMonitor.h"
+#include "media/PlaybackScheduler.h"
 #include "viewport/Viewport.h"
 #include "panels/project/ProjectBin.h"
 #include "panels/properties/PropertiesPanel.h"
@@ -549,6 +550,21 @@ void MainWindow::buildPanels()
             return nullptr;
         });
     m_pageStack->addWidget(m_exportPanel);
+
+    // Suspend the Program Monitor's playback pipeline while the Export
+    // panel is driving its own UI-thread preview render loop.  Without
+    // this, the shared PlaybackController makes the main FrameClock
+    // keep firing, and the producer thread races the UI thread on
+    // CompositeService::m_compositeMutex — the choppy-video /
+    // smooth-audio bug on 60 fps ProRes preview playback.
+    connect(m_exportPanel, &ExportPanel::previewPlaybackToggled,
+            this, [this](bool playing) {
+        if (m_destroying.load(std::memory_order_acquire)) return;
+        if (auto* pm = programMonitor()) {
+            if (auto* pipe = pm->pipeline())
+                pipe->setExternallySuspended(playing);
+        }
+    });
 
     // ── Wire ProjectPanel signals ────────────────────────────────────
     connect(m_projectPanel, &ProjectPanel::createProject,

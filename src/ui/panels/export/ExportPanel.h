@@ -156,6 +156,12 @@ signals:
     /// Emitted when the user presses Escape in the Export panel.
     void navigateBack();
 
+    /// Emitted when the in-panel preview play/pause state changes.
+    /// MainWindow uses this to suspend the Program Monitor's playback
+    /// pipeline so it doesn't double-composite while the Export panel
+    /// runs its own UI-thread render loop.
+    void previewPlaybackToggled(bool playing);
+
 private slots:
     void onPresetChanged(int index);
     void onCodecChanged(int index);

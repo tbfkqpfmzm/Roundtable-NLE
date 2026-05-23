@@ -346,6 +346,23 @@ void ProgramMonitor::initPipeline()
     m_pipeline->setOutputResolution(m_outputWidth, m_outputHeight,
                                     m_playbackResDivisor);
 
+    // Forward adaptive tier transitions to the same callback the manual
+    // dropdown uses, so the compositor's playback tier follows the
+    // producer's auto-resolution decision in sync with the divisor.
+    // The producer thread invokes this — m_playbackTierCallback writes
+    // an atomic on CompositeService, so no extra thread hop is needed.
+    m_pipeline->setAdaptiveTierCallback([this](int divisor) {
+        if (m_destroying.load(std::memory_order_acquire)) return;
+        if (m_playbackTierCallback)
+            m_playbackTierCallback(divisor);
+    });
+
+    // Apply the persisted Auto/manual mode now that the pipeline exists —
+    // the combo-box slot fires only on user input, not on the lazy first
+    // initPipeline() call after launch.
+    if (m_playbackResAdaptive)
+        m_pipeline->setAdaptiveEnabled(true);
+
     // Wire the present callback — called from the pipeline's present thread.
     // During playback, the UI thread does direct compositing for zero-latency
     // A/V sync, so the pipeline presenter must NOT touch the Vulkan viewport.

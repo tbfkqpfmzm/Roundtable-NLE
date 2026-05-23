@@ -16,6 +16,8 @@
 
 namespace rt {
 
+std::atomic<FrameProducer*> FrameProducer::s_active{nullptr};
+
 FrameProducer::FrameProducer() = default;
 
 FrameProducer::~FrameProducer()
@@ -30,6 +32,21 @@ void FrameProducer::setOutputResolution(uint32_t w, uint32_t h, int divisor)
     m_resDivisor.store(divisor, std::memory_order_relaxed);
 }
 
+void FrameProducer::setAdaptiveEnabled(bool enabled) noexcept
+{
+    const bool prev = m_adaptiveEnabled.exchange(enabled, std::memory_order_acq_rel);
+    if (prev == enabled) return;
+    // Reset the rolling window so cold-start frames after toggling don't
+    // bias an immediate tier decision in either direction.
+    m_latencyIdx = 0;
+    m_latencyCount = 0;
+    m_promoteStreak = 0;
+    m_changeCooldown = 0;
+    m_dropNextComposite = false;
+    spdlog::info("[FrameProducer] adaptive playback resolution {}",
+                 enabled ? "ENABLED" : "DISABLED");
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 //  Lifecycle
 // ═════════════════════════════════════════════════════════════════════════════
@@ -39,6 +56,7 @@ void FrameProducer::start()
     if (m_running.load()) return;
     m_running.store(true);
     m_destroying.store(false);
+    s_active.store(this, std::memory_order_release);
     m_thread = std::thread(&FrameProducer::producerLoop, this);
     spdlog::info("[FrameProducer] Started");
 }
@@ -53,6 +71,11 @@ void FrameProducer::stop()
     m_reqCV.notify_one();       // wake worker if blocked
     m_exchangeCV.notify_one();  // wake presenter if blocked
     if (m_thread.joinable()) m_thread.join();
+    // Clear the diag pointer last so any in-flight CACHE-DUMP read on
+    // another thread cannot observe a producer that has joined.
+    FrameProducer* expected = this;
+    s_active.compare_exchange_strong(expected, nullptr,
+                                     std::memory_order_acq_rel);
     spdlog::info("[FrameProducer] Stopped");
 }
 
@@ -194,10 +217,37 @@ void FrameProducer::produceFrameImpl(int64_t tick)
     w = std::clamp(w, 64u, 3840u);
     h = std::clamp(h, 36u, 2160u);
 
+    // UPGRADE_PLAN item 1 STEP 2: time-bound producer submit.  If the
+    // previous composite ran more than 2× the frame budget, skip the
+    // composite call this tick and re-publish the last good frame so the
+    // presenter clock never stalls.  Subsequent ticks composite again —
+    // the drop is single-shot, and the rolling-window logic below will
+    // pick up persistent overruns by dropping the tier.
+    if (m_dropNextComposite && m_lastGoodFrame) {
+        m_dropNextComposite = false;
+        m_lastGoodFrame->gpuSemaphore = 0;
+        publishFrame(m_lastGoodFrame, tick);
+        return;
+    }
+    m_dropNextComposite = false;
+
     auto compStart = std::chrono::steady_clock::now();
     auto frame = m_compositeCB(tick, w, h, /*scrub=*/false);
     auto compEnd = std::chrono::steady_clock::now();
     double compMs = std::chrono::duration<double, std::milli>(compEnd - compStart).count();
+
+    // ── Adaptive tier feedback (UPGRADE_PLAN item 1 STEP 1) ───────────
+    // Sample composite latency and let the controller bump the tier
+    // up/down when sustained latency drifts above or below budget.  The
+    // single-spike drop policy above complements this; here we react to
+    // the average.
+    if (m_adaptiveEnabled.load(std::memory_order_acquire)) {
+        const double budget = currentFrameBudgetMs();
+        recordCompositeMs(compMs);
+        if (budget > 0.0 && compMs > 2.0 * budget)
+            m_dropNextComposite = true;
+        maybeAdjustTier(budget);
+    }
 
     // If compositor returned a valid frame, use it.
     // If it returned nullptr or empty (width==0), re-publish the last
@@ -256,6 +306,10 @@ void FrameProducer::produceScrubFrameImpl(const ScrubRequest& req)
     if (m_destroying.load(std::memory_order_acquire)) return;
     if (!m_compositeCB) return;
 
+    // User scrubs are intentional — never skip the composite for a scrub
+    // even if the previous frame tripped the over-budget drop.
+    m_dropNextComposite = false;
+
     auto frame = m_compositeCB(req.tick, req.w, req.h, req.scrub);
     if (frame && frame->width > 0) {
         m_lastGoodFrame = frame;
@@ -311,6 +365,100 @@ std::shared_ptr<CachedFrame> FrameProducer::lastProducedFrame() const
 {
     std::lock_guard lock(m_exchangeMtx);
     return m_exchange.frame;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Adaptive tier feedback loop
+// ═════════════════════════════════════════════════════════════════════════════
+
+void FrameProducer::recordCompositeMs(double ms)
+{
+    m_latencyWindow[m_latencyIdx] = ms;
+    m_latencyIdx = (m_latencyIdx + 1) % kLatencyWindow;
+    if (m_latencyCount < kLatencyWindow) ++m_latencyCount;
+}
+
+double FrameProducer::averageLatencyMs() const noexcept
+{
+    if (m_latencyCount == 0) return 0.0;
+    double sum = 0.0;
+    for (size_t i = 0; i < m_latencyCount; ++i) sum += m_latencyWindow[i];
+    return sum / static_cast<double>(m_latencyCount);
+}
+
+double FrameProducer::currentFrameBudgetMs() const noexcept
+{
+    double fps = 30.0;
+    if (m_controller) {
+        const double f = m_controller->frameRate();
+        if (f > 0.0) fps = f;
+    }
+    return 1000.0 / std::max(fps, 1.0);
+}
+
+void FrameProducer::maybeAdjustTier(double frameBudgetMs)
+{
+    if (frameBudgetMs <= 0.0) return;
+    if (m_changeCooldown > 0) { --m_changeCooldown; return; }
+
+    // Wait for a full window so cold-start outliers can't shift tier.
+    if (m_latencyCount < kLatencyWindow) return;
+
+    const double avg = averageLatencyMs();
+    const int curDiv = m_resDivisor.load(std::memory_order_acquire);
+
+    // Drop tier on sustained over-budget (Full→Half→Quarter).  Skip
+    // divisor 8 — Quarter is the lowest tier MediaPool/CompositeService
+    // distinguishes today, and the dropdown's 1/8 only shrinks composite
+    // output without a matching decode tier.
+    if (avg > 1.4 * frameBudgetMs) {
+        int next = curDiv;
+        if      (curDiv <= 1) next = 2;
+        else if (curDiv <= 2) next = 4;
+        if (next != curDiv) {
+            spdlog::warn("[ADAPTIVE-TIER] drop {}→{} avg={:.1f}ms budget={:.1f}ms",
+                         curDiv, next, avg, frameBudgetMs);
+            applyAdaptiveDivisor(next);
+            return;
+        }
+    }
+
+    // Promote tier on a long run of comfortably-under-budget frames.
+    if (avg < 0.6 * frameBudgetMs) {
+        ++m_promoteStreak;
+        if (m_promoteStreak >= kPromoteStreak) {
+            int next = curDiv;
+            if      (curDiv >= 4) next = 2;
+            else if (curDiv >= 2) next = 1;
+            if (next != curDiv) {
+                spdlog::warn("[ADAPTIVE-TIER] raise {}→{} avg={:.1f}ms budget={:.1f}ms",
+                             curDiv, next, avg, frameBudgetMs);
+                applyAdaptiveDivisor(next);
+            } else {
+                m_promoteStreak = 0;
+            }
+        }
+    } else {
+        m_promoteStreak = 0;
+    }
+}
+
+void FrameProducer::applyAdaptiveDivisor(int newDivisor)
+{
+    m_resDivisor.store(newDivisor, std::memory_order_release);
+    m_changeCooldown = kChangeCooldown;
+    m_promoteStreak  = 0;
+    m_latencyIdx     = 0;
+    m_latencyCount   = 0;
+    if (m_adaptiveTierCB) {
+        try { m_adaptiveTierCB(newDivisor); }
+        catch (const std::exception& e) {
+            spdlog::error("[FrameProducer] adaptive tier callback threw: {}",
+                          e.what());
+        } catch (...) {
+            spdlog::error("[FrameProducer] adaptive tier callback threw");
+        }
+    }
 }
 
 } // namespace rt

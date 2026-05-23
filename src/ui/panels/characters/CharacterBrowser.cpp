@@ -534,8 +534,26 @@ void CharacterBrowser::loadPreviewModel()
 #ifdef ROUNDTABLE_HAS_SPINE
     if (!m_modelManager) return;
 
+    // Clear the live preview unconditionally on entry — every early-return
+    // failure path below leaves the widget in a clean state (no leftover
+    // textures or skeleton pose from a previously-selected character).
+    // Without this, when findByName / findVariant fails, the user sees
+    // the *previous* character's textures sitting in the preview pane and
+    // perceives it as a stale / corrupt thumbnail for the just-clicked
+    // character (the post-canceled-download repro path).  The widget is
+    // re-populated below on the success branch via setSpineEngine + the
+    // SpinePreviewWidget::loadTextures() call.
+    auto clearPreview = [this]() {
+        if (m_spinePreview) {
+            m_spinePreview->stopAnimation();
+            m_spinePreview->setSpineEngine(nullptr);
+            m_spinePreview->loadTextures();  // null engine → clears m_textures
+            m_spinePreview->update();
+        }
+    };
+
     auto charName = selectedCharacter();
-    if (charName.isEmpty()) return;
+    if (charName.isEmpty()) { clearPreview(); return; }
 
     const auto* entry = m_modelManager->findByName(charName.toStdString());
     if (!entry) {
@@ -544,6 +562,7 @@ void CharacterBrowser::loadPreviewModel()
         // Show display name (with colons) in status
         QString dispName = QString::fromStdString(m_modelManager->getDisplayName(charName.toStdString()));
         m_statusLabel->setText(QString("%1 \xe2\x80\x94 not downloaded").arg(dispName));
+        clearPreview();
         return;
     }
     spdlog::info("CharacterBrowser::loadPreviewModel: found '{}' id={} outfits={}",
@@ -573,7 +592,7 @@ void CharacterBrowser::loadPreviewModel()
                              static_cast<int>(v.stance), v.skelPath, v.atlasPath);
         }
         m_statusLabel->setText(QString("Outfit not downloaded \xe2\x80\x94 click Download"));
-        if (m_spinePreview) m_spinePreview->stopAnimation();
+        clearPreview();
         return;
     }
     spdlog::info("CharacterBrowser::loadPreviewModel: loading skel='{}' atlas='{}'",
@@ -589,7 +608,7 @@ void CharacterBrowser::loadPreviewModel()
     if (!m_spineEngine->loadSkeleton(variant->skelPath, variant->atlasPath, 0.5f)) {
         m_statusLabel->setText("Failed to load skeleton");
         spdlog::warn("CharacterBrowser: Failed to load skeleton: {}", variant->skelPath);
-        if (m_spinePreview) m_spinePreview->stopAnimation();
+        clearPreview();
         return;
     }
 

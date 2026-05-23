@@ -1321,10 +1321,23 @@ void ExportPanel::onPlayPause()
         renderPreviewFrame(this, m_previewImageLabel, m_previewCallback,
                            m_widthSpin, m_heightSpin,
                            m_miniTimeline->playhead());
+
+        // Wake the Program Monitor's pipeline back up — it suspended
+        // itself on Play to avoid double-composite contention.
+        emit previewPlaybackToggled(false);
     } else {
         // -- Play ---------------------------------------------------------
         m_playing = true;
         m_playPauseBtn->setText(QStringLiteral("\u23F8")); // ⏸
+
+        // Suspend the Program Monitor's playback pipeline BEFORE we
+        // call m_playbackController->play().  The shared controller
+        // drives the main FrameClock too; without suspension the
+        // FrameProducer thread would race the UI-thread renderPreview
+        // path on m_compositeMutex, doubling effective work and
+        // producing the choppy-video / smooth-audio symptom users see
+        // on 60 fps ProRes preview playback.
+        emit previewPlaybackToggled(true);
 
         int fps = m_fpsCombo ? m_fpsCombo->currentData().toInt() : 30;
         if (fps <= 0) fps = 30;

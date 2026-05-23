@@ -109,6 +109,41 @@ public:
     /// of enqueuing, and FrameClock should skip its composite tick.
     static constexpr size_t kMaxPendingFrames = 3;
 
+    // ── Adaptive playback resolution (UPGRADE_PLAN item 1) ────────────
+    //
+    // When enabled, the producer measures rolling composite latency
+    // against the project frame budget and shifts m_resDivisor between
+    // Full (1), Half (2) and Quarter (4) automatically:
+    //   - average latency > 1.4 × budget over the last kLatencyWindow
+    //     frames → drop tier (Full→Half→Quarter)
+    //   - average latency < 0.6 × budget for kPromoteStreak frames in a
+    //     row → raise tier (Quarter→Half→Full)
+    //   - composite > 2 × budget → skip the next composite call and
+    //     re-publish the last good frame (frame-drop policy)
+    //
+    // The adaptive callback is invoked on the producer thread whenever
+    // the divisor changes, so the UI layer can route the new tier to
+    // CompositeService::setPlaybackTier and keep MediaPool decode size
+    // in step with the composite size.
+    using AdaptiveTierCallback = std::function<void(int divisor)>;
+    void setAdaptiveEnabled(bool enabled) noexcept;
+    [[nodiscard]] bool isAdaptiveEnabled() const noexcept
+    { return m_adaptiveEnabled.load(std::memory_order_acquire); }
+    void setAdaptiveTierCallback(AdaptiveTierCallback cb)
+    { m_adaptiveTierCB = std::move(cb); }
+
+    /// Current effective divisor (1 = Full, 2 = Half, 4 = Quarter,
+    /// 8 = Eighth — Eighth never set by adaptive logic).
+    [[nodiscard]] int currentDivisor() const noexcept
+    { return m_resDivisor.load(std::memory_order_acquire); }
+
+    /// Diagnostic accessor — points at the currently-active producer
+    /// instance so MediaPool's CACHE-DUMP can query divisor + adaptive
+    /// state without a hard dependency on PlaybackScheduler.  Set on
+    /// start(), cleared on stop().  Tolerate nullptr.
+    [[nodiscard]] static FrameProducer* activeForDiag() noexcept
+    { return s_active.load(std::memory_order_acquire); }
+
 private:
     struct ScrubRequest {
         int64_t  tick;
@@ -160,6 +195,36 @@ private:
     std::atomic<bool>     m_backpressure{false};
     int                   m_consecutiveReplacements{0};
     static constexpr int  kBackpressureLagFrames = 2;
+
+    // ── Adaptive playback resolution state (producer-thread only) ─────
+    //
+    // The window holds the last kLatencyWindow composite-latency samples
+    // (in ms).  Tier decisions only fire once the window is full so the
+    // controller doesn't act on cold-start outliers.  m_promoteStreak
+    // counts consecutive sub-budget frames seen since the last drop or
+    // promote — kPromoteStreak frames in a row at < 0.6 × budget bump
+    // the tier up.  m_changeCooldown is set after every divisor change
+    // to suppress flapping until the rolling window refills with the
+    // post-change latency.
+    static constexpr size_t kLatencyWindow  = 8;
+    static constexpr int    kPromoteStreak  = 30;
+    static constexpr int    kChangeCooldown = 8;
+    std::atomic<bool>   m_adaptiveEnabled{false};
+    AdaptiveTierCallback m_adaptiveTierCB;
+    double              m_latencyWindow[kLatencyWindow]{};
+    size_t              m_latencyIdx{0};
+    size_t              m_latencyCount{0};
+    int                 m_promoteStreak{0};
+    int                 m_changeCooldown{0};
+    bool                m_dropNextComposite{false};
+
+    void recordCompositeMs(double ms);
+    [[nodiscard]] double averageLatencyMs() const noexcept;
+    [[nodiscard]] double currentFrameBudgetMs() const noexcept;
+    void maybeAdjustTier(double frameBudgetMs);
+    void applyAdaptiveDivisor(int newDivisor);
+
+    static std::atomic<FrameProducer*> s_active;
 
     // Use-after-free guard
     std::atomic<bool> m_destroying{false};

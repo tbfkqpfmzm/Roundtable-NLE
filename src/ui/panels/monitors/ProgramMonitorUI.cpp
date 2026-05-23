@@ -283,18 +283,28 @@ void ProgramMonitor::setupUI()
 
     controlLayout->addStretch();
 
-    // Playback resolution dropdown
+    // Playback resolution dropdown.  Indices:
+    //   0 = Full         — manual divisor 1
+    //   1 = 1/2          — manual divisor 2
+    //   2 = 1/4          — manual divisor 4
+    //   3 = 1/8          — manual divisor 8 (composite-only; decode tier
+    //                       still caps at Quarter)
+    //   4 = Auto         — UPGRADE_PLAN item 1: FrameProducer adjusts the
+    //                       divisor between Full/Half/Quarter from rolling
+    //                       composite latency vs. frame budget.
     m_playbackResCombo = new QComboBox(this);
     m_playbackResCombo->addItem(tr("Full"));
     m_playbackResCombo->addItem(QStringLiteral("1/2"));
     m_playbackResCombo->addItem(QStringLiteral("1/4"));
     m_playbackResCombo->addItem(QStringLiteral("1/8"));
+    m_playbackResCombo->addItem(tr("Auto"));
     m_playbackResCombo->setSizeAdjustPolicy(QComboBox::AdjustToContents);
     m_playbackResCombo->setFocusPolicy(Qt::NoFocus);
     m_playbackResCombo->setToolTip(tr("Playback Resolution"));
     m_playbackResCombo->setStyleSheet(comboStyle);
     rt::UiScale::setScaledMinimumWidth(m_playbackResCombo, 70);
     rt::UiScale::setScaledFixedHeight(m_playbackResCombo, 24);
+    static constexpr int kAutoIdx = 4;
     // Restore the last-used playback resolution (Premiere-style: the
     // dropdown reopens with whatever it was closed at). Defaults to 1/2
     // (index 1, matches Half-tier decode) on first run. Set the divisor
@@ -304,9 +314,12 @@ void ProgramMonitor::setupUI()
     {
         int savedIdx = QSettings().value(
             QStringLiteral("playback/resolutionIndex"), 1).toInt();
-        if (savedIdx < 0 || savedIdx > 3) savedIdx = 1;
+        if (savedIdx < 0 || savedIdx > kAutoIdx) savedIdx = 1;
         static constexpr int kDivisors[] = {1, 2, 4, 8};
-        m_playbackResDivisor = kDivisors[savedIdx];
+        // Auto starts at the same effective divisor as 1/2; the producer
+        // takes it from there.  Anything else uses the manual table.
+        m_playbackResAdaptive = (savedIdx == kAutoIdx);
+        m_playbackResDivisor  = m_playbackResAdaptive ? 2 : kDivisors[savedIdx];
         m_playbackResCombo->setCurrentIndex(savedIdx);
     }
     controlLayout->addWidget(m_playbackResCombo, 0, Qt::AlignVCenter);
@@ -315,14 +328,27 @@ void ProgramMonitor::setupUI()
     connect(m_playbackResCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int index) {
         static constexpr int divisors[] = {1, 2, 4, 8};
-        m_playbackResDivisor = (index >= 0 && index < 4) ? divisors[index] : 1;
+        const bool isAuto = (index == kAutoIdx);
+        m_playbackResAdaptive = isAuto;
+        if (isAuto) {
+            // Auto starts at Half — close to what most projects need.  The
+            // producer's feedback loop bumps from there on every-frame
+            // composite latency.
+            m_playbackResDivisor = 2;
+        } else {
+            m_playbackResDivisor = (index >= 0 && index < 4) ? divisors[index] : 1;
+        }
 
         // Persist so the next launch reopens at this resolution.
-        if (index >= 0 && index < 4)
+        if (index >= 0 && index <= kAutoIdx)
             QSettings().setValue(
                 QStringLiteral("playback/resolutionIndex"), index);
 
         if (m_pipeline) {
+            // Toggle adaptive mode BEFORE re-seeding the manual divisor so a
+            // transition from Auto→manual lands at exactly the user's choice
+            // instead of the last auto-chosen value.
+            m_pipeline->setAdaptiveEnabled(isAuto);
             m_pipeline->setOutputResolution(m_outputWidth, m_outputHeight,
                                             m_playbackResDivisor);
         }
@@ -330,7 +356,9 @@ void ProgramMonitor::setupUI()
         // Tell the compositor to match the new preview resolution at decode
         // time — otherwise the dropdown only shrinks composite output while
         // the decoder still produces full-resolution frames, wasting both
-        // decode cycles and FrameCache bytes.
+        // decode cycles and FrameCache bytes.  For Auto, this seeds the
+        // starting tier; subsequent adaptive changes route through the
+        // pipeline's adaptive-tier callback wired in initPipeline().
         if (m_playbackTierCallback)
             m_playbackTierCallback(m_playbackResDivisor);
 

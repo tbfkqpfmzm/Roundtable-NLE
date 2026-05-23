@@ -33,7 +33,9 @@
 #include <volk.h>
 
 #include <algorithm>
+#include <set>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #ifdef ROUNDTABLE_HAS_FFMPEG
@@ -266,33 +268,51 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
     const uint32_t hwW = decoded.width;
     const uint32_t hwH = decoded.height;
 
-    // One-shot per-handle FAILURE diagnostic.  Logs at warn level so it
-    // survives the warn+ filter.  Tracks failures only (not successes),
-    // so a handle that initially succeeds at ZC and later starts
-    // failing will still log the first failure — fixing the
+    // One-shot per-(handle, reason) FAILURE diagnostic.  Logs at warn
+    // level so it survives the warn+ filter.  Tracks failures only (not
+    // successes), so a handle that initially succeeds at ZC and later
+    // starts failing will still log the first failure — fixing the
     // "first-success suppresses subsequent failure logging" bug that
     // made the 2026-05-22 13:28 log silent about ZC dropping from
     // 100% to 0%.
-    auto shouldLogZcFail = [task]() -> bool {
-        static thread_local std::unordered_set<MediaHandle> s_failed;
-        return s_failed.insert(task.handle).second;
+    //
+    // UPGRADE_PLAN item 5: re-keyed on (handle, reason).  The previous
+    // handle-only key meant the FIRST failure mode for a handle silenced
+    // every other reason on the same handle — so a clip whose NVDEC went
+    // soft (isHardware=false) early would never log a later
+    // copyNv12FromCuda failure on a different handle reusing the same
+    // ID.  Distinct reasons now log once each.
+    enum class ZcFailReason : uint8_t {
+        NotHardware,
+        NullAvFrame,
+        ZeroDims,
+        OddDims,
+        NoInterop,
+        InteropUnavailable,
+        NullPlanes,
+        AllocateFailed,
+        CopyFailed,
+    };
+    auto shouldLogZcFail = [task](ZcFailReason reason) -> bool {
+        static thread_local std::set<std::pair<MediaHandle, uint8_t>> s_failed;
+        return s_failed.insert({task.handle, static_cast<uint8_t>(reason)}).second;
     };
 
     if (!decoded.isHardware) {
-        if (shouldLogZcFail())
+        if (shouldLogZcFail(ZcFailReason::NotHardware))
             spdlog::warn("[ZC-DIAG] handle={} skipped: decoded.isHardware=false "
                          "(software decode, NVDEC not engaged for this file)",
                          task.handle);
     } else if (decoded.avFrame == nullptr) {
-        if (shouldLogZcFail())
+        if (shouldLogZcFail(ZcFailReason::NullAvFrame))
             spdlog::warn("[ZC-DIAG] handle={} skipped: decoded.avFrame=null",
                          task.handle);
     } else if (hwW == 0 || hwH == 0) {
-        if (shouldLogZcFail())
+        if (shouldLogZcFail(ZcFailReason::ZeroDims))
             spdlog::warn("[ZC-DIAG] handle={} skipped: zero dimensions",
                          task.handle);
     } else if ((hwW & 1) != 0 || (hwH & 1) != 0) {
-        if (shouldLogZcFail())
+        if (shouldLogZcFail(ZcFailReason::OddDims))
             spdlog::warn("[ZC-DIAG] handle={} skipped: odd dimensions W={} H={}",
                          task.handle, hwW, hwH);
     }
@@ -304,11 +324,11 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
     {
         interop = ctx.cudaVulkanInterop();
         if (!interop) {
-            if (shouldLogZcFail())
+            if (shouldLogZcFail(ZcFailReason::NoInterop))
                 spdlog::warn("[ZC-DIAG] handle={} skipped: ctx.cudaVulkanInterop=null",
                              task.handle);
         } else if (!interop->isAvailable()) {
-            if (shouldLogZcFail())
+            if (shouldLogZcFail(ZcFailReason::InteropUnavailable))
                 spdlog::warn("[ZC-DIAG] handle={} skipped: interop->isAvailable=false",
                              task.handle);
         }
@@ -321,20 +341,20 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
             const int yPitch  = decoded.avFrame->linesize[0];
             const int uvPitch = decoded.avFrame->linesize[1];
             if (!yPtr || !uvPtr || yPitch <= 0 || uvPitch <= 0) {
-                if (shouldLogZcFail())
+                if (shouldLogZcFail(ZcFailReason::NullPlanes))
                     spdlog::warn("[ZC-DIAG] handle={} skipped: null plane ptrs/pitch "
                                  "(yPtr={} uvPtr={} yPitch={} uvPitch={})",
                                  task.handle, yPtr, uvPtr, yPitch, uvPitch);
             } else {
                 auto alloc = interop->allocate(hwW, hwH);
                 if (!alloc) {
-                    if (shouldLogZcFail())
+                    if (shouldLogZcFail(ZcFailReason::AllocateFailed))
                         spdlog::warn("[ZC-DIAG] handle={} skipped: interop->allocate "
                                      "returned null (vkAllocateMemory exhaustion?)",
                                      task.handle);
                 } else if (!interop->copyNv12FromCuda(*alloc,
                                yPtr, yPitch, uvPtr, uvPitch, hwW, hwH)) {
-                    if (shouldLogZcFail())
+                    if (shouldLogZcFail(ZcFailReason::CopyFailed))
                         spdlog::warn("[ZC-DIAG] handle={} skipped: copyNv12FromCuda failed",
                                      task.handle);
                     interop->free(std::move(alloc));

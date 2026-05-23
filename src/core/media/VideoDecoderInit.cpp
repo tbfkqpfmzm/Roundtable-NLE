@@ -21,9 +21,11 @@ extern "C" {
 
 #include "media/VideoDecoder.h"
 #include <spdlog/spdlog.h>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+#include <mutex>
 
 #ifdef _WIN32
   #include <io.h>
@@ -181,6 +183,110 @@ int64_t avioSeekShared(void* opaque, int64_t offset, int whence)
 }
 
 } // namespace
+
+// ── Shared hardware-decoder device contexts (UPGRADE_PLAN item 3) ───────
+//
+// First-ever call to av_hwdevice_ctx_create() for a given device type
+// pays a 100-200 ms cold-init cost (driver DLL load + CUcontext create
+// + NVDEC engine probe).  We pay it once at app launch and hand every
+// subsequent VideoDecoder a ref to the same AVBufferRef* instead of
+// re-creating per file.  This collapses MediaPool::preOpenVideoMedia()
+// timings — the first character clip used to log [RESOLVE-SLOW] at
+// ~192 ms, dominated by this init.
+//
+// Lifetimes:
+//   - Created by prewarmHardwareDecoders() (called from App::init after
+//     GpuContext::init).
+//   - Refcounted via av_buffer_ref() per decoder open.
+//   - Released by shutdownHardwareDecoders() before FFmpeg / GpuContext
+//     teardown.  Outstanding decoder refs keep the underlying handle
+//     alive until they close, so the order shutdown → MediaPool reset
+//     is safe.
+namespace {
+
+std::mutex   s_hwCtxMtx;
+AVBufferRef* s_cudaHwDeviceCtx{nullptr};
+AVBufferRef* s_d3d11HwDeviceCtx{nullptr};
+AVBufferRef* s_qsvHwDeviceCtx{nullptr};
+bool         s_prewarmDone{false};
+
+[[nodiscard]] AVBufferRef** sharedHwCtxSlot(AVHWDeviceType type) noexcept
+{
+    switch (type) {
+    case AV_HWDEVICE_TYPE_CUDA:    return &s_cudaHwDeviceCtx;
+    case AV_HWDEVICE_TYPE_D3D11VA: return &s_d3d11HwDeviceCtx;
+    case AV_HWDEVICE_TYPE_QSV:     return &s_qsvHwDeviceCtx;
+    default:                       return nullptr;
+    }
+}
+
+[[nodiscard]] const char* hwTypeName(AVHWDeviceType type) noexcept
+{
+    const char* n = av_hwdevice_get_type_name(type);
+    return n ? n : "unknown";
+}
+
+/// Create the shared hw device ctx for `type` if it isn't cached yet.
+/// Returns the cached pointer, or nullptr on failure.  Mutex must be
+/// held by the caller.
+AVBufferRef* ensureSharedHwCtx_locked(AVHWDeviceType type)
+{
+    AVBufferRef** slot = sharedHwCtxSlot(type);
+    if (!slot) return nullptr;
+    if (*slot) return *slot;
+
+    using namespace std::chrono;
+    const auto t0 = steady_clock::now();
+    AVBufferRef* ctx = nullptr;
+    int ret = av_hwdevice_ctx_create(&ctx, type, nullptr, nullptr, 0);
+    const auto ms = duration<double, std::milli>(steady_clock::now() - t0).count();
+    if (ret < 0 || !ctx) {
+        char err[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(ret, err, sizeof(err));
+        spdlog::info("[HW-PREWARM] {} create failed ({:.0f} ms): {}",
+                     hwTypeName(type), ms, err);
+        return nullptr;
+    }
+    *slot = ctx;
+    spdlog::warn("[HW-PREWARM] {} hw_device_ctx ready in {:.0f} ms (shared)",
+                 hwTypeName(type), ms);
+    return ctx;
+}
+
+} // namespace
+
+void prewarmHardwareDecoders()
+{
+    std::lock_guard lock(s_hwCtxMtx);
+    if (s_prewarmDone) return;
+    s_prewarmDone = true;
+
+    // CUDA is the primary hardware path on NVIDIA GPUs and the one that
+    // costs the most at cold-open.  Pre-create it eagerly.  D3D11VA and
+    // QSV are created on demand the first time initHardwareDecoder()
+    // asks for them — they are cheaper to create and would slow down
+    // app launch if we always paid for them up front.
+    if (forceSoftwareDecode()) {
+        spdlog::info("[HW-PREWARM] skipped — force-software-decode is on");
+        return;
+    }
+    ensureSharedHwCtx_locked(AV_HWDEVICE_TYPE_CUDA);
+}
+
+void shutdownHardwareDecoders() noexcept
+{
+    std::lock_guard lock(s_hwCtxMtx);
+    auto drop = [](AVBufferRef** slot) {
+        if (slot && *slot) {
+            av_buffer_unref(slot);
+            *slot = nullptr;
+        }
+    };
+    drop(&s_cudaHwDeviceCtx);
+    drop(&s_d3d11HwDeviceCtx);
+    drop(&s_qsvHwDeviceCtx);
+    s_prewarmDone = false;
+}
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -609,8 +715,24 @@ bool VideoDecoder::initHardwareDecoder(int deviceTypeInt)
     m_codecCtx->thread_count = 1;
     m_codecCtx->thread_type = FF_THREAD_SLICE;
 
-    ret = av_hwdevice_ctx_create(&m_hwDeviceCtx, deviceType, nullptr, nullptr, 0);
-    if (ret < 0) { avcodec_free_context(&m_codecCtx); return false; }
+    // UPGRADE_PLAN item 3: take a ref to the process-wide shared device
+    // context.  This skips the 100-200 ms av_hwdevice_ctx_create() call
+    // after the first open for this device type.  The first open of a
+    // given type still pays the cost — that's prewarmHardwareDecoders()
+    // pulling it onto the app-startup path instead of per-file.
+    {
+        std::lock_guard lock(s_hwCtxMtx);
+        AVBufferRef* shared = ensureSharedHwCtx_locked(deviceType);
+        if (!shared) {
+            avcodec_free_context(&m_codecCtx);
+            return false;
+        }
+        m_hwDeviceCtx = av_buffer_ref(shared);
+        if (!m_hwDeviceCtx) {
+            avcodec_free_context(&m_codecCtx);
+            return false;
+        }
+    }
 
     m_codecCtx->hw_device_ctx = av_buffer_ref(m_hwDeviceCtx);
     m_codecCtx->get_format = getHwFormat;

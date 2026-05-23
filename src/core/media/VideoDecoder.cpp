@@ -111,5 +111,8 @@ int64_t VideoDecoder::secondsToFrame(double) const noexcept { return 0; }
 double VideoDecoder::frameToSeconds(int64_t) const noexcept { return 0.0; }
 double VideoDecoder::ptsToSeconds(int64_t) const noexcept { return 0.0; }
 
+void prewarmHardwareDecoders() {}
+void shutdownHardwareDecoders() noexcept {}
+
 } // namespace rt
 #endif // ROUNDTABLE_HAS_FFMPEG

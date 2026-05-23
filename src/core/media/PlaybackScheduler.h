@@ -84,6 +84,24 @@ public:
     /// Thread-safe resolution update.
     void setOutputResolution(uint32_t w, uint32_t h, int divisor = 1);
 
+    // ── Adaptive playback resolution (UPGRADE_PLAN item 1) ──────────
+    using AdaptiveTierCallback = FrameProducer::AdaptiveTierCallback;
+    void setAdaptiveEnabled(bool enabled) noexcept;
+    [[nodiscard]] bool isAdaptiveEnabled() const noexcept;
+    void setAdaptiveTierCallback(AdaptiveTierCallback cb);
+    [[nodiscard]] int currentResDivisor() const noexcept;
+
+    /// External suspend — the FrameClock keeps running (so audio sync
+    /// state stays current) but its tick callback stops dispatching
+    /// requestFrame() to the producer.  Used by the Export panel preview:
+    /// the Export QTimer composites synchronously on the UI thread, and
+    /// without this gate the main Program Monitor's producer thread
+    /// would race the UI thread on m_compositeMutex — doubling effective
+    /// composite work and producing the choppy-video / smooth-audio
+    /// symptom users report during 60 fps ProRes preview playback.
+    void setExternallySuspended(bool suspended) noexcept;
+    [[nodiscard]] bool isExternallySuspended() const noexcept;
+
     // ── Lifecycle ────────────────────────────────────────────────────
 
     void start();
@@ -150,6 +168,12 @@ private:
 
     /// Frames skipped by backpressure (compositor < clock speed).
     std::atomic<int64_t> m_backpressureSkippedFrames{0};
+
+    /// True while the Export panel (or another external owner) is the
+    /// sole compositor.  Read by the FrameClock tick callback to skip
+    /// requestFrame() so the producer thread doesn't compete with the
+    /// external compositor.
+    std::atomic<bool> m_externallySuspended{false};
 };
 
 [[nodiscard]] const char* toString(ScheduledFrameAction action) noexcept;

@@ -135,6 +135,12 @@ App::~App()
     m_syncClock.reset();
     m_mediaPool.reset();
 
+    // UPGRADE_PLAN item 3: drop the shared NVDEC/CUDA hw_device_ctx
+    // refs now that MediaPool (and all its VideoDecoders) are gone.
+    // Must happen before GpuContext::shutdown() so FFmpeg can still
+    // free its CUDA context cleanly.
+    shutdownHardwareDecoders();
+
     // Phase 3: Destroy Qt widget tree
     sm.advanceTo(ShutdownPhase::Phase3_DestroyQt);
     m_mainWindow.reset();
@@ -276,6 +282,12 @@ bool App::init()
                 // resources, so it deferred allocating PrefetchTexturePool
                 // until this call.
                 if (m_mediaPool) m_mediaPool->onGpuContextReady();
+
+                // UPGRADE_PLAN item 3: pay the 100-200 ms NVDEC/CUDA
+                // cold-init cost once here so the first character clip
+                // doesn't.  Subsequent VideoDecoder::open(hw=true) calls
+                // ref this cached context instead of creating a new one.
+                prewarmHardwareDecoders();
             }
         } else {
             spdlog::info("App: skipping GPU init (--capture-workspace mode)");

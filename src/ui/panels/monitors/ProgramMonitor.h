@@ -307,8 +307,12 @@ private:
     QElapsedTimer m_compositeStopwatch;
     int64_t  m_lastCompositeMs{0};   ///< How long the last composite took (ms)
 
-    // Playback resolution divisor (1 = Full, 2 = 1/2, 4 = 1/4, 8 = 1/8)
+    // Playback resolution divisor (1 = Full, 2 = 1/2, 4 = 1/4, 8 = 1/8).
+    // When m_playbackResAdaptive is true, the FrameProducer's adaptive
+    // controller owns the effective divisor and this field only tracks
+    // the seed value.
     int      m_playbackResDivisor{2};
+    bool     m_playbackResAdaptive{false};
 
     // GPU display
     bool     m_gpuDisplay{false};    ///< True when VulkanViewport is active

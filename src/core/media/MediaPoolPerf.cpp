@@ -8,6 +8,7 @@
 #include "GpuTextureCache.h"
 #include "GpuUploadManager.h"
 #include "PrefetchTexturePool.h"
+#include "media/FrameProducer.h"
 #include "cuda/CudaVulkanInterop.h"
 
 #include <spdlog/spdlog.h>
@@ -211,12 +212,26 @@ void MediaPool::logPerfReport()
         vmaAllocs = m.allocationCount;
     }
 
+    // UPGRADE_PLAN item 1 STEP 3: adaptive playback resolution tier.
+    // divisor   = the FrameProducer's current effective divisor (1, 2, 4
+    //             or 8 — only 1/2/4 are reachable from adaptive logic;
+    //             8 only via the manual dropdown).
+    // adaptive  = '*' when the producer is auto-managing the divisor,
+    //             ' ' for manual mode.
+    int  prodDivisor = 0;
+    char adaptiveMark = ' ';
+    if (auto* prod = FrameProducer::activeForDiag()) {
+        prodDivisor  = prod->currentDivisor();
+        adaptiveMark = prod->isAdaptiveEnabled() ? '*' : ' ';
+    }
+
     spdlog::warn("[CACHE-DUMP] frameMB={:.0f}/{:.0f} frameN={}/{} gpuOwn={} "
                  "gpuTexMB={:.0f}/{:.0f} gpuTexN={} "
                  "vmaMB={:.0f}/{:.0f} vmaAllocs={} vmaBlocksMB={:.0f} "
                  "prefetchQ={} ownedH={} scrubDec={} diskQ={} "
                  "zcLive={} zcPool={} texPool={} "
-                 "submits[gx={} cmp={} xfer={}]",
+                 "submits[gx={} cmp={} xfer={}] "
+                 "tier=1/{}{}",
                  cacheStats.memoryUsed / 1048576.0,
                  cacheStats.memoryCapacity / 1048576.0,
                  cacheStats.frameCount, frameNCap, gpuOwn,
@@ -226,7 +241,8 @@ void MediaPool::logPerfReport()
                  vmaAllocs, vmaBlocks / 1048576.0,
                  pf.queueDepth, pf.ownedHandles, pf.scrubDecoders, diskQ,
                  zcLive, zcPool, poolEntries,
-                 schedGx, schedCmp, schedXfer);
+                 schedGx, schedCmp, schedXfer,
+                 prodDivisor, adaptiveMark);
 
     spdlog::info("====================================================");
 }

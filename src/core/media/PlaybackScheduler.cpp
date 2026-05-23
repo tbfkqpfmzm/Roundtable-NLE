@@ -33,6 +33,11 @@ PlaybackScheduler::PlaybackScheduler()
     // tick instead of compositing.  The skipped frame is counted so
     // diagnostics and A/V sync can react.
     m_clock.setFrameCallback([this](int64_t tick, int64_t /*frame*/) {
+        // External owner (Export preview) has taken sole compositing.
+        // Skip without counting as backpressure — this is intentional,
+        // not a regression of throughput.
+        if (m_externallySuspended.load(std::memory_order_acquire))
+            return;
         if (m_producer.isBacklogged()) {
             m_backpressureSkippedFrames.fetch_add(1, std::memory_order_relaxed);
             return; // skip — compositor can't keep up
@@ -82,6 +87,42 @@ void PlaybackScheduler::setPresentNotify(PresentNotify cb)
 void PlaybackScheduler::setOutputResolution(uint32_t w, uint32_t h, int divisor)
 {
     m_producer.setOutputResolution(w, h, divisor);
+}
+
+// ── Adaptive playback resolution ───────────────────────────────────
+
+void PlaybackScheduler::setAdaptiveEnabled(bool enabled) noexcept
+{
+    m_producer.setAdaptiveEnabled(enabled);
+}
+
+bool PlaybackScheduler::isAdaptiveEnabled() const noexcept
+{
+    return m_producer.isAdaptiveEnabled();
+}
+
+void PlaybackScheduler::setAdaptiveTierCallback(AdaptiveTierCallback cb)
+{
+    m_producer.setAdaptiveTierCallback(std::move(cb));
+}
+
+int PlaybackScheduler::currentResDivisor() const noexcept
+{
+    return m_producer.currentDivisor();
+}
+
+void PlaybackScheduler::setExternallySuspended(bool suspended) noexcept
+{
+    const bool prev = m_externallySuspended.exchange(
+        suspended, std::memory_order_acq_rel);
+    if (prev == suspended) return;
+    spdlog::info("[PlaybackScheduler] external suspend {}",
+                 suspended ? "ON" : "OFF");
+}
+
+bool PlaybackScheduler::isExternallySuspended() const noexcept
+{
+    return m_externallySuspended.load(std::memory_order_acquire);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
