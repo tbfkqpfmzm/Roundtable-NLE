@@ -1,14 +1,14 @@
 {
-  "name": "Dorothy (Close-Up)",
+  "name": "Mint (Wide)",
   "cameraZoom": 1.000000,
   "cameraX": 0.000000,
   "cameraY": 0.000000,
   "backgrounds": [
     {
       "path": "TABLE_OVERLAY.png",
-      "posX": -0.575353,
-      "posY": 0.816524,
-      "scale": 3.793492,
+      "posX": 0.499734,
+      "posY": 0.494975,
+      "scale": 1.020703,
       "opacity": 1.000000,
       "nativeWidth": 0,
       "nativeHeight": 0,
@@ -24,9 +24,9 @@
     },
     {
       "path": "TABLE_LARGE_FINAL.png",
-      "posX": -0.575353,
-      "posY": 0.816524,
-      "scale": 3.793492,
+      "posX": 0.499734,
+      "posY": 0.494975,
+      "scale": 1.020703,
       "opacity": 1.000000,
       "nativeWidth": 0,
       "nativeHeight": 0,
@@ -43,16 +43,17 @@
   ],
   "characters": [
     {
-      "characterName": "Dorothy",
+      "characterName": "Mint",
       "outfit": "default",
       "stance": "default",
-      "animation": "idle",
-      "isTalking": true,
-      "posX": 0.597071,
-      "posY": 1.308686,
-      "scale": 2.960509,
+      "animation": "action",
+      "isTalking": false,
+      "posX": 0.337000,
+      "posY": 0.563000,
+      "scale": 0.760000,
       "rotation": 0.000000,
-      "flipX": false,
+      "flipX": true,
+      "flipY": false,
       "opacity": 1.000000,
       "cropLeft": 0.000000,
       "cropRight": 0.000000,
@@ -60,11 +61,32 @@
       "cropBottom": 0.000000,
       "blur": 0.000000,
       "visible": true
+    },
+    {
+      "characterName": "Yoyo",
+      "outfit": "default",
+      "stance": "default",
+      "animation": "idle",
+      "isTalking": true,
+      "posX": 0.786000,
+      "posY": 0.605000,
+      "scale": 0.745000,
+      "rotation": 0.000000,
+      "flipX": true,
+      "flipY": false,
+      "opacity": 1.000000,
+      "cropLeft": 0.000000,
+      "cropRight": 0.000000,
+      "cropTop": 0.000000,
+      "cropBottom": 17.100000,
+      "blur": 0.000000,
+      "visible": true
     }
   ],
   "layerOrder": [
     {"type": "bg", "index": 0},
     {"type": "ch", "index": 0},
+    {"type": "ch", "index": 1},
     {"type": "bg", "index": 1}
   ]
 }

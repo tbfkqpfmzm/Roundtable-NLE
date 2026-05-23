@@ -37,6 +37,7 @@
 // Core
 #include "command/CommandStack.h"
 #include "command/LambdaCommand.h"
+#include "CrashHandler.h"
 #include "media/AudioEngine.h"
 #include "media/FrameCache.h"
 #include "media/PlaybackController.h"
@@ -273,6 +274,15 @@ void MainWindow::closeEvent(QCloseEvent* event)
     }
 
     spdlog::info("MainWindow closing — workspace saved");
+
+    // Clear any stale crash marker so the next launch doesn't show a
+    // spurious crash-recovery dialog.  The marker is also cleared by
+    // checkCrashRecovery() when the user dismisses the dialog, but if
+    // the file persists due to a mid-session crash after recovery, a
+    // silent clearCrashMarker() failure, or a crash during shutdown
+    // that writes a new marker, this ensures it's wiped on clean close.
+    CrashHandler::clearCrashMarker();
+
     event->accept();
 
     // Signal the app to quit.  We use a queued invocation so the close

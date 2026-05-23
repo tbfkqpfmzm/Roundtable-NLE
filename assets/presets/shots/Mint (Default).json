@@ -1,14 +1,14 @@
 {
-  "name": "Arcana: Fortune Mate (Close-Up)",
+  "name": "Mint (Default)",
   "cameraZoom": 1.000000,
   "cameraX": 0.000000,
   "cameraY": 0.000000,
   "backgrounds": [
     {
       "path": "TABLE_LARGE_FINAL.png",
-      "posX": 0.965000,
-      "posY": 0.746000,
-      "scale": 3.141000,
+      "posX": 0.934930,
+      "posY": 0.653991,
+      "scale": 2.784613,
       "opacity": 1.000000,
       "nativeWidth": 0,
       "nativeHeight": 0,
@@ -20,21 +20,22 @@
       "cropRight": 0.000000,
       "cropTop": 0.000000,
       "cropBottom": 0.000000,
-      "blur": 10.000000
+      "blur": 0.000000
     }
   ],
   "characters": [
     {
-      "characterName": "Arcana_ Fortune Mate",
+      "characterName": "Mint",
       "outfit": "default",
       "stance": "default",
       "animation": "idle",
       "isTalking": true,
-      "posX": 0.357817,
-      "posY": 1.073847,
-      "scale": 2.284000,
+      "posX": 0.385134,
+      "posY": 1.163003,
+      "scale": 2.646838,
       "rotation": 0.000000,
-      "flipX": false,
+      "flipX": true,
+      "flipY": false,
       "opacity": 1.000000,
       "cropLeft": 0.000000,
       "cropRight": 0.000000,

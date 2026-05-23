@@ -50,16 +50,15 @@ FetchContent_Declare(vulkan_headers
 FetchContent_MakeAvailable(vulkan_headers)
 
 # ─── volk (Vulkan meta-loader — no Vulkan SDK needed) ────────────────────────
-# Tell volk where to find Vulkan headers (from our FetchContent above)
+# Vendored locally (third_party/volk/) so the build doesn't need network access
 set(VOLK_STATIC_DEFINES VK_USE_PLATFORM_WIN32_KHR CACHE STRING "" FORCE)
 set(VOLK_INSTALL OFF CACHE BOOL "" FORCE)
+set(VOLK_PULL_IN_VULKAN ON CACHE BOOL "" FORCE)
 set(VULKAN_HEADERS_INSTALL_DIR "${vulkan_headers_SOURCE_DIR}" CACHE PATH "" FORCE)
-FetchContent_Declare(volk
-    GIT_REPOSITORY https://github.com/zeux/volk.git
-    GIT_TAG        vulkan-sdk-1.3.290.0
-    GIT_SHALLOW    TRUE
-)
-FetchContent_MakeAvailable(volk)
+# Unity build breaks volk: vulkan/vk_platform.h not found when sources are batched
+set(CMAKE_UNITY_BUILD OFF)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/volk ${CMAKE_CURRENT_BINARY_DIR}/volk)
+set(CMAKE_UNITY_BUILD ON)
 
 # ─── VMA (Vulkan Memory Allocator — header only) ─────────────────────────────
 FetchContent_Declare(vma
@@ -187,7 +186,11 @@ set(BUILD_REGTEST OFF CACHE BOOL "" FORCE)
 set(ENABLE_MPEG OFF CACHE BOOL "" FORCE)
 set(INSTALL_MANPAGES OFF CACHE BOOL "" FORCE)
 set(ENABLE_PACKAGE_CONFIG OFF CACHE BOOL "" FORCE)
+# Unity build breaks libsndfile: static variables (_dqlntab, _witab, _fitab)
+# and inline functions (arith_shift_left, arith_shift_right) collide across .c files
+set(CMAKE_UNITY_BUILD OFF)
 FetchContent_MakeAvailable(libsndfile)
+set(CMAKE_UNITY_BUILD ON)
 
 if(TARGET sndfile)
     set(SNDFILE_FOUND TRUE CACHE BOOL "libsndfile found" FORCE)
@@ -205,7 +208,10 @@ FetchContent_Declare(soundtouch
 )
 set(SOUNDTOUCH_DLL OFF CACHE BOOL "" FORCE)
 set(SOUNDSTRETCH OFF CACHE BOOL "" FORCE)
+# Unity build breaks SoundTouch: macro/syntax collision in BPMDetect.cpp
+set(CMAKE_UNITY_BUILD OFF)
 FetchContent_MakeAvailable(soundtouch)
+set(CMAKE_UNITY_BUILD ON)
 
 if(TARGET SoundTouch)
     set(SOUNDTOUCH_FOUND TRUE CACHE BOOL "SoundTouch found" FORCE)
