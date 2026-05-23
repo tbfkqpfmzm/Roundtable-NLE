@@ -279,6 +279,16 @@ public:
     /// Number of currently open media files.
     [[nodiscard]] size_t openCount() const;
 
+    /// Diagnostic snapshot of the prefetch queue + per-handle bookkeeping.
+    /// Used by the perf reporter to detect runaway queue growth during
+    /// scrubbing or playback degradation.
+    struct PrefetchStats {
+        size_t queueDepth{0};      ///< Pending PrefetchTasks in m_prefetchQueue
+        size_t ownedHandles{0};    ///< Distinct handles claimed by prefetch workers
+        size_t scrubDecoders{0};   ///< Live scrub-decoder instances (UI thread cache)
+    };
+    [[nodiscard]] PrefetchStats prefetchStats() const;
+
     // ── Playback Performance Metrics ──────────────────────────────────
     // Atomic counters tracking frame delivery during playback.
     // Logged every 2 seconds so we can measure the impact of each
@@ -301,6 +311,12 @@ public:
         // failure, e.g. packed-alpha, headless, or flag off).
         std::atomic<uint64_t> gpuResidentDecoded{0};
         std::atomic<uint64_t> cpuConvertDecoded{0};
+        // UPGRADE_PLAN A: zero-copy CUDA→Vulkan NVDEC path.  Counted
+        // SEPARATELY from gpuResidentDecoded (mutually exclusive) — both
+        // produce GPU-resident CachedFrames, but only ZC skips the
+        // transferHardwareFrame CPU bounce.  Sum (gpuResidentDecoded +
+        // zeroCopyDecoded) = all GPU-resident decodes in the window.
+        std::atomic<uint64_t> zeroCopyDecoded{0};
 
         void reset() {
             cacheHits.store(0, std::memory_order_relaxed);
@@ -314,6 +330,7 @@ public:
             avgDecodeUs.store(0, std::memory_order_relaxed);
             gpuResidentDecoded.store(0, std::memory_order_relaxed);
             cpuConvertDecoded.store(0, std::memory_order_relaxed);
+            zeroCopyDecoded.store(0, std::memory_order_relaxed);
         }
     };
     PerfMetrics m_perf;
@@ -382,7 +399,29 @@ private:
     // queue with ~16-24 simultaneous urgent decodes and tripped TDR."
     // Reduced to 2 to cap peak NVDEC sessions at ~4 (2 prefetch + 1
     // loop + 1 playhead).
-    static constexpr int PREFETCH_AHEAD_COUNT = 60;
+    //
+    // PREFETCH_AHEAD_COUNT lowered 60 → 12 (2026-05-22 perf fix).
+    // The previous count=60 meant every cache miss in tryGetFrame/getFrame
+    // scheduled 60 frames worth of decode work.  Under aggressive scrub
+    // (~50 missed positions/sec across multiple clips), the scheduler
+    // queue would balloon to 3000+ tasks and the NVDEC + compute-queue
+    // pipeline saturated at ~235 fps of decode — 8× the 30 fps playback
+    // rate the user actually needs.  That saturation is what produced
+    // the 120-180 ms compositor `submit=` stalls observed at 2026-05-22
+    // 12:53 after a scrub burst: the compositor's submit on the shared
+    // compute queue queued behind a wall of prefetch convert+copy work.
+    //
+    // 12 = ~400 ms of lookahead at 30 fps Full tier, which is enough to
+    // mask the round-trip latency between request and decode without
+    // generating 8× the necessary work.  After scrub stops the user
+    // typically settles within ~200 ms and 12 ahead frames cover the
+    // next ~400 ms of playback while the regular lookahead refills.
+    //
+    // The proper architectural fix is UPGRADE_PLAN §1.3 Path C
+    // (separate graphics + async-compute queues for compositor vs
+    // prefetch); this is a tighten-the-knob mitigation in the
+    // meantime.  Once Path C lands, this constant can return higher.
+    static constexpr int PREFETCH_AHEAD_COUNT = 12;
     static constexpr int PREFETCH_THREAD_COUNT = 10;
     static constexpr int PREFETCH_NVDEC_WORKERS = 2;
 
@@ -424,6 +463,25 @@ public:
     /// prefetch path stays disabled and every frame takes the CPU path.
     void onGpuContextReady();
 
+    /// Shared producer-side timeline VkSemaphore used by every prefetch
+    /// convert+copy submission to signal a monotonically increasing
+    /// value (UPGRADE_PLAN Path C, 2026-05-22).  Each CachedFrame
+    /// produced by convertDecodedToCacheGpu carries the value its
+    /// submission signalled; the compositor waits on the per-frame
+    /// max value before sampling — replacing the previous synchronous
+    /// CPU fence wait that was the main throughput bottleneck under
+    /// seek-recovery and fast playback rates.
+    ///
+    /// Returned as uint64_t (VkSemaphore handle) so callers outside
+    /// the GPU layer don't need volk.h.  Returns 0 until
+    /// onGpuContextReady() succeeds.
+    [[nodiscard]] uint64_t prefetchTimelineSem() const noexcept;
+
+    /// Atomic ++ and return the next value to signal.  Called once per
+    /// convert+copy submission; the same value is also stored in the
+    /// produced CachedFrame's producerTimelineValue field.
+    [[nodiscard]] uint64_t nextPrefetchTimelineValue() noexcept;
+
 private:
 
     // ── Loop pre-decode ─────────────────────────────────────────────────
@@ -452,9 +510,19 @@ private:
     // null and fall back to the CPU path. Phase 4 is the first consumer.
     std::unique_ptr<PrefetchTexturePool>            m_prefetchTexPool;
 
+    // UPGRADE_PLAN Path C: shared timeline semaphore for cross-queue
+    // memory visibility between prefetch (compute queue) and
+    // compositor (graphics queue).  Created in onGpuContextReady,
+    // destroyed in the destructor.  Stored as uint64_t (VkSemaphore
+    // handle) to keep volk.h out of MediaPool.h.  m_prefetchTimelineValue
+    // is fetch_add'd once per convert+copy submission; the produced
+    // CachedFrame stores the value it received.
+    uint64_t                                        m_prefetchTimelineSem{0};
+    std::atomic<uint64_t>                            m_prefetchTimelineValue{0};
+
     // Prefetch thread pool state
     std::vector<std::thread>                         m_prefetchThreads;
-    std::mutex                                       m_prefetchMutex;
+    mutable std::mutex                               m_prefetchMutex;
     std::condition_variable                           m_prefetchCv;
     std::atomic<bool>                                m_prefetchRunning{false};
     std::deque<PrefetchTask>                         m_prefetchQueue;

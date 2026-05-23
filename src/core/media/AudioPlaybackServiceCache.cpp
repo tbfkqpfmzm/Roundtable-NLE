@@ -281,31 +281,26 @@ void AudioPlaybackService::warmCacheAsync()
     m_warmFuture = std::async(std::launch::async,
         [this, pages = std::move(uncachedPages)]() {
             if (m_destroying.load(std::memory_order_acquire)) return;
-            AudioFile file;
-            std::string openPath;
-            bool fileReady = false;
 
             for (const auto& page : pages) {
                 if (m_warmCancel.load()) break;
 
-                if (!fileReady || openPath != page.path) {
-                    file.close();
-                    fileReady = file.open(page.path);
-                    openPath  = page.path;
-                    if (!fileReady) {
-                        spdlog::warn("warmAudioCacheAsync: failed to open '{}'", page.path);
-                        continue;
-                    }
-                }
+                // Unified per-path AudioFile cache — shared with the
+                // synchronous loadSources(true) blocking-miss path
+                // (UPGRADE_PLAN item 4) so a single source file is
+                // probed once per project session, regardless of how
+                // many code paths touch its audio.
+                AudioFile* file = getOrOpenCachedAudioFile(page.path);
+                if (!file) continue;
 
                 auto buffer = std::make_shared<std::vector<float>>();
-                const int64_t framesRead = file.readRegionResampled(
+                const int64_t framesRead = file->readRegionResampled(
                     page.startFrame, page.frameCount, 48000, *buffer);
                 if (framesRead <= 0 || buffer->empty()) continue;
 
                 CachedDecode entry;
                 entry.startFrame  = page.startFrame;
-                entry.channels    = static_cast<uint16_t>(file.info().channels);
+                entry.channels    = static_cast<uint16_t>(file->info().channels);
                 entry.samples     = buffer;
                 entry.totalFrames = framesRead;
                 entry.bytes       = buffer->size() * sizeof(float);

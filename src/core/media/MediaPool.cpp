@@ -98,8 +98,51 @@ void MediaPool::onGpuContextReady()
     if (m_prefetchTexPool) return;
     if (!GpuContext::get().isInitialized()) return;
     m_prefetchTexPool = std::make_unique<PrefetchTexturePool>();
+
+    // UPGRADE_PLAN Path C: shared producer-side timeline semaphore.
+    // Created once here, owned by MediaPool for the rest of its
+    // lifetime, signalled by every convert+copy submission, waited on
+    // GPU-side by the compositor.
+    if (m_prefetchTimelineSem == 0) {
+        VkSemaphoreTypeCreateInfo timelineType{};
+        timelineType.sType         = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+        timelineType.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+        timelineType.initialValue  = 0;
+
+        VkSemaphoreCreateInfo semInfo{};
+        semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        semInfo.pNext = &timelineType;
+
+        VkSemaphore sem = VK_NULL_HANDLE;
+        const VkResult sr = vkCreateSemaphore(
+            GpuContext::get().vkDevice(), &semInfo, nullptr, &sem);
+        if (sr == VK_SUCCESS) {
+            m_prefetchTimelineSem = reinterpret_cast<uint64_t>(sem);
+            spdlog::warn("MediaPool: prefetch timeline semaphore created — "
+                         "cross-queue compositor wait now active");
+        } else {
+            spdlog::warn("MediaPool: failed to create prefetch timeline "
+                         "semaphore (vk={}); cross-queue path will fall "
+                         "back to per-submit fence wait",
+                         static_cast<int>(sr));
+        }
+    }
+
     spdlog::warn("MediaPool: PrefetchTexturePool allocated post-GpuContext init "
                  "— GPU-resident prefetch decode path now armed");
+}
+
+uint64_t MediaPool::prefetchTimelineSem() const noexcept
+{
+    return m_prefetchTimelineSem;
+}
+
+uint64_t MediaPool::nextPrefetchTimelineValue() noexcept
+{
+    // fetch_add returns the OLD value; we want the NEW one (so the
+    // first signal is value 1, not 0 — value 0 is the initial value
+    // of the timeline semaphore and waiting on 0 is a no-op).
+    return m_prefetchTimelineValue.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
 MediaPool::~MediaPool()
@@ -107,5 +150,16 @@ MediaPool::~MediaPool()
     stopOpenWorker();
     stopPrefetchThread();
     closeAll();
+
+    // Destroy the shared timeline semaphore.  All prefetch work has
+    // been joined by stopPrefetchThread() above, and the compositor's
+    // composite ring's fences have been drained as part of GpuContext
+    // shutdown, so no one can be waiting on this anymore.
+    if (m_prefetchTimelineSem != 0 && GpuContext::get().isInitialized()) {
+        vkDestroySemaphore(GpuContext::get().vkDevice(),
+                           reinterpret_cast<VkSemaphore>(m_prefetchTimelineSem),
+                           nullptr);
+        m_prefetchTimelineSem = 0;
+    }
 }
 } // namespace rt

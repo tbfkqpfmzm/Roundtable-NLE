@@ -22,6 +22,10 @@
 
 namespace rt {
 
+class Nv12Converter;
+class CudaVulkanInterop;
+struct SharedAllocation;
+
 // Forward decls so the helper signature compiles without including
 // MediaPool.h here.
 class  MediaPool;
@@ -45,27 +49,61 @@ struct WorkerGpuState {
     VkSemaphore     signalSem{VK_NULL_HANDLE};
     VkDevice        device{VK_NULL_HANDLE};
 
-    /// Deferred-cleanup ring (UPGRADE_PLAN replacement for the Phase 4
-    /// inline vkWaitForFences). Each entry holds the per-submission
+    /// Per-worker Nv12Converter (UPGRADE_PLAN item 3 — per-worker
+    /// descriptor sets refactor, 2026-05-22).  Each prefetch worker
+    /// gets its OWN converter instance so the input planar textures,
+    /// output texture, and descriptor sets are not shared across
+    /// workers — removing the apiMutex bottleneck and the inline
+    /// vkWaitForFences that was serialising all workers through a
+    /// single shared converter.  Lazy-created the first time the
+    /// worker takes the GPU-resident decode path (so a worker that
+    /// only ever sees CPU-fallback frames never allocates one).
+    std::unique_ptr<Nv12Converter> nv12Converter;
+    uint32_t                       nv12ConverterW{0};
+    uint32_t                       nv12ConverterH{0};
+
+    /// Deferred-cleanup ring. Each entry holds the per-submission
     /// resources that can only be freed once the GPU has finished
     /// executing the submission. pollAndCleanup() walks the deque in
     /// submit-order; the destructor drains anything still in flight.
     ///
-    /// Why this works without cross-queue semaphores: the prefetch
-    /// worker and the compositor BOTH submit on GpuQueueKind::Compute
-    /// via GpuScheduler. Vulkan guarantees in-order execution within a
-    /// single VkQueue, so the convert+copy submission is guaranteed to
-    /// finish before any later compositor submission that samples the
-    /// destination texture — without anyone calling vkWaitForFences.
-    /// The fence here is purely for CPU-side staging-buffer cleanup.
+    /// Path C (2026-05-22) note: under the previous single-queue model
+    /// (both compositor and prefetch on GpuQueueKind::Compute), Vulkan's
+    /// per-queue FIFO ordering meant the convert+copy submission was
+    /// guaranteed to be visible to any later compositor submission that
+    /// sampled the destination texture without an explicit wait.  After
+    /// Path C the compositor submits on GpuQueueKind::Graphics, so that
+    /// guarantee no longer holds.  convertDecodedToCacheGpu now blocks
+    /// on this fence inline before returning the CachedFrame — see the
+    /// "Cross-queue visibility wait" comment in
+    /// MediaPoolPrefetchConvertGpu.cpp.  By the time pollAndCleanup
+    /// runs over an entry in this deque, its fence is already signalled
+    /// and the cleanup is purely a resource-reclaim step.
+    ///
+    /// sharedAlloc (when set) is returned to its interop pool on
+    /// cleanup — the zero-copy CUDA buffer can't be released until the
+    /// GPU has finished reading from it.
     struct PendingSubmit {
         VkFence                              fence{VK_NULL_HANDLE};
         VkCommandBuffer                      cmdBuf{VK_NULL_HANDLE};
         std::vector<Texture::StagingCleanup> staging;
+        std::unique_ptr<SharedAllocation>    sharedAlloc;
+        CudaVulkanInterop*                   interop{nullptr};
+        // Holds a ref to the per-frame dst Texture so it isn't returned
+        // to PrefetchTexturePool by the CachedFrame's gpuTextureOwner
+        // deleter before the GPU has finished writing to it.  Without
+        // this, fast FrameCache eviction (within the few ms before the
+        // fence signals) could drop the texture's refcount to 0 and
+        // free its VkImage while the convert+copy is still pending.
+        std::shared_ptr<Texture>             dstHold;
     };
     std::deque<PendingSubmit> pending;
 
-    WorkerGpuState() = default;
+    // Constructor + destructor defined out-of-line in
+    // MediaPoolPrefetchConvertGpu.cpp so the complete type of
+    // Nv12Converter (held by unique_ptr above) is in scope when the
+    // implicit member destructors are generated.
+    WorkerGpuState();
     ~WorkerGpuState();
 
     WorkerGpuState(const WorkerGpuState&) = delete;
@@ -85,6 +123,14 @@ struct WorkerGpuState {
     /// only; stops at the first not-yet-signalled fence (submit
     /// order = signal order).
     void pollAndCleanup();
+
+    /// Lazy-create (or reuse) this worker's Nv12Converter, sized so
+    /// that the convert shader writes (w, h) BGRA into the output
+    /// texture.  Returns nullptr on init failure (GpuContext not up,
+    /// queue family unavailable, etc.).  Internal calls into
+    /// ensureOutputSize within the converter will resize the output
+    /// texture if the dst dimensions change.
+    Nv12Converter* ensureNv12Converter(uint32_t w, uint32_t h);
 };
 
 /// Dispatch helper: wraps the eligibility checks (PR-4 feature flag,

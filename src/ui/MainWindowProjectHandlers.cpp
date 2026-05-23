@@ -434,11 +434,20 @@ void MainWindow::onDuplicateProjectFromPanel(const QString& name)
 
 void MainWindow::onRevealProjectInExplorer(const QString& name)
 {
-    QString projDir = projectsDirectory();
-    QString filePath = projDir + "/" + name + "/" + name + ".rtp";
+    // Use the actual file path from the project info, not a reconstructed
+    // path that assumes <projDir>/<name>/<name>.rtp — the folder or file
+    // name may differ from the project's display name (e.g. after a rename,
+    // import, or manual move).
+    QString filePath = m_projectPanel
+        ? m_projectPanel->projectFilePath(name)
+        : QString();
+    if (filePath.isEmpty()) {
+        // Fallback to the conventional layout if the panel lookup fails
+        QString projDir = projectsDirectory();
+        filePath = projDir + "/" + name + "/" + name + ".rtp";
+    }
     QFileInfo fi(filePath);
     if (fi.exists()) {
-        // On Windows, open Explorer and select the file
         QProcess::startDetached("explorer.exe",
             {"/select,", QDir::toNativeSeparators(fi.absoluteFilePath())});
     }

@@ -18,6 +18,8 @@
 
 #include "timeline/Timeline.h"
 #include "timeline/Track.h"
+#include "timeline/AudioClip.h"
+#include "timeline/ImageClip.h"
 #include "timeline/VideoClip.h"
 
 #ifdef ROUNDTABLE_HAS_SPINE
@@ -108,18 +110,30 @@ void TimelineWorkspace::preOpenVideoMedia()
 {
     if (!m_timeline || !m_mediaPool || !m_compositeService) return;
 
-    // Collect (path, isCharacter) for every video clip on the timeline,
-    // INCLUDING SpineClip pre-rendered mp4/webm files (which are the
-    // converted-from-Live2D character animations).  Previously these
-    // Spine-backed videos were not pre-opened, so the FIRST compositor
-    // frame that touched them paid a 100-170ms synchronous NVDEC init
-    // on the UI thread — producing the visible 1-2fps freeze at the
-    // start of a shot that contains a character.
-    struct Entry { bool isCharacter{false}; bool predecode{true}; };
+    // Collect (path, isCharacter) for every clip on the timeline that
+    // references a media file:
+    //   - VideoClip (video tracks) + SpineClip pre-rendered mp4/webm
+    //     ("character" clips).  Cold first-frame on a character clip
+    //     paid 100-170ms of NVDEC init on the UI thread historically.
+    //   - ImageClip (still graphics on video tracks).  PNG opens via
+    //     FFmpeg's image2 demuxer are quick individually but stack at
+    //     clip boundaries when multiple stills enter the active region
+    //     simultaneously.
+    //   - AudioClip (audio tracks).  Cold AudioFile open + sndfile/
+    //     ffmpeg probe at a clip boundary is the trigger for the
+    //     FrameClock JUMP we tracked down in 2026-05-21.
+    struct Entry {
+        bool isCharacter{false};
+        bool predecode{true};
+        bool isVideoFile{false};   // video tracks: pre-decode-eligible
+    };
     std::map<std::string, Entry> paths;
     for (size_t ti = 0; ti < m_timeline->trackCount(); ++ti) {
         auto* track = m_timeline->track(ti);
-        if (!track || track->type() != TrackType::Video) continue;
+        if (!track) continue;
+        const bool isVideoTrack = (track->type() == TrackType::Video);
+        const bool isAudioTrack = (track->type() == TrackType::Audio);
+        if (!isVideoTrack && !isAudioTrack) continue;
         for (size_t ci = 0; ci < track->clipCount(); ++ci) {
             auto* clip = track->clip(ci);
             if (!clip) continue;
@@ -129,6 +143,21 @@ void TimelineWorkspace::preOpenVideoMedia()
                 auto& e = paths[path];
                 if (videoClip->isVideoCharacter())
                     e.isCharacter = true;
+                e.isVideoFile = true;
+                continue;
+            }
+            if (auto* imageClip = dynamic_cast<ImageClip*>(clip)) {
+                const auto& path = imageClip->mediaPath();
+                if (path.empty()) continue;
+                // Stills don't need loop-pre-decode or NVDEC, just an
+                // open() to warm the MediaPool entry.
+                paths[path];   // insert with default Entry (isVideoFile=false)
+                continue;
+            }
+            if (auto* audioClip = dynamic_cast<AudioClip*>(clip)) {
+                const auto& path = audioClip->mediaPath();
+                if (path.empty()) continue;
+                paths[path];   // open warms the AudioFile/sndfile probe
                 continue;
             }
 #ifdef ROUNDTABLE_HAS_SPINE
@@ -184,8 +213,16 @@ void TimelineWorkspace::preOpenVideoMedia()
 
     if (paths.empty()) return;
 
-    spdlog::info("preOpenVideoMedia: pre-opening {} video media handle(s) on background thread",
-                 paths.size());
+    // warn so the user can confirm the pre-open ran (their logger
+    // filter is warn+).  Counts include audio + image clips since
+    // the 2026-05-21 extension covered the clip-boundary lag cause.
+    int videoCount = 0, audioImageCount = 0;
+    for (const auto& [p, e] : paths) {
+        if (e.isVideoFile) ++videoCount; else ++audioImageCount;
+    }
+    spdlog::warn("preOpenVideoMedia: pre-opening {} handle(s) ({} video, "
+                 "{} audio/image) on background thread",
+                 paths.size(), videoCount, audioImageCount);
 
     // Dispatch the actual open()+loop-pre-decode work to a detached
     // worker thread so the UI thread (and any pending compositeFrame
@@ -226,6 +263,12 @@ void TimelineWorkspace::preOpenVideoMedia()
             const auto* mediaInfo = pool->getInfo(handle);
             if (!mediaInfo) continue;
 
+            // Non-video files (stills / audio): the open() call above is
+            // all we need.  Skip loop-pre-decode / prefetch (those are
+            // video-only paths that would waste work on stills and don't
+            // apply to AudioClip media).
+            if (!info.isVideoFile) continue;
+
             if (info.isCharacter) {
                 if (info.predecode &&
                     mediaInfo->frameCount > 1 &&
@@ -248,7 +291,7 @@ void TimelineWorkspace::preOpenVideoMedia()
             }
         }
         auto ms = duration<double, std::milli>(steady_clock::now() - t0).count();
-        spdlog::info("preOpenVideoMedia(bg): opened={} loopWarm={} headWarm={} in {:.0f}ms",
+        spdlog::warn("preOpenVideoMedia(bg): opened={} loopWarm={} headWarm={} in {:.0f}ms",
                      opened, loopWarmCount, headWarmCount, ms);
 
         // Signal completion on the UI thread so isBackgroundWarmupActive()

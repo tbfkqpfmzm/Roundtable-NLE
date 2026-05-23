@@ -88,7 +88,26 @@ private:
         }
     };
 
-    static constexpr size_t kMaxPerShape = 16;
+    // Capacity per (w, h, format, usage) bucket.
+    //
+    // History:
+    //  - Originally 16 (mirroring GpuUploadManager's pre-existing
+    //    recycled-texture cap).
+    //  - Bumped to 64 on 2026-05-22 to absorb steady-state eviction rate
+    //    of the (then unbounded) GPU-resident decode path, where ~100 fps
+    //    decode + multi-GB caches meant the cap-16 pool overflowed every
+    //    frame and destroyed ~30 textures/sec — ~150-300 ms/sec of
+    //    vmaDestroyImage on the prefetch worker, sustained stutter at
+    //    the 30-60s mark.
+    //  - REDUCED to 24 on 2026-05-22 v3 (UPGRADE_PLAN: Premiere-style
+    //    bounded working set).  With GpuTextureCache + FrameCache both
+    //    capped at small absolute entry counts (~180 / 360 on a 24 GB
+    //    card), the eviction rate is much lower in steady state and
+    //    64-per-shape reserve was just held-but-unused VRAM (~512 MB
+    //    per shape).  24 = PREFETCH_AHEAD_COUNT (12) × 2, enough to
+    //    absorb scrub-burst overshoot without overflow.  ~192 MB per
+    //    shape at 1080p BGRA — fits any GPU.
+    static constexpr size_t kMaxPerShape = 24;
 
     mutable std::mutex m_mtx;
     std::unordered_map<PoolKey,

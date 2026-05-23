@@ -622,4 +622,181 @@ bool Nv12Converter::convertFromVkBuffer(VkCommandBuffer cmd,
     return true;
 }
 
+//══════════════════════════════════════════════════════════════════════════
+//  recordConvertFromBufferScaled — zero-copy NV12 → BGRA + downscale
+//  See header.  Mirrors recordConvertScaled's structure but reads NV12
+//  source planes from a Vulkan buffer (no CPU staging upload).
+//══════════════════════════════════════════════════════════════════════════
+
+bool Nv12Converter::recordConvertFromBufferScaled(
+    VkCommandBuffer cmd,
+    VkBuffer        nv12Buffer,
+    uint32_t srcW, uint32_t srcH,
+    uint32_t dstW, uint32_t dstH,
+    VkDeviceSize yOffset,
+    VkDeviceSize uvOffset)
+{
+    if (!m_initialized) return false;
+    if (cmd == VK_NULL_HANDLE || nv12Buffer == VK_NULL_HANDLE) return false;
+
+    if (!ensureOutputSize(dstW, dstH)) return false;
+
+    // ── Y texture: R8, sized to srcW × srcH ─────────────────────────────
+    if (m_yTexture.image() == VK_NULL_HANDLE ||
+        m_yTexture.width() != srcW || m_yTexture.height() != srcH)
+    {
+        m_yTexture.destroy();
+        TextureConfig cfg;
+        cfg.width  = srcW;
+        cfg.height = srcH;
+        cfg.format = VK_FORMAT_R8_UNORM;
+        cfg.usage  = VK_IMAGE_USAGE_SAMPLED_BIT
+                   | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        if (!m_yTexture.create(m_allocator->handle(),
+                               m_device->handle(), cfg))
+            return false;
+    }
+
+    // ── UV texture: RG8, sized to srcW/2 × srcH/2 ───────────────────────
+    const uint32_t uvW = srcW / 2;
+    const uint32_t uvH = srcH / 2;
+    if (m_uvTexture.image() == VK_NULL_HANDLE ||
+        m_uvTexture.width() != uvW || m_uvTexture.height() != uvH)
+    {
+        m_uvTexture.destroy();
+        TextureConfig cfg;
+        cfg.width  = uvW;
+        cfg.height = uvH;
+        cfg.format = VK_FORMAT_R8G8_UNORM;
+        cfg.usage  = VK_IMAGE_USAGE_SAMPLED_BIT
+                   | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        if (!m_uvTexture.create(m_allocator->handle(),
+                                m_device->handle(), cfg))
+            return false;
+    }
+
+    // ── Transition Y/UV: prev layout → TRANSFER_DST_OPTIMAL ─────────────
+    const VkImageLayout yOldLayout  = m_yTexture.layout();
+    const VkImageLayout uvOldLayout = m_uvTexture.layout();
+    m_yTexture.transitionLayout(cmd, yOldLayout,
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    m_uvTexture.transitionLayout(cmd, uvOldLayout,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+    // ── Copy Y plane: buffer offset 0 → texture ─────────────────────────
+    {
+        VkBufferImageCopy region{};
+        region.bufferOffset                    = yOffset;
+        region.bufferRowLength                 = 0;  // tightly packed
+        region.bufferImageHeight               = 0;
+        region.imageSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel       = 0;
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount     = 1;
+        region.imageExtent                     = {srcW, srcH, 1};
+        vkCmdCopyBufferToImage(cmd, nv12Buffer, m_yTexture.image(),
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    }
+
+    // ── Copy UV plane: buffer offset srcW*srcH → texture ────────────────
+    {
+        VkBufferImageCopy region{};
+        region.bufferOffset                    = uvOffset;
+        region.bufferRowLength                 = 0;
+        region.bufferImageHeight               = 0;
+        region.imageSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel       = 0;
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount     = 1;
+        region.imageExtent                     = {uvW, uvH, 1};
+        vkCmdCopyBufferToImage(cmd, nv12Buffer, m_uvTexture.image(),
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    }
+
+    // ── Transition Y/UV: TRANSFER_DST → SHADER_READ_ONLY ────────────────
+    m_yTexture.transitionLayout(cmd,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    m_uvTexture.transitionLayout(cmd,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    // ── Barrier: transfer writes → compute reads ────────────────────────
+    {
+        VkMemoryBarrier barrier{};
+        barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0, 1, &barrier, 0, nullptr, 0, nullptr);
+    }
+
+    // ── Update descriptors (Y, UV, output) ──────────────────────────────
+    {
+        VkDescriptorImageInfo yInfo  = m_yTexture.descriptorInfo();
+        VkDescriptorImageInfo uvInfo = m_uvTexture.descriptorInfo();
+        VkDescriptorImageInfo outInfo{};
+        outInfo.imageView   = m_outputTexture.imageView();
+        outInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkWriteDescriptorSet writes[3]{};
+        writes[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[0].dstSet          = m_descriptorSet;
+        writes[0].dstBinding      = 0;
+        writes[0].descriptorCount = 1;
+        writes[0].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[0].pImageInfo      = &yInfo;
+
+        writes[1].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[1].dstSet          = m_descriptorSet;
+        writes[1].dstBinding      = 1;
+        writes[1].descriptorCount = 1;
+        writes[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[1].pImageInfo      = &uvInfo;
+
+        writes[2].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[2].dstSet          = m_descriptorSet;
+        writes[2].dstBinding      = 2;
+        writes[2].descriptorCount = 1;
+        writes[2].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        writes[2].pImageInfo      = &outInfo;
+
+        vkUpdateDescriptorSets(m_device->handle(), 3, writes, 0, nullptr);
+    }
+
+    // ── Dispatch at OUTPUT dimensions ──────────────────────────────────
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            m_pipelineLayout, 0, 1, &m_descriptorSet,
+                            0, nullptr);
+
+    struct { int32_t w, h; } pc;
+    pc.w = static_cast<int32_t>(dstW);
+    pc.h = static_cast<int32_t>(dstH);
+    vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+                       0, sizeof(pc), &pc);
+
+    const uint32_t gx = (dstW + 15) / 16;
+    const uint32_t gy = (dstH + 15) / 16;
+    vkCmdDispatch(cmd, gx, gy, 1);
+
+    // ── Barrier: compute writes → shader reads / transfer reads ────────
+    {
+        VkMemoryBarrier barrier{};
+        barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT
+                              | VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+              | VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 1, &barrier, 0, nullptr, 0, nullptr);
+    }
+
+    return true;
+}
+
 } // namespace rt

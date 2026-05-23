@@ -373,6 +373,10 @@ void CompositeEngine::invalidateMediaPoolSlots(uint64_t mediaId)
 
 void CompositeEngine::clearGpuTexCache()
 {
+    // Clear the diagnostic pointer BEFORE freeing the cache so any
+    // concurrent perf-dump reader sees a null (and skips) rather than
+    // dereferencing a dangling pointer.
+    GpuContext::get().registerGpuTextureCache(nullptr);
     m_gpuTexCache.reset();
 }
 
@@ -486,7 +490,16 @@ std::shared_ptr<CachedFrame> CompositeEngine::compositeViaRenderGraph(
     // ── Set up command buffer (reuse existing triple-buffer slot) ────
     if (!m_gpuSubmission) {
         m_gpuSubmission = std::make_unique<GpuWorkSubmission>();
-        m_gpuSubmission->init(ctx.vkDevice(), ctx.cmdPool().handle());
+        // UPGRADE_PLAN Path C (2026-05-22): allocate the per-frame
+        // composite cmd buffer from the graphics-family pool so the
+        // submission below can target the graphics queue, off the
+        // prefetch workers' compute-queue contention path.  Vulkan
+        // forbids submitting a cmdbuf to a queue of a different family
+        // than its pool — pool family change and submit queue change
+        // are paired.  graphicsCmdPool() falls back to cmdPool() when
+        // graphics and compute share a family, preserving the
+        // single-queue path on simpler devices.
+        m_gpuSubmission->init(ctx.vkDevice(), ctx.graphicsCmdPool().handle());
     }
     auto& slot = *m_gpuSubmission;
     if (!slot.beginRecording()) {
@@ -535,13 +548,66 @@ std::shared_ptr<CachedFrame> CompositeEngine::compositeViaRenderGraph(
                 gpuVram / 4, 512ull * 1024 * 1024, 8ull * 1024 * 1024 * 1024);
         }
         m_gpuTexCache = std::make_unique<GpuTextureCache>(budget);
+        // UPGRADE_PLAN 2026-05-22 v3 — Premiere-style bounded working
+        // set.  Cap the entry count to a small absolute number, not a
+        // percentage of VRAM.  CacheCoordinator computes the recommended
+        // value based on installed VRAM but stays in the 40-180 range
+        // even on 24 GB cards.  Without this cap the texture cache
+        // grew unbounded (1469 entries / 11.5 GB observed at the 50s
+        // mark in 21:51 perf logs), VMA-tracked VRAM crossed the OS
+        // budget, and the driver started paging textures to system
+        // RAM — submit stalls 50-250 ms / frame.
+        if (m_cacheCoordinator) {
+            const size_t maxEntries =
+                m_cacheCoordinator->recommendedGpuTexCacheMaxEntries(gpuVram);
+            m_gpuTexCache->setMaxEntries(maxEntries);
+            spdlog::info("[PERF] GpuTexCache max entries: {} "
+                         "(Premiere-style bounded working set)",
+                         maxEntries);
+        }
         m_uploadManager->setTextureCache(m_gpuTexCache.get());
+        // Register for diagnostic visibility from MediaPool's perf-dump
+        // (see GpuContext::registerGpuTextureCache rationale).  Cleared
+        // in shutdown() / clearTextureCache().
+        ctx.registerGpuTextureCache(m_gpuTexCache.get());
         if (m_cacheCoordinator) {
             m_cacheCoordinator->setVramPressureFn(
                 [this](size_t* budgetOut) -> bool {
                     if (!m_gpuTexCache) return false;
                     *budgetOut = m_gpuTexCache->budget();
-                    return m_gpuTexCache->isUnderPressure();
+
+                    // Real pressure signal: query VMA's view of device-
+                    // local VRAM use vs the OS budget.  GpuTextureCache's
+                    // OWN pressure (>90% of self-budget) was the previous
+                    // trigger but it fires far too late — the cache
+                    // budget defaults to 60% of VRAM, while VMA total
+                    // (cache + prefetch pool + compositor outputs +
+                    // FrameCache orphan textures + swapchain + staging
+                    // buffers + Spine/Effect working sets) easily
+                    // exceeds the OS budget while the cache itself is
+                    // only at 60% of its 14 GB cap.  At that point the
+                    // driver starts paging textures to system RAM and
+                    // submit latencies jump 50-250 ms (see CACHE-DUMP
+                    // sequence at 21:41:53 → 21:42:07 in
+                    // logs/perf_log.txt: gpuTexMB stable at 9-10 GB,
+                    // vmaMB climbed past vmaBudget).
+                    //
+                    // Pressure trigger: VMA used > 85% of the OS-reported
+                    // budget.  At that point we ask the coordinator to
+                    // both (a) evict FrameCache GPU-co-owned entries and
+                    // (b) shrink the texture-cache budget so it evicts
+                    // some entries itself.
+                    const auto memStats = GpuContext::get().allocator().queryStats();
+                    if (memStats.deviceLocalBudgetBytes == 0) {
+                        // VMA didn't report a budget (older drivers /
+                        // headless).  Fall back to the original self-
+                        // pressure check.
+                        return m_gpuTexCache->isUnderPressure();
+                    }
+                    const double vmaUsage =
+                        double(memStats.deviceLocalUsedBytes) /
+                        double(memStats.deviceLocalBudgetBytes);
+                    return vmaUsage > 0.85;
                 });
             // Bidirectional pressure: when the CPU FrameCache is over its
             // high-water mark, CacheCoordinator calls this to shrink the
@@ -1193,13 +1259,57 @@ std::shared_ptr<CachedFrame> CompositeEngine::compositeViaRenderGraph(
     const bool endOk = slot.endRecording();
     bool gpuSubmitOk = false;
     if (endOk) {
-        // Note: no manual ctx.computeQueueMutex() lock here.  GpuWork-
-        // Submission::submit routes through GpuScheduler (P1.1), which
-        // owns the queue mutex.  Locking it manually here would re-enter
-        // a non-recursive std::mutex on the same thread and throw
-        // resource_deadlock_would_occur — exactly the regression that
-        // caused the program monitor to stay blank.
-        gpuSubmitOk = slot.submit(ctx.computeQueue(), frameSem, nullptr);
+        // Note: no manual queue-mutex lock here.  GpuWorkSubmission::
+        // submit routes through GpuScheduler (P1.1), which owns the
+        // queue mutex.  Locking it manually would re-enter a non-
+        // recursive std::mutex on the same thread and throw
+        // resource_deadlock_would_occur — the regression that left
+        // the program monitor blank in an earlier revision.
+        //
+        // UPGRADE_PLAN Path C (2026-05-22): target the graphics queue.
+        // The composite cmd was allocated from graphicsCmdPool above;
+        // submitting it to the graphics queue runs the composite work
+        // on the 3D engine, in parallel with whatever the async-compute
+        // engine (still owned by prefetch convert+copy) is doing.  This
+        // removes the 130-468 ms submit= stalls observed in
+        // logs/perf_log.txt at 2026-05-22 13:40:50, 13:41:01, etc.
+        // graphicsQueue() falls back to the compute queue on devices
+        // where the families coincide, preserving the previous path.
+        //
+        // Cross-queue memory visibility (Path C optimisation): walk the
+        // layers vector and find the max producer timeline value across
+        // every CachedFrame the compositor is about to sample.  We
+        // assume one shared producer timeline semaphore — all
+        // prefetch-produced frames currently signal MediaPool's
+        // m_prefetchTimelineSem.  Layers whose frame was CPU-decoded
+        // or composite-output (no producer) contribute 0 and are
+        // ignored.  The wait is added GPU-side via a
+        // VkTimelineSemaphoreSubmitInfo so the prefetch worker thread
+        // does NOT block on vkWaitForFences — the previous per-frame
+        // ~5 ms CPU stall that limited prefetch throughput under
+        // seek-recovery and high playback rates is gone.
+        VkSemaphore producerSem      = VK_NULL_HANDLE;
+        uint64_t    producerMaxValue = 0;
+        for (const auto& layer : layers) {
+            if (!layer.frame) continue;
+            const uint64_t semHandle = layer.frame->producerTimelineSem;
+            const uint64_t v         = layer.frame->producerTimelineValue;
+            if (semHandle == 0 || v == 0) continue;
+            // Currently all prefetch frames share one timeline sem.  If
+            // that ever changes, the per-sem map can replace this
+            // single-value tracker; for now we sanity-check the handle.
+            VkSemaphore sem = reinterpret_cast<VkSemaphore>(semHandle);
+            if (producerSem == VK_NULL_HANDLE) producerSem = sem;
+            if (sem == producerSem && v > producerMaxValue)
+                producerMaxValue = v;
+        }
+        if (producerSem != VK_NULL_HANDLE && producerMaxValue != 0) {
+            gpuSubmitOk = slot.submitWithTimelineWait(
+                ctx.graphicsQueue(), frameSem,
+                producerSem, producerMaxValue, nullptr);
+        } else {
+            gpuSubmitOk = slot.submit(ctx.graphicsQueue(), frameSem, nullptr);
+        }
     }
 
     if (!gpuSubmitOk) {
@@ -1224,7 +1334,25 @@ std::shared_ptr<CachedFrame> CompositeEngine::compositeViaRenderGraph(
         result->height = outH;
         result->stride = outW * 4;
 
-        if (gpuDisplayMode && !scrubMode) {
+        if (gpuDisplayMode) {
+            // GPU-direct display path: used for BOTH playback and scrub.
+            //
+            // Previously this was gated on `!scrubMode`, which forced
+            // scrub composites through the synchronous CPU-readback
+            // path below (vkWaitForFences with a 5 s timeout +
+            // mapAndCopyReadback).  That wait blocked the FrameProducer
+            // thread until ALL GPU work queued ahead — including the
+            // prefetch convert+copy submissions saturating the compute
+            // queue — drained.  Result: `readback=` times of 71-307 ms
+            // during scrub bursts, exactly the symptom in
+            // logs/perf_log.txt at 2026-05-22 13:11:51–13:12:18.
+            //
+            // The GPU-direct path works identically for scrub: the
+            // compositor produces the same outputImageView, the
+            // gpuSemaphore signals completion to the presenter, and
+            // ProgramMonitor::presentFrame's gpuReady branch displays
+            // directly without ever touching CPU memory.  No reason to
+            // pay the readback cost just because the user is scrubbing.
             result->gpuReady     = true;
             result->gpuImageView = reinterpret_cast<uint64_t>(compositor->outputImageView());
             result->gpuSampler   = reinterpret_cast<uint64_t>(compositor->outputSampler());
@@ -1234,7 +1362,7 @@ std::shared_ptr<CachedFrame> CompositeEngine::compositeViaRenderGraph(
             result->gpuTextureOwner = compositor->outputTextureOwner();
         }
 
-        if (readbackOk && gpuDisplayMode && !scrubMode) {
+        if (readbackOk && gpuDisplayMode) {
             auto compPtr = compositor;
             uint32_t rW = outW, rH = outH;
             result->lazyReadback = [compPtr, rW, rH](std::vector<uint8_t>& px) -> bool {
@@ -1285,16 +1413,40 @@ std::shared_ptr<CachedFrame> CompositeEngine::compositeViaRenderGraph(
 
         perfTcomp = std::chrono::high_resolution_clock::now();
 
-        if (perfLog) {
-            auto ms = [](auto a, auto b) {
-                return std::chrono::duration<double, std::milli>(b - a).count();
-            };
+        auto ms = [](auto a, auto b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        };
+        const double totalMs   = ms(perfT0, perfTcomp);
+        const double layersMs  = ms(perfT0, perfTlayers);
+        const double submitMs  = ms(perfTlayers, perfTgpuUp);
+        const double readbackMs = ms(perfTgpuUp, perfTcomp);
+
+        // Always log when a frame breaches the 33ms budget (target 30 fps).
+        // This is the most direct diagnostic for the clip-boundary cascade
+        // and any other "FrameClock falls to ~10 fps" symptom: each slow
+        // frame is one tick the FrameClock could not advance in real time,
+        // so a flurry of these lines correlates exactly with the JUMP
+        // stream in the same log.  Stage breakdown (layers / submit /
+        // readback) is included so a slow frame can be attributed to
+        // CPU-side layer build vs the GPU submit window vs CPU↔GPU
+        // readback, without needing a second test run.  warn level: the
+        // user runs warn+ filtered logging, and a >33 ms frame during
+        // active playback is a real perf event worth surfacing every time.
+        if (totalMs > 33.0) {
+            spdlog::warn("[COMPOSITE-SLOW] tick={} TOTAL={:.1f}ms "
+                         "layers={:.1f}ms submit={:.1f}ms readback={:.1f}ms "
+                         "| layerCount={} effectLayers={} effectPasses={} "
+                         "transitions={} gpuDisplay={}",
+                         tick, totalMs, layersMs, submitMs, readbackMs,
+                         layers.size(), effectLayerCount, effectPassCount,
+                         transitionCount, gpuDisplayMode);
+        } else if (perfLog) {
             spdlog::info("[RENDER_GRAPH] compositeFrame (DAG): layers={} | "
                          "gpu={:.1f}ms  TOTAL={:.1f}ms  "
                          "gpuDisplay={}  effectLayers={}  effectPasses={}  transitions={}",
                          layers.size(),
                          ms(perfTlayers, perfTcomp),
-                         ms(perfT0, perfTcomp),
+                         totalMs,
                          gpuDisplayMode,
                          effectLayerCount, effectPassCount, transitionCount);
         }

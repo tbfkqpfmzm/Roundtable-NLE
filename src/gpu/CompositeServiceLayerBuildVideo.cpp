@@ -96,20 +96,37 @@ std::shared_ptr<CachedFrame> CompositeService::resolveMediaFrame(
     }
     // Cache miss path.
     //
-    // Both scrub and playback fall through to MediaPool::getFrame, which
-    // routes scrubMode requests through the dedicated NVDEC-backed scrub
-    // decoder (lock-free relative to m_mutex). Cold scrub positions now
-    // decode inline in ~5-15 ms (NVDEC) instead of waiting for the
-    // prefetch worker to land — the previous "scrubMode → nullptr" guard
-    // dated from when the scrub decoder was forced software (50-500 ms
-    // per seek would freeze the compositor mutex; that risk is gone with
-    // NVDEC). The compositor mutex is held during the call, but at NVDEC
-    // speeds the hold is shorter than one 60fps tick, which is comparable
-    // to a normal composite. Playback (scrubMode=false) still resolves
-    // via the non-blocking path inside getFrame — it returns stale or
-    // null without inline decoding, matching the "never stall the render
-    // thread" design.
-    return m_mediaPool->getFrame(handle, frameNumber, tier, scrubMode);
+    // SCRUB MODE: return nullptr instead of falling through to blocking
+    // inline decode (2026-05-22 fix).  The previous code routed scrubMode
+    // requests through MediaPool::getFrame's scrub-decoder path, which
+    // the in-tree comment claimed cost "~5-15 ms" via NVDEC.  In practice
+    // — see LAYER-SLOW perf_log entries at 2026-05-22 12:26:38–40 with
+    // single-clip layer-build times of 60-872 ms during aggressive scrub
+    // — NVDEC session contention (2 prefetch workers + N scrub decoders
+    // approaching consumer NVDEC's 3-5 concurrent-session limit) blew
+    // that budget by 50-100×.  Under that contention every layer's frame
+    // fetch stalled the FrameProducer thread for hundreds of ms, which
+    // is exactly the "scrubbing is basically unusable" symptom.
+    //
+    // The Premiere-style fix: tryGetFrame above has ALREADY scheduled an
+    // urgent prefetch for the requested (handle, frame, tier) AND
+    // returned the nearest cached frame if any exists within its ±5
+    // window.  If it returned nullptr, no nearby frame exists yet and
+    // we accept a brief stale-frame display while the prefetch worker
+    // catches up — the compositor's last-good composite fallback covers
+    // the gap.  This is the architectural model Premiere uses: never
+    // block the compositor on decode, ever.  At normal scrub speeds the
+    // user sees a single stale tick; at heavy scrub the display lags
+    // ~100-300 ms behind the playhead but never freezes.
+    if (scrubMode) {
+        return nullptr;
+    }
+
+    // Non-scrub playback miss: same non-blocking treatment.  getFrame
+    // with scrubMode=false returns a stale frame from the last-good
+    // map without inline decoding, matching the "never stall the
+    // render thread" design.
+    return m_mediaPool->getFrame(handle, frameNumber, tier, /*scrubMode=*/false);
 }
 
 } // namespace rt

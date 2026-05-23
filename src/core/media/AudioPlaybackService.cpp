@@ -7,6 +7,7 @@
 #include "media/AudioPlaybackService.h"
 
 #include "media/AudioEngine.h"
+#include "media/AudioFile.h"
 #include "media/PlaybackController.h"
 
 #include <spdlog/spdlog.h>
@@ -48,6 +49,14 @@ AudioPlaybackService::~AudioPlaybackService()
     m_destroying.store(true);
     cancelWarm();
     waitForWarm();
+    // Safe to clear now: waitForWarm() guarantees no warm task is in
+    // flight, so no thread is dereferencing AudioFile pointers from
+    // m_warmFiles.  Order matters — clearing before waitForWarm() would
+    // free an AudioFile mid-read.
+    {
+        std::lock_guard<std::mutex> lock(m_warmFilesMutex);
+        m_warmFiles.clear();
+    }
 }
 
 // ---- State management ------------------------------------------------------
@@ -83,6 +92,17 @@ void AudioPlaybackService::reset()
         std::lock_guard<std::mutex> lock(m_decodeMutex);
         m_decodeCache.clear();
         m_decodeUseSerial = 0;
+    }
+
+    // Drop persistent AudioFile handles — typically called on project
+    // open / close, where the path set is about to change anyway, so
+    // holding stale opens wastes file handles and would mask a file
+    // having been moved or replaced on disk.  Safe to clear here for
+    // the same reason as the destructor: waitForWarm() above has drained
+    // any in-flight warm task that might be reading from these handles.
+    {
+        std::lock_guard<std::mutex> lock(m_warmFilesMutex);
+        m_warmFiles.clear();
     }
 
     m_loadedWindowStartFrame = -1;
@@ -129,6 +149,25 @@ void AudioPlaybackService::ensureSourcesLoaded()
     }
 
     loadSources(true);
+}
+
+// ---- Persistent AudioFile cache --------------------------------------------
+
+AudioFile* AudioPlaybackService::getOrOpenCachedAudioFile(const std::string& path)
+{
+    std::lock_guard<std::mutex> lock(m_warmFilesMutex);
+    auto it = m_warmFiles.find(path);
+    if (it != m_warmFiles.end())
+        return it->second.get();
+
+    auto fresh = std::make_unique<AudioFile>();
+    if (!fresh->open(path)) {
+        spdlog::warn("AudioPlaybackService: failed to open '{}'", path);
+        return nullptr;
+    }
+    AudioFile* raw = fresh.get();
+    m_warmFiles.emplace(path, std::move(fresh));
+    return raw;
 }
 
 // ---- needsPlaybackWindowRefresh ---------------------------------------------

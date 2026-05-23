@@ -154,6 +154,26 @@ public:
                              VkDeviceSize yOffset  = 0, uint32_t yRowPitch  = 0,
                              VkDeviceSize uvOffset = 0, uint32_t uvRowPitch = 0);
 
+    /// Record (only) NV12 → BGRA with integrated downscale, reading the
+    /// NV12 source planes from a Vulkan buffer (zero-copy from CUDA via
+    /// CudaVulkanInterop) into the converter's internal Y/UV textures,
+    /// then dispatching the convert shader into the output texture sized
+    /// to dstW × dstH.  Caller's responsibilities mirror
+    /// recordConvertScaled: lock apiMutex(), do not submit, supply the
+    /// command buffer.
+    ///
+    /// Buffer layout (matches CudaVulkanInterop::copyNv12FromCuda):
+    ///   Y plane  at yOffset,  tightly packed (pitch = srcW).
+    ///   UV plane at uvOffset, tightly packed (pitch = srcW).
+    /// Pass uvOffset = srcW*srcH for the standard NV12 layout the
+    /// interop produces.
+    bool recordConvertFromBufferScaled(VkCommandBuffer cmd,
+                                       VkBuffer nv12Buffer,
+                                       uint32_t srcW, uint32_t srcH,
+                                       uint32_t dstW, uint32_t dstH,
+                                       VkDeviceSize yOffset  = 0,
+                                       VkDeviceSize uvOffset = 0);
+
     // ── Resize ──────────────────────────────────────────────────────────
 
     bool resize(uint32_t width, uint32_t height);

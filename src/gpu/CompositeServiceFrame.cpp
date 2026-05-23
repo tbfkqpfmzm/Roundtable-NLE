@@ -181,15 +181,33 @@ try
     // coming up in the next ~2s.  Kills the reactive cold-decoder stall
     // at every shot boundary.  Also run during export (forceFullRes)
     // so the decode cache stays hot and we don't block on every frame.
-    if (playbackNonBlocking || m_forceFullResolution.load()) {
+    //
+    // Scrub: SKIP.  Prewarm projects ~2s ahead of the playhead in playback
+    // direction; during scrubbing the user's direction/speed isn't known
+    // and the predictive work is mostly wasted.  Worse, the scan can stall
+    // on MediaPool m_mutex (see PRE-LAYER-SLOW > 6s on backward scrub
+    // across clip boundaries) — exactly the latency the user perceives as
+    // unresponsive scrubbing.  The settle window after scrub stops re-fires
+    // a normal composite which re-runs prewarm with the user's landed tick.
+    auto preLayerT0 = std::chrono::high_resolution_clock::now();
+    if (!scrubMode && (playbackNonBlocking || m_forceFullResolution.load())) {
         prewarmUpcomingShots(tick);
     }
+    auto prewarmT1 = std::chrono::high_resolution_clock::now();
 
     // Shot-boundary detection: when new clips appear (different from last
     // composite), force blocking decode so the correct character shows
     // immediately instead of flashing the previous shot's frame.
     // Also run during export so cache isn't polluted by stale clip IDs.
-    if (playbackNonBlocking || m_forceFullResolution.load()) {
+    //
+    // Scrub: SKIP for the same reason as prewarm above.  The block walks
+    // tracks under m_mutex and schedules urgent prefetch on every new
+    // clip — at scrub speed this fires on every poll tick and floods the
+    // decoder.  We deliberately leave m_lastActiveClipIds untouched so
+    // the first non-scrub composite after the user stops treats every
+    // visible clip as "new" and fires the prefetch once, in the right
+    // place.
+    if (!scrubMode && (playbackNonBlocking || m_forceFullResolution.load())) {
         std::unordered_set<uint64_t> currentClipIds;
         for (size_t ti = m_timeline->trackCount(); ti > 0; --ti) {
             auto* track = m_timeline->track(ti - 1);
@@ -291,6 +309,27 @@ try
         m_mediaPool->scheduler().setPlayhead(tick);
     }
 
+    auto shotBoundaryT1 = std::chrono::high_resolution_clock::now();
+
+    // Warn-level breakdown of the pre-layer-build phase so we can tell
+    // apart prewarmUpcomingShots vs the shot-boundary detection block
+    // when COMPOSITE-SLOW reports a high "layers=" value.  Both can
+    // block on MediaPool m_mutex under heavy churn (e.g., the 6.4 s
+    // stall observed at 2026-05-22 12:16:40 tick=1811200 after a
+    // backward scrub crossed clip boundaries).  Threshold 30 ms.
+    {
+        auto ms = [](auto a, auto b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        };
+        const double prewarmMs = ms(preLayerT0, prewarmT1);
+        const double shotMs    = ms(prewarmT1, shotBoundaryT1);
+        if (prewarmMs > 30.0 || shotMs > 30.0) {
+            spdlog::warn("[PRE-LAYER-SLOW] tick={} prewarm={:.1f}ms "
+                         "shotBoundary={:.1f}ms",
+                         tick, prewarmMs, shotMs);
+        }
+    }
+
     auto fetchMediaFrame = [&](MediaHandle handle, int64_t frameNumber,
                                ResolutionTier tier) -> std::shared_ptr<CachedFrame> {
         if (!m_mediaPool)
@@ -345,8 +384,13 @@ try
     // untransformed position every other frame" bug.  The inner must
     // always freshly composite its own content (it is snapshotted to a
     // CPU layer by the caller anyway).
-    if (m_engine && !isNestedRecursion
-            && (!scrubMode || m_forceFullResolution.load())) {
+    //
+    // Scrub: ALLOW.  The LRU only stores CPU-readback frames (insertLru
+    // is gated on !result->gpuReady), and they are keyed by (tick, w, h)
+    // so there is no staleness risk.  Letting scrub hit the LRU means an
+    // oscillating drag around the same tick at the same divisor reuses
+    // the prior composite instead of redoing the full layer build.
+    if (m_engine && !isNestedRecursion) {
         auto cached = m_engine->checkLru(tick, outW, outH);
         if (cached)
             return cached;

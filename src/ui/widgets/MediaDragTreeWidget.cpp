@@ -31,8 +31,10 @@ void restoreDragSelection(QTreeWidget* tree,
         if (item)
             item->setSelected(true);
     }
+    // NoUpdate: setCurrentItem() defaults to ClearAndSelect in ExtendedSelection
+    // mode, which would wipe out the multi-selection we just set above.
     if (currentItem)
-        tree->setCurrentItem(currentItem);
+        tree->setCurrentItem(currentItem, 0, QItemSelectionModel::NoUpdate);
 }
 
 } // namespace
@@ -98,42 +100,60 @@ void MediaDragTreeWidget::mousePressEvent(QMouseEvent* event)
             auto preSelection = selectedItems();
             bool wasMultiSel = (!hasModifiers && preSelection.size() > 1);
 
-            // ── ALWAYS let the base class handle the click first ─────────
-            // This ensures expand/collapse via the branch indicator works
-            // correctly for every item, regardless of selection state.
+            // QTreeWidget::mousePressEvent() clears a multi-selection down
+            // to a single item in ExtendedSelection mode.  We still need
+            // the base class for expand/collapse and to set up its internal
+            // state machine (pressedIndex, state etc.) for mouseMoveEvent.
+            // Save the full QItemSelection beforehand and atomically
+            // restore it afterwards so the selection never visually changes.
+            QItemSelection savedSel;
+            if (wasMultiSel)
+                savedSel = selectionModel()->selection();
+
             QTreeWidget::mousePressEvent(event);
 
-            // ── Post-process: apply our custom selection/drag logic ──────
-            if (wasMultiSel && hit->isSelected()) {
-                // Was part of a multi-selection and still selected after base
-                // processing — preserve group for potential drag, but collapse
-                // to single-selection on release if no drag occurs.
+            if (wasMultiSel) {
+                // Atomically restore the multi-selection.  This emits a
+                // single selectionChanged signal so the view repaints all
+                // selected items at once (vs. clearSelection + setSelected
+                // which can cause intermediate paint flashes).
+                selectionModel()->select(savedSel, QItemSelectionModel::ClearAndSelect);
+                // NoUpdate: the no-arg setCurrentItem() collapses the multi-
+                // selection back to single in ExtendedSelection mode.
+                setCurrentItem(hit, 0, QItemSelectionModel::NoUpdate);
+                spdlog::info("mousePress: wasMultiSel, saved {} sel ranges, now {} items selected",
+                             savedSel.size(), selectedItems().size());
                 m_deferSingleSelectOnRelease = true;
                 m_dragItemsSnapshot = preSelection;
-            } else if (!hasModifiers && hit == m_pressItem
-                       && preSelection.size() == 1
-                       && preSelection.first() == hit) {
-                // Same single item clicked again (no modifiers).
-                // Snapshot the selection for drag, and arm the rename timer.
-                m_dragItemsSnapshot = preSelection;
-                if (m_renameTimer->isActive() && m_renameCandidate == hit) {
-                    m_renameTimer->stop();
-                    m_renameCandidate = nullptr;
+            }
+
+            // ── Post-process: apply our custom selection/drag logic ──────
+            if (!wasMultiSel) {
+                if (!hasModifiers && hit == m_pressItem
+                    && preSelection.size() == 1
+                    && preSelection.first() == hit) {
+                    // Same single item clicked again (no modifiers).
+                    // Snapshot the selection for drag, and arm the rename timer.
+                    m_dragItemsSnapshot = preSelection;
+                    if (m_renameTimer->isActive() && m_renameCandidate == hit) {
+                        m_renameTimer->stop();
+                        m_renameCandidate = nullptr;
+                    } else {
+                        if (m_renameTimer->isActive()) {
+                            m_renameTimer->stop();
+                            m_renameCandidate = nullptr;
+                        }
+                        m_renameCandidate = hit;
+                        m_renameTimer->start();
+                    }
                 } else {
+                    // New item or modifier-click — cancel rename and snapshot
                     if (m_renameTimer->isActive()) {
                         m_renameTimer->stop();
                         m_renameCandidate = nullptr;
                     }
-                    m_renameCandidate = hit;
-                    m_renameTimer->start();
+                    m_dragItemsSnapshot = selectedItems();
                 }
-            } else {
-                // New item or modifier-click — cancel rename and snapshot
-                if (m_renameTimer->isActive()) {
-                    m_renameTimer->stop();
-                    m_renameCandidate = nullptr;
-                }
-                m_dragItemsSnapshot = selectedItems();
             }
         }
     } else {
@@ -261,7 +281,35 @@ void MediaDragTreeWidget::startDrag(Qt::DropActions /*supportedActions*/)
         : m_dragItemsSnapshot;
     if (items.isEmpty()) return;
 
-    restoreDragSelection(this, items, m_pressItem ? m_pressItem : currentItem());
+    // Only rebuild the selection if it doesn't already match the drag
+    // snapshot.  mousePressEvent() already preserves multi-selection,
+    // and calling restoreDragSelection() here would clearSelection()
+    // first, causing a visual flash to single-selection before the
+    // re-select can paint.
+    QList<QTreeWidgetItem*> curSel = selectedItems();
+    bool selMatches = (curSel.size() == items.size());
+    if (selMatches) {
+        for (auto* it : items) {
+            if (!curSel.contains(it)) { selMatches = false; break; }
+        }
+    }
+    if (!selMatches)
+        restoreDragSelection(this, items, m_pressItem ? m_pressItem : currentItem());
+    else if (m_pressItem)
+        setCurrentItem(m_pressItem, 0, QItemSelectionModel::NoUpdate);
+
+    // Diagnostic: verify the selection state right before drag starts
+    spdlog::info("startDrag: {} items in snapshot, {} currently selected, selMatches={}",
+                 items.size(), selectedItems().size(), selMatches);
+
+    // Keep the tree widget focused so selected items paint with the
+    // active-state colours during the drag (Windows OLE drag may
+    // otherwise deactivate the window and dim the selection).
+    setFocus(Qt::MouseFocusReason);
+
+    // Force a synchronous repaint so the multi-selection is visually
+    // committed before drag->exec() enters the modal event loop.
+    viewport()->repaint();
 
     bool hasBinItems = false;
     for (auto* it : items) {
@@ -319,7 +367,7 @@ void MediaDragTreeWidget::startDrag(Qt::DropActions /*supportedActions*/)
         drag->setPixmap(pix);
         drag->setHotSpot(QPoint(12, h / 2));
         spdlog::info("ProjectBinDrag: start bin drag ({} selected)", items.size());
-        const Qt::DropAction result = drag->exec(Qt::MoveAction | Qt::CopyAction, Qt::MoveAction);
+        const Qt::DropAction result = drag->exec(Qt::MoveAction | Qt::CopyAction, Qt::CopyAction);
         spdlog::info("ProjectBinDrag: bin drag finished with action {}", static_cast<int>(result));
         // Clear stale item pointers — drag->exec() entered a nested event loop
         // during which the tree may have been cleared, invalidating all pointers.
@@ -427,7 +475,7 @@ void MediaDragTreeWidget::startDrag(Qt::DropActions /*supportedActions*/)
     drag->setPixmap(pix);
     drag->setHotSpot(QPoint(12, h / 2));
     spdlog::info("ProjectBinDrag: start media drag ({} selected)", mediaItems.size());
-    const Qt::DropAction result = drag->exec(Qt::MoveAction | Qt::CopyAction, Qt::MoveAction);
+    const Qt::DropAction result = drag->exec(Qt::MoveAction | Qt::CopyAction, Qt::CopyAction);
     // Clear stale item pointers — drag->exec() entered a nested event loop
     // during which the tree may have been cleared, invalidating all pointers.
     m_pressItem = nullptr;

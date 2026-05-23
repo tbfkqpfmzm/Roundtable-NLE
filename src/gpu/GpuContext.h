@@ -39,6 +39,7 @@ namespace rt {
 
 class Compositor;
 class EffectProcessor;
+class GpuTextureCache;
 class Nv12Converter;
 class SpineRenderer;
 class TransitionRenderer;
@@ -252,6 +253,23 @@ public:
     [[nodiscard]] VkSemaphore acquireBinarySemaphore();
     void releaseBinarySemaphore(VkSemaphore sem);
 
+    // ── Diagnostic accessor for the live GpuTextureCache ────────────────
+    //
+    // CompositeEngine owns the GpuTextureCache (it's lazily created on
+    // the first composite frame).  MediaPool's perf-report code lives
+    // in core/, can't include CompositeEngine.h, and has no other way
+    // to reach the cache.  Registering it here gives the CACHE-DUMP
+    // perf line visibility into VRAM growth so an operator can spot
+    // GpuTextureCache pressure as a cause of submit-slow regressions.
+    //
+    // Non-owning pointer.  CompositeEngine sets it after creating the
+    // cache and clears it on shutdown.  Returns nullptr when the
+    // composite layer hasn't run any frame yet — callers must tolerate.
+    void registerGpuTextureCache(GpuTextureCache* cache) noexcept
+        { m_gpuTextureCacheDiag.store(cache, std::memory_order_release); }
+    [[nodiscard]] GpuTextureCache* gpuTextureCacheDiag() const noexcept
+        { return m_gpuTextureCacheDiag.load(std::memory_order_acquire); }
+
 private:
     GpuContext() = default;
     ~GpuContext();
@@ -298,6 +316,13 @@ private:
     /// presenter's fence indicates the wait has been consumed.
     std::vector<VkSemaphore> m_binarySemaphorePool;
     mutable std::mutex       m_binarySemaphorePoolMutex;
+
+    /// Non-owning pointer to CompositeEngine's live GpuTextureCache, used
+    /// only by the MediaPool perf-dump for diagnostics.  See
+    /// registerGpuTextureCache() above for rationale.  Atomic so the
+    /// perf-report thread can read while CompositeEngine writes during
+    /// init / shutdown.
+    std::atomic<GpuTextureCache*> m_gpuTextureCacheDiag{nullptr};
 
     uint64_t m_effectProcessorRequests{0};
     uint64_t m_effectProcessorCacheHits{0};

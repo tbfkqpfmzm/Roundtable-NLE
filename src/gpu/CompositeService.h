@@ -93,22 +93,27 @@ public:
         return s_depth;
     }
 
-    // ── UPGRADE_PLAN Phase 4-5 feature flag ─────────────────────────────
+    // ── UPGRADE_PLAN: GPU-resident decode + CUDA↔Vulkan zero-copy ───────
     //
-    // Master switch for the GPU-resident prefetch decode + compositor
-    // consumption pipeline. While false (default), the prefetch path
-    // produces CPU-pixel CachedFrames exactly as it does today and the
-    // compositor upload path runs unchanged — the new code is dormant.
+    // Master switch for the prefetch GPU-resident decode pipeline and
+    // its zero-copy CUDA→Vulkan branch.  Default ON as of 2026-05-21
+    // (the legacy CPU upload path is reachable as a kill-switch only,
+    // via the ROUNDTABLE_GPU_RESIDENT_DECODE=0 env var).
     //
-    // PR-4 and PR-5 land code behind this flag. The plan mandates that
-    // both land BEFORE the flag is flipped; either alone is not viable:
-    //   - PR-4 alone: prefetch produces GPU-resident frames but the
-    //     compositor still expects CPU pixels; frames render blank.
-    //   - PR-5 alone: compositor reads GPU-resident fields that the
-    //     prefetch path never populates; harmless no-op but pointless.
+    // When ON:
+    //   - Prefetch workers produce GPU-resident CachedFrames; the
+    //     compositor's GpuUploadManager::uploadLayer GPU-resident
+    //     branch lifts the descriptor straight from the CachedFrame
+    //     instead of paying a CPU→GPU upload.
+    //   - On NVDEC-decoded H.264, frames take the zero-copy path
+    //     (CudaVulkanInterop shared buffer + convertFromVkBuffer),
+    //     skipping the transferHardwareFrame CPU bounce entirely.
     //
-    // Flip to true only after BOTH PRs are merged and the validation
-    // suite in UPGRADE_PLAN Section M (Phase 9) has been run cleanly.
+    // When OFF (env-var kill switch only):
+    //   - Prefetch produces CPU-pixel CachedFrames as it did before
+    //     2026-05-21; compositor uploads as before.  Used to diagnose
+    //     regressions or to compare cold-start latency against the
+    //     new path.
     static void setGpuResidentDecode(bool on) noexcept {
         s_gpuResidentDecode.store(on, std::memory_order_release);
     }

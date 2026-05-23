@@ -273,6 +273,90 @@ bool GpuWorkSubmission::submit(VkQueue queue, std::mutex* queueLock)
     return submit(queue, VK_NULL_HANDLE, queueLock);
 }
 
+// ── submit with timeline wait (cross-queue producer→compositor sync) ───────
+//
+// UPGRADE_PLAN Path C optimisation (2026-05-22).  The compositor's
+// VkSubmitInfo is given a VkTimelineSemaphoreSubmitInfo pNext that
+// waits on the prefetch shared timeline semaphore at the maximum
+// value across all CachedFrames being sampled this frame.  Until that
+// value is signalled, the GPU does not begin executing this
+// submission's compute dispatches — so the compositor never samples a
+// texture whose convert+copy is still in flight on the compute queue.
+
+bool GpuWorkSubmission::submitWithTimelineWait(
+    VkQueue queue,
+    VkSemaphore externalSemaphore,
+    VkSemaphore waitSem,
+    uint64_t    waitValue,
+    std::mutex* queueLock)
+{
+    Slot& s = slot();
+    if (s.cmdBuffer == VK_NULL_HANDLE || s.fence == VK_NULL_HANDLE)
+        return false;
+
+    vkResetFences(m_device, 1, &s.fence);
+
+    // ── Signal: dedicated per-frame external semaphore (binary).
+    //    Same as the plain submit() overload — the compositor's
+    //    presenter waits on this semaphore.
+    VkSemaphore signalSemaphores[1]{};
+    uint32_t    signalCount = 0;
+    if (externalSemaphore != VK_NULL_HANDLE) {
+        signalSemaphores[0] = externalSemaphore;
+        signalCount = 1;
+    } else {
+        signalSemaphores[0] = s.signalSemaphore;
+        signalCount = 1;
+    }
+
+    // ── Wait: producer timeline semaphore at `waitValue`.
+    //    Stage = COMPUTE_SHADER so the wait only blocks the compute
+    //    dispatch (the composite shader); fixed-function stages can
+    //    still queue up speculatively.
+    const bool wantWait = (waitSem != VK_NULL_HANDLE) && (waitValue != 0);
+    VkSemaphore          waitSems[1]   = { waitSem };
+    VkPipelineStageFlags waitStages[1] = { VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT };
+
+    VkTimelineSemaphoreSubmitInfo tlInfo{};
+    tlInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+    if (wantWait) {
+        tlInfo.waitSemaphoreValueCount = 1;
+        tlInfo.pWaitSemaphoreValues    = &waitValue;
+    }
+    // No timeline signal — the external signal semaphore is binary.
+
+    (void)queueLock;
+
+    rt::GpuSubmission sub{};
+    sub.cmd                  = s.cmdBuffer;
+    sub.queue                = kindForQueue(queue);
+    sub.signalSemaphores     = signalSemaphores;
+    sub.signalSemaphoreCount = signalCount;
+    sub.completionFence      = s.fence;
+    sub.tag                  = "GpuWorkSubmission::submitWithTimelineWait";
+    if (wantWait) {
+        sub.pNext              = &tlInfo;
+        sub.waitSemaphores     = waitSems;
+        sub.waitStages         = waitStages;
+        sub.waitSemaphoreCount = 1;
+    }
+
+    VkResult result = rt::GpuContext::get().scheduler().submit(sub);
+
+    if (result != VK_SUCCESS) {
+        spdlog::error("[GPU-SUBMIT] vkQueueSubmit (timeline wait) failed: "
+                      "VkResult={} slot={} submission={} waitValue={}",
+                      static_cast<int>(result), m_currentSlot,
+                      m_globalSubmissionIndex, waitValue);
+        return false;
+    }
+
+    s.inFlight = true;
+    s.submissionIndex = m_globalSubmissionIndex;
+    advanceSlot();
+    return true;
+}
+
 // ── submit (with signal semaphore) ──────────────────────────────────────────
 
 bool GpuWorkSubmission::submit(VkQueue queue, VkSemaphore externalSemaphore,

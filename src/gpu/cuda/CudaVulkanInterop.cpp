@@ -232,6 +232,14 @@ void CudaVulkanInterop::shutdown()
     m_available = false;
 }
 
+// ── Diagnostic snapshot ───────────────────────────────────────────────
+
+CudaVulkanInterop::Stats CudaVulkanInterop::stats() const
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return Stats{ m_liveAllocations.size(), m_pool.size() };
+}
+
 // ── Pool-based allocator ──────────────────────────────────────────────
 
 std::unique_ptr<SharedAllocation> CudaVulkanInterop::allocate(
@@ -239,19 +247,26 @@ std::unique_ptr<SharedAllocation> CudaVulkanInterop::allocate(
 {
     if (!m_available) return nullptr;
 
-    // Look for a pooled allocation with matching dimensions
-    for (auto it = m_pool.begin(); it != m_pool.end(); ++it) {
-        if ((*it)->width == width && (*it)->height == height) {
-            auto alloc = std::move(*it);
-            m_pool.erase(it);
-            m_liveAllocations.push_back(alloc.get());
-            spdlog::debug("CudaVulkanInterop: reusing pooled {}x{} buffer",
-                          width, height);
-            return alloc;
+    // Fast path under lock: look for a pooled allocation with matching
+    // dimensions.  Lock is dropped before allocateNew() so the slow
+    // (Vulkan + CUDA import) path doesn't serialise concurrent
+    // first-allocations across workers.
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (auto it = m_pool.begin(); it != m_pool.end(); ++it) {
+            if ((*it)->width == width && (*it)->height == height) {
+                auto alloc = std::move(*it);
+                m_pool.erase(it);
+                m_liveAllocations.push_back(alloc.get());
+                spdlog::debug("CudaVulkanInterop: reusing pooled {}x{} buffer",
+                              width, height);
+                return alloc;
+            }
         }
     }
 
-    // No match — create a fresh allocation
+    // No match — create a fresh allocation.  allocateNew acquires the
+    // mutex internally for its m_liveAllocations.push_back.
     return allocateNew(width, height);
 }
 
@@ -259,22 +274,32 @@ void CudaVulkanInterop::free(std::unique_ptr<SharedAllocation> alloc)
 {
     if (!alloc || !alloc->valid) return;
 
-    // Remove from live tracking
-    auto it = std::find(m_liveAllocations.begin(), m_liveAllocations.end(),
-                        alloc.get());
-    if (it != m_liveAllocations.end())
-        m_liveAllocations.erase(it);
+    // Decide under lock whether this allocation returns to the pool or
+    // gets destroyed.  freeImmediate runs OUTSIDE the lock because it
+    // calls into the Vulkan + CUDA destructors, which can take
+    // milliseconds and don't touch our shared state.
+    std::unique_ptr<SharedAllocation> toDestroy;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
 
-    // Return to pool if under capacity, otherwise destroy
-    if (m_pool.size() < m_poolCapacity) {
-        spdlog::debug("CudaVulkanInterop: returning {}x{} buffer to pool "
-                      "(pool size {}→{})",
-                      alloc->width, alloc->height,
-                      m_pool.size(), m_pool.size() + 1);
-        m_pool.push_back(std::move(alloc));
-    } else {
-        freeImmediate(std::move(alloc));
+        auto it = std::find(m_liveAllocations.begin(), m_liveAllocations.end(),
+                            alloc.get());
+        if (it != m_liveAllocations.end())
+            m_liveAllocations.erase(it);
+
+        if (m_pool.size() < m_poolCapacity) {
+            spdlog::debug("CudaVulkanInterop: returning {}x{} buffer to pool "
+                          "(pool size {}→{})",
+                          alloc->width, alloc->height,
+                          m_pool.size(), m_pool.size() + 1);
+            m_pool.push_back(std::move(alloc));
+        } else {
+            toDestroy = std::move(alloc);
+        }
     }
+
+    if (toDestroy)
+        freeImmediate(std::move(toDestroy));
 }
 
 // ── Allocation helpers ────────────────────────────────────────────────
@@ -480,7 +505,10 @@ std::unique_ptr<SharedAllocation> CudaVulkanInterop::allocateNew(
     }
 
     alloc->valid = true;
-    m_liveAllocations.push_back(alloc.get());
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_liveAllocations.push_back(alloc.get());
+    }
 
     spdlog::debug("CudaVulkanInterop: allocated {}x{} shared NV12 buffer "
                   "({} bytes, CUDA ptr={:#x})",
@@ -551,10 +579,24 @@ bool CudaVulkanInterop::copyNv12FromCuda(SharedAllocation& alloc,
     }
 
     // ── Signal external semaphore (async) or fall back to sync ──────
+    //
+    // The increment + signal pair MUST be atomic across workers — both
+    // because a timeline semaphore can only be signalled with
+    // monotonically-increasing values, and because callers immediately
+    // read lastSignalValue() to wire the value into their Vulkan
+    // submit's VkTimelineSemaphoreSubmitInfo.  Two workers racing here
+    // without the lock would (a) both observe the same post-increment
+    // value, (b) issue duplicate signals on the same timeline value
+    // (undefined behaviour per the CUDA external-semaphore docs), and
+    // (c) leave at least one Vulkan wait permanently pending — which
+    // is the exact failure mode the 02:14:02 → "ZC=0" perf line in
+    // logs/perf_log.txt captured.
     if (m_cudaExternalSemaphore) {
-        ++m_semaphoreValue;
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const uint64_t signalVal =
+            m_semaphoreValue.fetch_add(1, std::memory_order_acq_rel) + 1;
         CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS signalParams{};
-        signalParams.params.fence.value = m_semaphoreValue;
+        signalParams.params.fence.value = signalVal;
         auto cudaSem = static_cast<CUexternalSemaphore>(m_cudaExternalSemaphore);
         CUresult sigRes = cuSignalExternalSemaphoresAsync(
             &cudaSem, &signalParams, 1, nullptr);
@@ -638,6 +680,8 @@ std::unique_ptr<SharedAllocation> CudaVulkanInterop::allocateNew(uint32_t, uint3
 }
 
 void CudaVulkanInterop::freeImmediate(std::unique_ptr<SharedAllocation>) {}
+
+CudaVulkanInterop::Stats CudaVulkanInterop::stats() const { return Stats{}; }
 
 } // namespace rt
 

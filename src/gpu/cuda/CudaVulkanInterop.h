@@ -12,8 +12,10 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 namespace rt {
@@ -96,7 +98,30 @@ public:
     [[nodiscard]] void* vkSemaphore() const noexcept { return m_vkSemaphore; }
 
     /// The timeline value most recently signaled by CUDA.
-    [[nodiscard]] uint64_t lastSignalValue() const noexcept { return m_semaphoreValue; }
+    /// Lock-free atomic load — safe to call concurrently with
+    /// copyNv12FromCuda from a different worker thread.  The returned
+    /// value may have been advanced past the caller's own signal by an
+    /// interleaving worker; that's harmless because Vulkan timeline-
+    /// semaphore waits succeed when the timeline reaches OR exceeds
+    /// the wait value, and stream FIFO guarantees the caller's
+    /// preceding signal is already processed by the time a later
+    /// signal lands.
+    [[nodiscard]] uint64_t lastSignalValue() const noexcept {
+        return m_semaphoreValue.load(std::memory_order_acquire);
+    }
+
+    /// Diagnostic snapshot of the allocator's CPU-side bookkeeping.
+    /// `live` is the count of SharedAllocations currently checked out
+    /// to callers (allocate() succeeded, free() not yet returned).
+    /// `pooled` is the count sitting idle in the recycle pool waiting
+    /// to be reused.  Sustained growth in `live` across consecutive
+    /// snapshots while playback is steady-state is the canonical
+    /// leak signature.
+    struct Stats {
+        size_t live{0};
+        size_t pooled{0};
+    };
+    [[nodiscard]] Stats stats() const;
 
 private:
     CudaContext& m_cuda;
@@ -118,7 +143,11 @@ private:
     void*        m_vkSemaphore{nullptr};         // VkSemaphore (timeline)
     void*        m_cudaExternalSemaphore{nullptr}; // CUexternalSemaphore
     void*        m_semaphoreWinHandle{nullptr};  // HANDLE (Win32)
-    uint64_t     m_semaphoreValue{0};            // monotonically increasing
+    // Monotonically increasing. Stored as atomic so lastSignalValue()
+    // can be a lock-free read. The increment + signal pair inside
+    // copyNv12FromCuda still runs under m_mutex to preserve monotonic
+    // ordering across concurrent workers.
+    std::atomic<uint64_t> m_semaphoreValue{0};
 
     // Track live allocations for cleanup
     std::vector<SharedAllocation*> m_liveAllocations;
@@ -126,6 +155,29 @@ private:
     // ── Allocation pool (reuse instead of alloc/free per frame) ──────
     std::vector<std::unique_ptr<SharedAllocation>> m_pool;
     size_t m_poolCapacity{4};
+
+    // ── Shared-state mutex ───────────────────────────────────────────
+    //
+    // Guards every mutation of m_pool, m_liveAllocations, and
+    // m_semaphoreValue, plus the cuSignalExternalSemaphoresAsync call
+    // that pairs with the semaphore increment.  Before this lock
+    // existed, the prefetch worker pool's two concurrent NVDEC threads
+    // raced on these structures the moment a multi-clip project
+    // activated a second worker, producing the symptom in
+    // logs/perf_log.txt where ZC fell from 100% to 0% within ~2 s of
+    // the second NVDEC session starting and never recovered (the pool
+    // ended up holding moved-from unique_ptrs, every subsequent
+    // interop->allocate returned a null SharedAllocation, and
+    // convertDecodedToCacheGpu silently fell back to the legacy
+    // transferHardwareFrame CPU-bounce path for the rest of the
+    // session).
+    //
+    // The lock is held only across the CPU-side bookkeeping + the
+    // CUDA driver calls (cuMemcpy2D on the default stream, the signal
+    // call).  CUDA does its actual data movement asynchronously on the
+    // GPU, so wall-clock parallelism between workers is preserved —
+    // the lock is contested only for the brief command-record window.
+    mutable std::mutex m_mutex;
 
     /// Actually create a new shared allocation (bypasses pool).
     [[nodiscard]] std::unique_ptr<SharedAllocation> allocateNew(

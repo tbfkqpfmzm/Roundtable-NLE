@@ -512,7 +512,25 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
                     }
                 }
 
-                frame = resolveMediaFrame(handle, frameNum, charVideoTier, scrubMode);
+                {
+                    // Time resolveMediaFrame (cache lookup + scheduling
+                    // + potential blocking decode).  Slow values here
+                    // mean MediaPool's m_mutex is contended (most
+                    // likely by openWorker doing a synchronous decoder
+                    // open) — exactly the pattern suspected of being
+                    // behind the 6 s LAYER-SLOW events.
+                    auto rmfT0 = std::chrono::high_resolution_clock::now();
+                    frame = resolveMediaFrame(handle, frameNum, charVideoTier, scrubMode);
+                    auto rmfT1 = std::chrono::high_resolution_clock::now();
+                    const double rmfMs = std::chrono::duration<double, std::milli>(
+                        rmfT1 - rmfT0).count();
+                    if (rmfMs > 30.0) {
+                        spdlog::warn("[RESOLVE-SLOW] handle={} frame={} tier={} "
+                                     "scrub={} -> {:.1f}ms",
+                                     handle, frameNum, static_cast<int>(charVideoTier),
+                                     scrubMode, rmfMs);
+                    }
+                }
 
                 // Packed-alpha unpack is now handled entirely by:
                 //   - GPU path: compositor shader isPacked UV split
@@ -1170,12 +1188,26 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
                 auto* texCache3 = m_engine ? m_engine->textureCache() : nullptr;
                 if (texCache3 && m_engine->isGpuCompositeEnabled() &&
                     frame->mediaId != 0 && frame->gpuTextureOwner) {
+                    // Sub-timing to pin down which step inside the
+                    // GPU-resident layer-build is slow (the 2026-05-22
+                    // 13:28:56 [LAYER-SLOW] tick=912000 -> 6372 ms case
+                    // had gpuTex=true, so the freeze is in this branch
+                    // — but `getInfo`, `putShared`, and the shared_ptr
+                    // reset are all candidates and we can't tell which
+                    // from LAYER-SLOW alone).
+                    auto subT0 = std::chrono::high_resolution_clock::now();
+                    auto subMs = [](auto a, auto b) {
+                        return std::chrono::duration<double, std::milli>(b - a).count();
+                    };
+
                     // Determine if CUDA frame is still packed-alpha
                     bool cudaPacked = false;
                     if (!frame->unpackedAlpha && m_mediaPool) {
                         auto* fInfo = m_mediaPool->getInfo(frame->mediaId);
                         cudaPacked = (fInfo && fInfo->packedAlpha);
                     }
+                    auto subT1 = std::chrono::high_resolution_clock::now();
+
                     texCache3->putShared(
                         frame->mediaId, frame->frameNumber,
                         static_cast<uint8_t>(frame->tier),
@@ -1185,6 +1217,29 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
                         static_cast<size_t>(frame->width) * frame->height * 4,
                         cudaPacked, frame->premultipliedAlpha,
                         frame->isLoopFrame);
+                    auto subT2 = std::chrono::high_resolution_clock::now();
+
+                    // Transfer sole ownership to GpuTextureCache
+                    // (2026-05-22 architectural fix).  putShared took
+                    // its own shared_ptr; resetting ours ensures
+                    // FrameCache LRU eviction no longer pulls the
+                    // texture out from under in-flight compositor work.
+                    // From this point GpuTextureCache's pin/unpin +
+                    // VRAM budget are the sole controllers of this
+                    // texture's lifetime.
+                    frame->gpuTextureOwner.reset();
+                    auto subT3 = std::chrono::high_resolution_clock::now();
+
+                    const double getInfoMs = subMs(subT0, subT1);
+                    const double putSharedMs = subMs(subT1, subT2);
+                    const double resetMs   = subMs(subT2, subT3);
+                    if (getInfoMs > 10.0 || putSharedMs > 10.0 || resetMs > 10.0) {
+                        spdlog::warn("[GPU-LAYER-SUB] clip mediaId={} frame={} "
+                                     "getInfo={:.1f}ms putShared={:.1f}ms "
+                                     "ownerReset={:.1f}ms",
+                                     frame->mediaId, frame->frameNumber,
+                                     getInfoMs, putSharedMs, resetMs);
+                    }
                 }
             } else {
                 layer.frame       = frame;
@@ -1398,16 +1453,31 @@ std::vector<LayerInfo> CompositeService::buildLayersForFrame(
             }
 
             // PERF: per-clip timing
-            if (perfLog) {
-                auto perfClipT1 = std::chrono::high_resolution_clock::now();
-                double clipMs = std::chrono::duration<double, std::milli>(perfClipT1 - perfClipT0).count();
-                const char* clipType = "Unknown";
-                if (dynamic_cast<VideoClip*>(clip)) clipType = "Video";
-                else if (dynamic_cast<TitleClip*>(clip)) clipType = "Title";
-                else if (dynamic_cast<GraphicClip*>(clip)) clipType = "Graphic";
+            auto perfClipT1 = std::chrono::high_resolution_clock::now();
+            double clipMs = std::chrono::duration<double, std::milli>(perfClipT1 - perfClipT0).count();
+            const char* clipType = "Unknown";
+            if (dynamic_cast<VideoClip*>(clip)) clipType = "Video";
+            else if (dynamic_cast<TitleClip*>(clip)) clipType = "Title";
+            else if (dynamic_cast<GraphicClip*>(clip)) clipType = "Graphic";
 #ifdef ROUNDTABLE_HAS_SPINE
-                else if (dynamic_cast<SpineClip*>(clip)) clipType = "Spine";
+            else if (dynamic_cast<SpineClip*>(clip)) clipType = "Spine";
 #endif
+            // Warn-level for slow clips so it survives the warn+ logger
+            // filter — this is the diagnostic that pins down the 6.4 s
+            // layer-build stall observed at 12:16:40 (tick=1811200) in
+            // the 2026-05-22 scrub session.  > 50 ms for a single clip
+            // is well outside steady-state expectations (a typical
+            // 1080p video clip's layer-build is sub-millisecond per the
+            // existing info-level timing).
+            if (clipMs > 50.0) {
+                spdlog::warn("[LAYER-SLOW] clip '{}' type={} tick={} -> {:.1f}ms "
+                             "(frame {}x{} gpuTex={} tier={})",
+                             clip->label(), clipType, tick, clipMs,
+                             layer.frameWidth, layer.frameHeight,
+                             layer.gpuTextureReady,
+                             playbackNonBlocking ? "Half" : "Full");
+            }
+            if (perfLog) {
                 spdlog::info("  [PERF] clip '{}' type={} -> {:.1f}ms (frame {}x{}, gpuTex={} tier={})",
                              clip->label(), clipType, clipMs,
                              layer.frameWidth, layer.frameHeight,

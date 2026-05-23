@@ -102,6 +102,32 @@ public:
     /// Set the VRAM budget.  May trigger evictions.
     void setBudget(size_t bytes);
 
+    /// Set the hard ceiling on entry count (UPGRADE_PLAN 2026-05-22).
+    ///
+    /// Premiere-style bounded working set.  Previously the cache was
+    /// byte-budget-only (default 40-60% of VRAM, GBs on a decent GPU),
+    /// which meant it accumulated EVERY frame the compositor ever
+    /// consumed in a session — a 60-second linear playback would
+    /// hoard ~1800 textures (10+ GB) before bytes-pressure fired.
+    /// Combined with FrameCache orphan-textures and the per-shape
+    /// PrefetchTexturePool reserve, total VMA-tracked VRAM crossed
+    /// the OS budget around the 50 s mark and the driver started
+    /// paging textures to system RAM — submit latencies jumped
+    /// 50-250 ms (perf_log 21:41:53 onward, gpuTexN climbed from 2
+    /// to 1469 over 52 s).
+    ///
+    /// The architectural fix is to treat the GPU cache as a small
+    /// bounded recent-frames pool, NOT a "best-effort hoard until
+    /// VRAM hits the budget" pool.  DiskFrameCache (already wired)
+    /// covers longer-term residency at a cost of ~5 ms re-decode on
+    /// scrub-back; the GPU cache only needs to cover the immediate
+    /// scrub-back window plus a few frames of pipeline lookahead.
+    ///
+    /// 0 = uncapped (legacy behaviour).
+    void setMaxEntries(size_t maxEntries);
+
+    [[nodiscard]] size_t maxEntries() const;
+
     // ── Statistics ──────────────────────────────────────────────────────
     //
     // noexcept dropped because std::lock_guard's constructor may throw
@@ -187,6 +213,11 @@ private:
 
     size_t m_budget;
     size_t m_used{0};
+    // Entry-count ceiling for the Premiere-style bounded working set.
+    // Default 120 — at 8 MB / 1080p frame that's ~1 GB max VRAM hostage,
+    // safe on any GPU that's running the GPU-resident decode path at
+    // all.  Tuned per-system by CacheCoordinator.  0 = uncapped.
+    size_t m_maxEntries{120};
     size_t m_hits{0};
     size_t m_misses{0};
 

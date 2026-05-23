@@ -1,5 +1,14 @@
 @echo off
-set ROUNDTABLE_GPU_RESIDENT_DECODE=1
+REM ─── UPGRADE_PLAN: GPU-resident decode + CUDA↔Vulkan zero-copy ────────
+REM    Default ON in roundtable.exe as of 2026-05-21.  Uncomment the
+REM    line below to force the legacy CPU upload path (kill-switch for
+REM    diagnosing regressions or comparing cold-start latency).
+REM set ROUNDTABLE_GPU_RESIDENT_DECODE=0
+REM ─── Optional: Vulkan validation pass (docs/UPGRADE_PLAN.txt item 1) ──
+REM    Uncomment when validating GPU code changes — significantly slows
+REM    the app; not for normal use.
+REM set ROUNDTABLE_VALIDATION=1
+REM set ROUNDTABLE_VALIDATION_FATAL=0
 setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
 

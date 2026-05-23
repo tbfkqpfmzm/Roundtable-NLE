@@ -310,36 +310,67 @@ void TimelinePanel::dragMoveEvent(QDragMoveEvent* event)
         spdlog::debug("GHOST-CLIP: dragMove media pos=({:.0f},{:.0f}) px={:.0f} tick={} trackIdx={} widgets={}",
                       pos.x(), pos.y(), px, tick, trackIdx, m_trackWidgets.size());
 
+        // Parse all media handles (comma-separated for multi-item drag)
+        QByteArray mediaData = event->mimeData()->data("application/x-roundtable-media");
+        QList<QByteArray> handleTokens;
+        if (!mediaData.isEmpty())
+            handleTokens = mediaData.split(',');
+        QList<QUrl> urls = event->mimeData()->urls();
+
         // Determine clip duration for the preview
         int64_t previewDur = 0;
         bool isAudio = false;
+        // Per-clip durations for ghost overlay multi-preview
+        std::vector<int64_t> clipDurations;
 
         // Check source in/out (from Source Monitor drag)
         if (event->mimeData()->hasFormat("application/x-roundtable-source-in")
             && event->mimeData()->hasFormat("application/x-roundtable-source-out")) {
             int64_t srcIn  = event->mimeData()->data("application/x-roundtable-source-in").toLongLong();
             int64_t srcOut = event->mimeData()->data("application/x-roundtable-source-out").toLongLong();
-            if (srcOut > srcIn) previewDur = srcOut - srcIn;
-        }
-
-        // Try to get duration from MediaPool via handle
-        if (previewDur <= 0 && m_mediaPool
-            && event->mimeData()->hasFormat("application/x-roundtable-media")) {
-            bool ok = false;
-            uint64_t handle = event->mimeData()->data("application/x-roundtable-media")
-                                  .toULongLong(&ok);
-            if (ok && handle != 0) {
-                const auto* info = m_mediaPool->getInfo(handle);
-                if (info && info->duration > 0.0)
-                    previewDur = static_cast<int64_t>(info->duration * 48000.0);
-                // Determine if audio by checking video stream
-                if (info)
-                    isAudio = (info->videoStreamIndex < 0);
+            if (srcOut > srcIn) {
+                previewDur = srcOut - srcIn;
+                clipDurations.push_back(previewDur);
             }
         }
 
-        // Resolve duration by opening the file (handles character
-        // animations whose media handle isn't populated until first use).
+        // Compute duration for each handle and sum for combined preview
+        if (previewDur <= 0 && m_mediaPool && !handleTokens.isEmpty()) {
+            for (int i = 0; i < handleTokens.size(); ++i) {
+                bool ok = false;
+                uint64_t handle = handleTokens[i].toULongLong(&ok);
+                int64_t clipDur = 0;
+                if (ok && handle != 0) {
+                    const auto* info = m_mediaPool->getInfo(handle);
+                    if (info && info->duration > 0.0)
+                        clipDur = static_cast<int64_t>(info->duration * 48000.0);
+                    // Use first clip to determine audio/video type
+                    if (i == 0 && info)
+                        isAudio = (info->videoStreamIndex < 0);
+                }
+                // Resolve via file path if handle had no info
+                if (clipDur <= 0 && i < urls.size()) {
+                    QString path = urls[i].toLocalFile();
+                    if (!path.isEmpty()) {
+                        auto h = m_mediaPool->open(path.toStdString());
+                        if (h != 0) {
+                            const auto* info = m_mediaPool->getInfo(h);
+                            if (info && info->duration > 0.0)
+                                clipDur = static_cast<int64_t>(info->duration * 48000.0);
+                            if (i == 0 && info)
+                                isAudio = (info->videoStreamIndex < 0);
+                        }
+                    }
+                }
+                // Fallback per clip
+                if (clipDur <= 0)
+                    clipDur = static_cast<int64_t>(5.0 * 48000.0);
+                clipDurations.push_back(clipDur);
+                previewDur += clipDur;
+            }
+        }
+
+        // Fallback: single URL open (for external file / no handle case)
         if (previewDur <= 0 && m_mediaPool
             && event->mimeData()->hasUrls()
             && !event->mimeData()->urls().isEmpty()) {
@@ -360,6 +391,9 @@ void TimelinePanel::dragMoveEvent(QDragMoveEvent* event)
         if (previewDur <= 0) {
             previewDur = static_cast<int64_t>(5.0 * 48000.0);
         }
+        // Ensure clipDurations has at least one entry for ghost overlay
+        if (clipDurations.empty())
+            clipDurations.push_back(previewDur);
         if (!isAudio && event->mimeData()->hasUrls() && !event->mimeData()->urls().isEmpty()) {
             QString ext = QFileInfo(event->mimeData()->urls().first().toLocalFile())
                               .suffix().toLower();
@@ -401,13 +435,11 @@ void TimelinePanel::dragMoveEvent(QDragMoveEvent* event)
             trackCompatible = isAudio ? (tt == TrackType::Audio)
                                       : (tt == TrackType::Video);
             // Check if this video file also has audio (for dual ghost)
-            if (!isAudio && m_mediaPool
-                && event->mimeData()->hasFormat("application/x-roundtable-media")) {
-                bool ok = false;
-                uint64_t h = event->mimeData()->data("application/x-roundtable-media")
-                                 .toULongLong(&ok);
-                if (ok && h != 0) {
-                    const auto* info = m_mediaPool->getInfo(h);
+            if (!isAudio && m_mediaPool && !handleTokens.isEmpty()) {
+                bool firstOk = false;
+                uint64_t firstH = handleTokens.first().toULongLong(&firstOk);
+                if (firstOk && firstH != 0) {
+                    const auto* info = m_mediaPool->getInfo(firstH);
                     if (info && info->hasAudio)
                         mediaHasAudio = true;
                 }
@@ -512,23 +544,29 @@ void TimelinePanel::dragMoveEvent(QDragMoveEvent* event)
                 // Populate ghost track with clip previews for bin/external drags
                 {
                     std::vector<GhostTrackOverlay::GhostClipPreview> previews;
-                    if (previewDur > 0) {
-                        double clipPx = m_layoutEngine.timeToPixelX(tick);
-                        double clipPw = m_layoutEngine.timeToPixelX(tick + previewDur) - clipPx;
+                    int64_t cursor = tick;
+                    for (size_t ci = 0; ci < clipDurations.size(); ++ci) {
+                        int64_t cd = clipDurations[ci];
+                        if (cd <= 0) continue;
+                        double clipPx = m_layoutEngine.timeToPixelX(cursor);
+                        double clipPw = m_layoutEngine.timeToPixelX(cursor + cd) - clipPx;
                         if (clipPw > 0) {
                             GhostTrackOverlay::GhostClipPreview gp;
                             gp.x = static_cast<int>(clipPx);
                             gp.width = static_cast<int>(clipPw);
                             gp.color = isAudio ? 0x3CA05AFF : 0x4A90D9FF;
-                            // Extract clip label from the first URL, or use a placeholder
-                            if (event->mimeData()->hasUrls() && !event->mimeData()->urls().isEmpty())
-                                gp.label = QFileInfo(event->mimeData()->urls().first().toLocalFile()).fileName();
+                            // Label from corresponding URL or placeholder
+                            if (ci < urls.size())
+                                gp.label = QFileInfo(urls[ci].toLocalFile()).fileName();
+                            else if (!urls.isEmpty())
+                                gp.label = QFileInfo(urls.first().toLocalFile()).fileName();
                             else if (event->mimeData()->hasFormat("application/x-roundtable-media"))
                                 gp.label = QStringLiteral("Media");
                             else
                                 gp.label = QStringLiteral("Clip");
                             previews.push_back(gp);
                         }
+                        cursor += cd;
                     }
                     m_ghostOverlay->setClipPreviews(previews);
                 }
@@ -740,25 +778,30 @@ void TimelinePanel::dropEvent(QDropEvent* event)
         if (tick < 0) tick = 0;
         size_t trackIdx = hitTestTrack(pos.y());
 
-        bool ok = false;
-        uint64_t handle = event->mimeData()->data("application/x-roundtable-media")
-                              .toULongLong(&ok);
-        // Get file path from URLs
-        QString filePath;
-        if (event->mimeData()->hasUrls() && !event->mimeData()->urls().isEmpty())
-            filePath = event->mimeData()->urls().first().toLocalFile();
+        // Parse all media handles (comma-separated for multi-item drag)
+        QByteArray mediaData = event->mimeData()->data("application/x-roundtable-media");
+        QList<QByteArray> handleTokens = mediaData.split(',');
+        QList<QUrl> urls = event->mimeData()->urls();
 
+        // Determine audio/video type from first valid handle for ghost-zone routing
         bool isAudioDrop = false;
-        if (ok && handle != 0 && m_mediaPool) {
-            if (const auto* info = m_mediaPool->getInfo(handle))
-                isAudioDrop = (info->videoStreamIndex < 0);
-        }
-        if (!isAudioDrop && !filePath.isEmpty()) {
-            QString ext = QFileInfo(filePath).suffix().toLower();
-            static const QStringList audioExts = {
-                "wav", "mp3", "ogg", "flac", "aac", "m4a", "wma", "aiff", "opus"
-            };
-            isAudioDrop = audioExts.contains(ext);
+        if (!handleTokens.isEmpty()) {
+            bool firstOk = false;
+            uint64_t firstHandle = handleTokens.first().toULongLong(&firstOk);
+            QString firstPath;
+            if (!urls.isEmpty())
+                firstPath = urls.first().toLocalFile();
+            if (firstOk && firstHandle != 0 && m_mediaPool) {
+                if (const auto* info = m_mediaPool->getInfo(firstHandle))
+                    isAudioDrop = (info->videoStreamIndex < 0);
+            }
+            if (!isAudioDrop && !firstPath.isEmpty()) {
+                QString ext = QFileInfo(firstPath).suffix().toLower();
+                static const QStringList audioExts = {
+                    "wav", "mp3", "ogg", "flac", "aac", "m4a", "wma", "aiff", "opus"
+                };
+                isAudioDrop = audioExts.contains(ext);
+            }
         }
         // Source-monitor "drag audio only" → route to an audio track even
         // for video media (the handler creates just an AudioClip).
@@ -781,33 +824,6 @@ void TimelinePanel::dropEvent(QDropEvent* event)
         if (event->mimeData()->hasFormat("application/x-roundtable-source-out"))
             sourceOut = event->mimeData()->data("application/x-roundtable-source-out").toLongLong();
 
-        // Snap the drop tick to existing clip edges (match preview)
-        int64_t dropDur = 0;
-        if (sourceIn >= 0 && sourceOut > sourceIn) {
-            dropDur = sourceOut - sourceIn;
-        } else if (ok && handle != 0 && m_mediaPool) {
-            const auto* info = m_mediaPool->getInfo(handle);
-            if (info && info->duration > 0.0)
-                dropDur = static_cast<int64_t>(info->duration * 48000.0);
-        }
-        // Resolve via file path if handle had no info (same as preview)
-        if (dropDur <= 0 && m_mediaPool && !filePath.isEmpty()) {
-            auto h = m_mediaPool->open(filePath.toStdString());
-            if (h != 0) {
-                const auto* info = m_mediaPool->getInfo(h);
-                if (info && info->duration > 0.0)
-                    dropDur = static_cast<int64_t>(info->duration * 48000.0);
-                if (!ok || handle == 0) handle = h;
-            }
-        }
-        if (dropDur > 0) {
-            auto snapRes = m_snapEngine.snapPair(tick, tick + dropDur);
-            if (snapRes.didSnap) tick = snapRes.snappedTick;
-        } else {
-            auto snapRes = m_snapEngine.snap(tick);
-            if (snapRes.didSnap) tick = snapRes.snappedTick;
-        }
-
         int mediaDragMode = TimelinePanel::DragBoth;
         if (event->mimeData()->hasFormat("application/x-roundtable-drag-mode")) {
             const QByteArray m = event->mimeData()->data(
@@ -816,13 +832,63 @@ void TimelinePanel::dropEvent(QDropEvent* event)
             else if (m == "audio") mediaDragMode = TimelinePanel::DragAudioOnly;
         }
 
-        if (ok && !filePath.isEmpty()) {
-            if (sourceIn >= 0 && sourceOut > sourceIn)
-                emit mediaDroppedWithRegion(filePath, handle, tick, trackIdx,
-                                            sourceIn, sourceOut, mediaDragMode);
+        // Emit mediaDropped for each handle, placing clips sequentially
+        int64_t currentTick = tick;
+        for (int i = 0; i < handleTokens.size(); ++i) {
+            bool ok = false;
+            uint64_t handle = handleTokens[i].toULongLong(&ok);
+            if (!ok || handle == 0) continue;
+
+            // Get file path from URLs (one per item, in order)
+            QString filePath;
+            if (i < urls.size())
+                filePath = urls[i].toLocalFile();
+            else if (!urls.isEmpty())
+                filePath = urls.first().toLocalFile();
+
+            // Compute duration for this clip
+            int64_t clipDur = 0;
+            if (sourceIn >= 0 && sourceOut > sourceIn) {
+                clipDur = sourceOut - sourceIn;
+            } else if (m_mediaPool) {
+                const auto* info = m_mediaPool->getInfo(handle);
+                if (info && info->duration > 0.0)
+                    clipDur = static_cast<int64_t>(info->duration * 48000.0);
+            }
+            // Resolve via file path if handle had no info
+            if (clipDur <= 0 && m_mediaPool && !filePath.isEmpty()) {
+                auto h = m_mediaPool->open(filePath.toStdString());
+                if (h != 0) {
+                    const auto* info = m_mediaPool->getInfo(h);
+                    if (info && info->duration > 0.0)
+                        clipDur = static_cast<int64_t>(info->duration * 48000.0);
+                }
+            }
+
+            // Snap this clip's position
+            int64_t snapTick = currentTick;
+            if (clipDur > 0) {
+                auto snapRes = m_snapEngine.snapPair(snapTick, snapTick + clipDur);
+                if (snapRes.didSnap) snapTick = snapRes.snappedTick;
+            } else {
+                auto snapRes = m_snapEngine.snap(snapTick);
+                if (snapRes.didSnap) snapTick = snapRes.snappedTick;
+            }
+
+            if (!filePath.isEmpty()) {
+                if (sourceIn >= 0 && sourceOut > sourceIn)
+                    emit mediaDroppedWithRegion(filePath, handle, snapTick, trackIdx,
+                                                sourceIn, sourceOut, mediaDragMode);
+                else
+                    emit mediaDropped(filePath, handle, snapTick, trackIdx,
+                                      mediaDragMode);
+            }
+
+            // Advance tick for next clip (sequential placement like Premiere)
+            if (clipDur > 0)
+                currentTick = snapTick + clipDur;
             else
-                emit mediaDropped(filePath, handle, tick, trackIdx,
-                                  mediaDragMode);
+                currentTick = snapTick + 1;
         }
 
         event->acceptProposedAction();

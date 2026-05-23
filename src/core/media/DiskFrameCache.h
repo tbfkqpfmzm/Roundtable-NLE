@@ -91,6 +91,17 @@ public:
     [[nodiscard]] size_t entryCount() const noexcept { return m_entryCount.load(); }
     [[nodiscard]] size_t budget()     const noexcept { return m_budget; }
 
+    /// Pending entries in the write-behind queue.  Each pending entry
+    /// pins a shared_ptr<CachedFrame> whose lazyReadback captures the
+    /// source GPU texture — so this counter is also "GPU textures
+    /// pinned by the disk writer".  Plateaus at kMaxWriteQueue under
+    /// sustained pressure (queue starts dropping oldest from there).
+    [[nodiscard]] size_t writeQueueSize() const
+    {
+        std::lock_guard lock(m_writerMutex);
+        return m_writeQueue.size();
+    }
+
 private:
     // ── File format constants ───────────────────────────────────────────
     static constexpr uint32_t kMagic   = 0x43465452; // "RTFC" little-endian
@@ -149,10 +160,34 @@ private:
 
     // Write-behind thread
     std::thread              m_writer;
-    std::mutex               m_writerMutex;
+    mutable std::mutex       m_writerMutex;
     std::condition_variable  m_writerCv;
     std::deque<std::shared_ptr<CachedFrame>> m_writeQueue;
     std::atomic<bool>        m_running{true};
+
+    // Hard ceiling on the write queue (UPGRADE_PLAN 2026-05-22 v4).
+    //
+    // GPU-resident CachedFrames carry a lazyReadback closure that
+    // captures shared_ptr<Texture> for the source GPU texture.  While a
+    // frame sits in this queue waiting to be written, that capture
+    // keeps the texture alive in VRAM — bypassing the ownership
+    // transfer in CompositeServiceLayerBuild and the eviction in
+    // GpuTextureCache.  Each queued frame pins ~8 MB of VRAM.
+    //
+    // Without this cap, the writer thread (single, serialised on the
+    // compute queue against prefetch via the readbackMutex) falls
+    // behind ~30 fps decode by even 10 ms per frame, the queue grows
+    // unboundedly, and VRAM climbs ~240 MB/sec until the OS budget is
+    // hit and the driver pages textures — which is the "vmaAllocs +30
+    // per second" growth observed at 22:28:39 onward in the
+    // perf log (each prefetched frame's source texture leaked into
+    // VRAM via the writer queue's shared_ptr ref chain).
+    //
+    // When the queue exceeds this cap, the OLDEST entry is dropped.
+    // Premiere's media cache works the same way — old frames that
+    // didn't make it to disk are simply re-decoded on demand if the
+    // user scrubs back, which is cheap compared to VRAM exhaustion.
+    static constexpr size_t kMaxWriteQueue = 30;
 
     // Statistics
     std::atomic<size_t> m_diskUsed{0};

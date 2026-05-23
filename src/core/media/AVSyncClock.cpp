@@ -159,5 +159,15 @@ std::chrono::steady_clock::time_point AVSyncClock::lastAdvanceTime() const noexc
     return std::chrono::steady_clock::time_point(std::chrono::nanoseconds(ns));
 }
 
+double AVSyncClock::msSinceLastAdvance() const noexcept
+{
+    const int64_t lastNs = m_lastAdvanceNs.load(std::memory_order_relaxed);
+    if (lastNs <= 0) return -1.0;
+    const auto now = std::chrono::steady_clock::now();
+    const int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        now.time_since_epoch()).count();
+    return static_cast<double>(nowNs - lastNs) / 1.0e6;
+}
+
 } // namespace rt
 

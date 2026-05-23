@@ -573,9 +573,24 @@ void AudioPlaybackService::loadSources(bool allowBlockingMisses)
                         ++deferredCacheMisses;
                     } else {
                         m_blockingMisses.fetch_add(1, std::memory_order_relaxed);
-                        AudioFile file;
-                        if (!file.open(path)) {
-                            spdlog::warn("loadAudioSources: failed to open '{}'", path);
+
+                        // UPGRADE_PLAN item 4 (2026-05-22): use the
+                        // unified per-path AudioFile cache instead of
+                        // constructing a stack AudioFile each call.
+                        // Previously this path opened the same media
+                        // file repeatedly (4 log lines per open — see
+                        // BLUE_1.mp4 sequence at 20:43:46-48 in
+                        // logs/perf_log.txt); each open ran sndfile +
+                        // FFmpeg probes (~200-500 ms total) while
+                        // holding shared state needed by the audio
+                        // callback, which produced the audio-thread
+                        // 3.4 s stall and the subsequent
+                        // COMPOSITE-SLOW cascade.  Cache lookup is
+                        // near-zero cost on the steady state.
+                        AudioFile* file = getOrOpenCachedAudioFile(path);
+                        if (!file) {
+                            // getOrOpenCachedAudioFile already logged
+                            // the open failure; no need to spam here.
                         } else {
                             std::vector<CachedAudioPageRequest> missingPages;
                             {
@@ -588,14 +603,14 @@ void AudioPlaybackService::loadSources(bool allowBlockingMisses)
 
                             for (const auto& request : missingPages) {
                                 auto pageBuffer = std::make_shared<std::vector<float>>();
-                                const int64_t framesRead = file.readRegionResampled(
+                                const int64_t framesRead = file->readRegionResampled(
                                     request.startFrame, request.frameCount, 48000, *pageBuffer);
                                 if (framesRead <= 0 || pageBuffer->empty()) continue;
 
                                 CachedDecode entry;
                                 entry.samples    = pageBuffer;
                                 entry.startFrame = request.startFrame;
-                                entry.channels   = static_cast<uint16_t>(file.info().channels);
+                                entry.channels   = static_cast<uint16_t>(file->info().channels);
                                 entry.totalFrames = framesRead;
                                 entry.bytes      = pageBuffer->size() * sizeof(float);
 

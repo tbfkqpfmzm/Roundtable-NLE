@@ -233,11 +233,28 @@ void ProjectBin::setupUI()
     m_listWidget->setDefaultDropAction(Qt::MoveAction);
     m_listWidget->setContextMenuPolicy(Qt::CustomContextMenu);
     m_listWidget->setEditTriggers(QAbstractItemView::SelectedClicked);
+    // Force selection to remain visible even when the widget loses focus
+    // (e.g. during a drag operation).  Without :selected:!active the
+    // system palette may hide the selection highlight entirely.
+    //
+    // Also set the palette Inactive/Highlight to the same accent colour
+    // so that QStyledItemDelegate::paint() uses it when State_Active is
+    // not set (which happens during Windows OLE drag when the window
+    // temporarily loses activation).
+    {
+        QPalette pal = m_listWidget->palette();
+        const QColor accent = Theme::colors().accent;
+        pal.setBrush(QPalette::Inactive, QPalette::Highlight, accent);
+        pal.setBrush(QPalette::Inactive, QPalette::HighlightedText, Theme::colors().textBright);
+        m_listWidget->setPalette(pal);
+    }
     m_listWidget->setStyleSheet(QStringLiteral(
         "QTreeWidget { background: %1; color: %2; border: none; "
-        "font-size: 12px; alternate-background-color: %3; }"
+        "font-size: 12px; alternate-background-color: %3; "
+        "show-decoration-selected: 1; }"
         "QTreeWidget::item { padding: 2px 4px; height: 22px; }"
         "QTreeWidget::item:selected { background: %4; }"
+        "QTreeWidget::item:selected:!active { background: %4; }"
         "QTreeWidget::item:selected:hover { background: %4; }"
         "QTreeWidget::item:hover { background: %5; }"
         "QHeaderView::section { background: %6; color: %7; border: none; "

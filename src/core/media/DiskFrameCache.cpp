@@ -181,6 +181,22 @@ void DiskFrameCache::putAsync(std::shared_ptr<CachedFrame> frame)
 
     {
         std::lock_guard lock(m_writerMutex);
+
+        // UPGRADE_PLAN 2026-05-22 v4: cap the queue.  See kMaxWriteQueue
+        // in DiskFrameCache.h for the leak that motivates this.  Each
+        // queued frame's lazyReadback closure pins a shared_ptr to its
+        // source GPU texture; under heavy prefetch the writer can't
+        // drain fast enough and VRAM grows ~8 MB per queued frame.
+        //
+        // When at capacity, drop the OLDEST entry to make room.  The
+        // dropped frame's CachedFrame shared_ptr ref count drops here,
+        // and (if this was the last ref) its destructor releases the
+        // captured texture back to PrefetchTexturePool.  Worst case the
+        // disk cache misses on that frame later and we re-decode — a
+        // cheap operation compared to OS-budget VRAM exhaustion.
+        while (m_writeQueue.size() >= kMaxWriteQueue) {
+            m_writeQueue.pop_front();
+        }
         m_writeQueue.push_back(std::move(frame));
     }
     m_writerCv.notify_one();

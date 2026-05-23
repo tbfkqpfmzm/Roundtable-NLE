@@ -118,8 +118,32 @@ void FrameClock::clockLoop()
                         spdlog::info("[DIAG-CLOCK] tick={} frame={} delta={} fps={:.1f}",
                                      snappedTick, frameNum, frameDelta, fps);
                     } else if (frameDelta > 2 || frameDelta < 0) {
-                        spdlog::warn("[DIAG-CLOCK] JUMP tick={} frame={} delta={} fps={:.1f}",
-                                     snappedTick, frameNum, frameDelta, fps);
+                        // Attach sync-clock state so we can tell apart the
+                        // three known causes of a JUMP:
+                        //   (a) speed != 1.0          → speed field shows it
+                        //   (b) audio thread stalled  → msSinceAdvance large
+                        //                                + extrapGap grows
+                        //   (c) FrameClock thread was preempted → masterTick
+                        //                                 jumped by ~delta
+                        //                                 frames AND extrap-
+                        //                                 olation matches.
+                        auto* sync = m_controller ? m_controller->syncClock() : nullptr;
+                        if (sync) {
+                            const int64_t master = sync->masterTick();
+                            const int64_t extrapGap = sync->currentTick() - master;
+                            const double  msSinceAdv = sync->msSinceLastAdvance();
+                            const double  speedNow = sync->speed();
+                            spdlog::warn("[DIAG-CLOCK] JUMP tick={} frame={} "
+                                         "delta={} fps={:.1f} speed={:.2f} "
+                                         "masterTick={} extrapGap={} "
+                                         "msSinceAdvance={:.1f}",
+                                         snappedTick, frameNum, frameDelta, fps,
+                                         speedNow, master, extrapGap, msSinceAdv);
+                        } else {
+                            spdlog::warn("[DIAG-CLOCK] JUMP tick={} frame={} "
+                                         "delta={} fps={:.1f} (no syncClock)",
+                                         snappedTick, frameNum, frameDelta, fps);
+                        }
                     }
                     s_lastFrame = frameNum;
                 }

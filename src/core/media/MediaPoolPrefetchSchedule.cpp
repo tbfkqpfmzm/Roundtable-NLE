@@ -305,27 +305,92 @@ void MediaPool::prefetchWorker(int workerId)
             }
 
             // Per-handle ownership: one worker per handle for sequential decode.
-            // Affinity:
-            //   - NVDEC workers (id < PREFETCH_NVDEC_WORKERS) refuse packed-alpha
-            //     tasks because NVDEC cannot decode them.
-            //   - SW workers (id >= PREFETCH_NVDEC_WORKERS) accept BOTH packed
-            //     and plain video. Previously SW workers refused non-packed
-            //     tasks, which meant only the 2 NVDEC workers could prefetch
-            //     plain H.264 — and per-handle ownership reduced that to 1
-            //     effective worker per file. The 8 SW workers sat idle during
-            //     cold-start, starving the FrameCache. With this relaxed rule
-            //     SW workers help fill the cache for plain video, particularly
-            //     when several H.264 clips are first encountered together.
-            auto acceptable = [&](const PrefetchTask& t) -> bool {
+            // Two-tier affinity (UPGRADE_PLAN A regression fix, 2026-05-21):
+            //   - NVDEC workers (id < PREFETCH_NVDEC_WORKERS) refuse packed-
+            //     alpha (NVDEC can't decode it).
+            //   - SW workers (id >= PREFETCH_NVDEC_WORKERS) refuse FIRST-
+            //     OWNERSHIP of plain (non-packed) video tasks so NVDEC
+            //     workers get first dibs.  Without this, in a multi-clip
+            //     project the 8 SW workers race the 2 NVDEC workers for
+            //     handle ownership and usually win — locking each H.264
+            //     file to SW decode for its lifetime, which kills the
+            //     CUDA↔Vulkan zero-copy path (it needs NVDEC output).
+            //
+            // Fallback: if the queue is video-only (every acceptable task
+            // is a non-packed video and no NVDEC worker has yet grabbed
+            // it), SW workers DO take it.  This preserves the "SW workers
+            // help fill the cache when NVDEC is saturated" property that
+            // the previous relaxed rule was meant to provide.
+            auto isNonPackedVideo = [](const PrefetchTask& t) {
+                return t.info.frameCount > 1 && !t.packedAlpha;
+            };
+            auto preferredAcceptable = [&](const PrefetchTask& t) -> bool {
                 if (workerId < PREFETCH_NVDEC_WORKERS && t.packedAlpha)
                     return false;
                 auto ownerIt = m_prefetchPackedOwner.find(t.handle);
-                if (ownerIt == m_prefetchPackedOwner.end()) return true;
-                return ownerIt->second == workerId;
+                if (ownerIt != m_prefetchPackedOwner.end())
+                    return ownerIt->second == workerId;
+                // No owner yet.  SW workers skip plain video on this pass.
+                if (workerId >= PREFETCH_NVDEC_WORKERS && isNonPackedVideo(t))
+                    return false;
+                return true;
             };
 
             auto pick = std::find_if(m_prefetchQueue.begin(),
-                                     m_prefetchQueue.end(), acceptable);
+                                     m_prefetchQueue.end(), preferredAcceptable);
+
+            // SW fallback: if the preferred pass found nothing AND the
+            // queue does contain at least one unowned non-packed video
+            // task, give NVDEC workers a brief window to grab it before
+            // we steal it.  Without this wait, the SW worker that happens
+            // to enter the locked section first immediately steals the
+            // single video task and the NVDEC workers never see it —
+            // exactly the regression that turned ZC=100% into ZC=0 on
+            // multi-clip projects at load.
+            //
+            // wait_for releases the queue mutex during the wait, so an
+            // NVDEC worker can claim the video task during this window.
+            // If they do, the re-check below finds nothing (owned by
+            // someone else), we fall through to the normal 2 ms idle
+            // wait and try again next iteration.
+            if (pick == m_prefetchQueue.end() &&
+                workerId >= PREFETCH_NVDEC_WORKERS)
+            {
+                const bool hasUnownedVideo = std::any_of(
+                    m_prefetchQueue.begin(), m_prefetchQueue.end(),
+                    [&](const PrefetchTask& t) {
+                        if (!isNonPackedVideo(t)) return false;
+                        auto ownerIt = m_prefetchPackedOwner.find(t.handle);
+                        return ownerIt == m_prefetchPackedOwner.end();
+                    });
+
+                if (hasUnownedVideo) {
+                    m_prefetchCv.wait_for(lock, std::chrono::milliseconds(20));
+
+                    // Re-run preferred — an NVDEC worker may have grabbed
+                    // the video while we were waiting, in which case it
+                    // now has an owner and the SW worker can pick up any
+                    // other already-owned task it might be tracking.
+                    pick = std::find_if(m_prefetchQueue.begin(),
+                                        m_prefetchQueue.end(),
+                                        preferredAcceptable);
+                }
+
+                // Final fallback: NVDEC didn't grab during the window
+                // (probably saturated).  SW worker takes the video to
+                // keep throughput up.
+                if (pick == m_prefetchQueue.end()) {
+                    auto fallbackAcceptable = [&](const PrefetchTask& t) -> bool {
+                        auto ownerIt = m_prefetchPackedOwner.find(t.handle);
+                        if (ownerIt == m_prefetchPackedOwner.end()) return true;
+                        return ownerIt->second == workerId;
+                    };
+                    pick = std::find_if(m_prefetchQueue.begin(),
+                                        m_prefetchQueue.end(),
+                                        fallbackAcceptable);
+                }
+            }
+
             if (pick == m_prefetchQueue.end()) {
                 m_prefetchCv.wait_for(lock, std::chrono::milliseconds(2));
                 continue;

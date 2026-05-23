@@ -126,9 +126,18 @@ void GpuTextureCache::putShared(uint64_t mediaId, int64_t frameNumber, uint8_t t
     auto existing = m_map.find(key);
     if (existing != m_map.end()) return;
 
-    // Don't evict for shared entries — they don't own VRAM exclusively.
-    // The VRAM is owned by the FrameCache's CachedFrame.  We just track
-    // the descriptor for dirty-tracking lookups.
+    // UPGRADE_PLAN 2026-05-22: putShared MUST evict, just like put().
+    //
+    // The previous comment claimed "Don't evict for shared entries —
+    // they don't own VRAM exclusively. The VRAM is owned by the
+    // FrameCache's CachedFrame."  That stopped being true after the
+    // CompositeServiceLayerBuild "transfer of ownership" change:
+    // FrameCache resets gpuTextureOwner immediately after putShared,
+    // leaving GpuTextureCache as the SOLE owner of the VkImage.
+    // Without eviction here the cache grew unbounded (gpuTexN climbed
+    // 2→1469 in 52 s of playback) until VMA-tracked VRAM crossed the
+    // OS budget and the driver started paging textures to system RAM.
+    evictUntilFits(textureBytes);
 
     m_lru.push_front(key);
     Entry entry;
@@ -175,6 +184,19 @@ void GpuTextureCache::setBudget(size_t bytes)
     std::lock_guard lk(m_mtx);
     m_budget = bytes;
     evictUntilFits(0);
+}
+
+void GpuTextureCache::setMaxEntries(size_t maxEntries)
+{
+    std::lock_guard lk(m_mtx);
+    m_maxEntries = maxEntries;
+    evictUntilFits(0);
+}
+
+size_t GpuTextureCache::maxEntries() const
+{
+    std::lock_guard lk(m_mtx);
+    return m_maxEntries;
 }
 
 // ── Pinning ─────────────────────────────────────────────────────────────────
@@ -268,18 +290,34 @@ void GpuTextureCache::setRecycleFn(RecycleFn fn)
 // non-recursive mutex.
 void GpuTextureCache::evictUntilFits(size_t needed)
 {
-    // Pass 1: evict only non-loop, non-pinned frames from the LRU back.
-    // Loop frames belong to short looping clips that are guaranteed to
-    // be needed again every 1-3 seconds; evicting them just forces a
-    // CPU→GPU re-upload on the next loop iteration, producing a visible
-    // pipeline bubble (typically 30-60ms per frame for a 1920×3840
-    // packed-alpha character).  Walk the LRU back-to-front skipping
-    // loop entries and pinned entries (those referenced by in-flight
-    // GPU command buffers).
+    // Eviction trigger combines two signals (UPGRADE_PLAN 2026-05-22):
+    //   - byte pressure:  m_used + needed > m_budget
+    //   - entry pressure: m_map.size() >= m_maxEntries (when set)
+    //
+    // The entry-count signal is the Premiere-style bounded working
+    // set fix.  Before it, gpuOwn climbed from 2 to 1469 entries over
+    // 52 s of single-clip playback (>11 GB of GPU textures), because
+    // the byte budget was so generous (40-60% of VRAM, multi-GB) that
+    // the cache happily hoarded every frame the compositor had ever
+    // shown.  With the entry cap, the cache is treated as a small
+    // recent-frames pool — anything older lives in DiskFrameCache and
+    // re-uploads on demand if scrubbed back.
+    //
+    // ">=" (not ">") on the entry-count check because we want eviction
+    // to leave room for the incoming insertion: if cap is N and we
+    // already hold N, we need to evict at least one before the put
+    // below pushes us to N+1.
+
+    auto overCapacity = [&]() {
+        if (m_used + needed > m_budget) return true;
+        if (m_maxEntries != 0 && m_map.size() >= m_maxEntries) return true;
+        return false;
+    };
+
     auto walkAndEvict = [&](bool includeLoopFrames) {
         if (m_lru.empty()) return;
         auto it = m_lru.end();
-        while (m_used + needed > m_budget && it != m_lru.begin()) {
+        while (overCapacity() && it != m_lru.begin()) {
             --it;
             auto mapIt = m_map.find(*it);
             if (mapIt == m_map.end()) {
@@ -303,7 +341,7 @@ void GpuTextureCache::evictUntilFits(size_t needed)
         }
     };
     walkAndEvict(/*includeLoopFrames=*/false);
-    if (m_used + needed > m_budget)
+    if (overCapacity())
         walkAndEvict(/*includeLoopFrames=*/true);
 }
 

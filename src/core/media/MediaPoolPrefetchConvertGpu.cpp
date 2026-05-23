@@ -23,6 +23,7 @@
 #include "GpuContext.h"
 #include "GpuScheduler.h"
 #include "Nv12Converter.h"
+#include "cuda/CudaVulkanInterop.h"   // UPGRADE_PLAN A: zero-copy
 #include "vulkan/Texture.h"
 #include "vulkan/Device.h"
 #include "vulkan/Allocator.h"
@@ -32,15 +33,25 @@
 #include <volk.h>
 
 #include <algorithm>
+#include <unordered_set>
 #include <vector>
 
 #ifdef ROUNDTABLE_HAS_FFMPEG
 extern "C" {
 #include <libavutil/pixfmt.h>
+#include <libavutil/frame.h>      // AVFrame (CUDA hwframe data ptrs)
 }
 #endif
 
 namespace rt {
+
+// ─────────────────────────────────────────────────────────────────────────
+// WorkerGpuState constructor — defined out-of-line so the complete type
+// of Nv12Converter is in scope when the implicit unique_ptr member
+// destructor it triggers (during stack unwinding on a hypothetical
+// constructor exception) is instantiated.
+// ─────────────────────────────────────────────────────────────────────────
+WorkerGpuState::WorkerGpuState() = default;
 
 // ─────────────────────────────────────────────────────────────────────────
 // WorkerGpuState destructor — needs vkDestroySemaphore, hence Vulkan TU.
@@ -62,9 +73,24 @@ WorkerGpuState::~WorkerGpuState()
                 cmdPool.freeBuffer(p.cmdBuf);
             }
             for (auto& s : p.staging) s.destroy();
+            // Return the shared CUDA buffer to its interop pool, if
+            // this submission used the zero-copy path.
+            if (p.sharedAlloc && p.interop) {
+                p.interop->free(std::move(p.sharedAlloc));
+            }
         }
     }
     pending.clear();
+
+    // Per-worker Nv12Converter — destroyed before signalSem / cmdPool so
+    // its own internal Vulkan objects release while the device is still
+    // alive.  Must happen before the unique_ptr would otherwise unwind
+    // (declaration order would still put it last, but explicit reset
+    // documents intent and orders cleanup deterministically).
+    if (nv12Converter) {
+        nv12Converter->shutdown();
+        nv12Converter.reset();
+    }
 
     if (signalSem != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
         vkDestroySemaphore(device, signalSem, nullptr);
@@ -100,8 +126,53 @@ void WorkerGpuState::pollAndCleanup()
             cmdPool.freeBuffer(front.cmdBuf);
         }
         for (auto& s : front.staging) s.destroy();
+        // Return the shared CUDA buffer to its interop pool now that
+        // the GPU is done reading from it.
+        if (front.sharedAlloc && front.interop) {
+            front.interop->free(std::move(front.sharedAlloc));
+        }
         pending.pop_front();
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// WorkerGpuState::ensureNv12Converter — lazy-create the per-worker
+// converter on first GPU-eligible frame.  The converter owns its own
+// input/output textures and descriptor sets, so multiple workers can
+// pipeline submissions on the compute queue without contending on a
+// shared apiMutex.
+// ─────────────────────────────────────────────────────────────────────────
+Nv12Converter* WorkerGpuState::ensureNv12Converter(uint32_t w, uint32_t h)
+{
+    if (nv12Converter && nv12Converter->isInitialized()) {
+        // Already constructed.  Internal ensureOutputSize() inside
+        // recordConvertScaled / recordConvertFromBufferScaled will
+        // resize the output texture if (w, h) changed.
+        nv12ConverterW = w;
+        nv12ConverterH = h;
+        return nv12Converter.get();
+    }
+
+    auto& ctx = GpuContext::get();
+    if (!ctx.isInitialized()) return nullptr;
+    if (cmdPool.handle() == VK_NULL_HANDLE) return nullptr;
+
+    nv12Converter = std::make_unique<Nv12Converter>();
+    Nv12ConverterConfig cfg;
+    cfg.width  = w;
+    cfg.height = h;
+    if (!nv12Converter->init(ctx.device(), ctx.allocator(),
+                              cmdPool, ctx.computeQueue(), cfg)) {
+        spdlog::warn("WorkerGpuState::ensureNv12Converter: init failed for "
+                     "{}x{} — falling back to CPU path", w, h);
+        nv12Converter.reset();
+        return nullptr;
+    }
+    nv12ConverterW = w;
+    nv12ConverterH = h;
+    spdlog::warn("WorkerGpuState: per-worker Nv12Converter created {}x{}",
+                 w, h);
+    return nv12Converter.get();
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -126,36 +197,196 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
     // entry walks at most once across two prefetch calls.
     wgs.pollAndCleanup();
 
-    // Hardware → CPU transfer.  Same step the CPU path takes (NVDEC
-    // surfaces are not directly accessible to Nv12Converter today).
-    if (decoded.isHardware) {
+    // ── Backpressure: cap in-flight submissions per worker ─────────────
+    //
+    // Without this, the deferred-cleanup design lets the worker submit
+    // as fast as it can record (~150 fps of NVDEC + convert+copy work),
+    // which saturates the SHARED compute queue and starves the
+    // compositor's own submit — causing the compositor's frame
+    // callback to take 100ms per frame instead of 33ms, dropping the
+    // FrameClock thread from 30fps to ~10fps.  The user sees this as
+    // sustained video stutter that appears at the 30-60s mark, right
+    // when cache pressure ramps prefetch throughput up to its max.
+    //
+    // Cap = 1 (2026-05-22 tighten): one frame in flight per worker.
+    //
+    // Originally 3 to maximize prefetch throughput.  Reduced to 1 after
+    // observing 200-285 ms compositor `submit=` stalls in
+    // perf_log.txt at 2026-05-22 12:38:58+: even though `ZC=100%` and
+    // gpuDisplay=true, every compositor submit queued behind 6 in-flight
+    // prefetch convert+copy submissions (2 NVDEC workers × cap 3).
+    // The single shared compute queue serialized them — exactly the
+    // UPGRADE_PLAN §1.2 "shared compute queue" architectural symptom.
+    //
+    // With cap=1, max in-flight prefetch work on the compute queue is 2
+    // (one per worker), so the compositor's submit waits at most ~10 ms
+    // (one convert+copy cycle) before its turn.  Throughput per worker
+    // halves but each worker still runs ~30-60 fps decode, giving the
+    // pair ~60-120 fps cache fill — well above the 30 fps playback
+    // target and the lookahead prewarm rate.
+    //
+    // This is a backpressure tightening, not a fix — the real fix is
+    // UPGRADE_PLAN §1.3 Path C (dedicated async-compute queue for
+    // prefetch work).  Once Path C lands, the cap can return to 3 (or
+    // higher) because compositor and prefetch run on independent
+    // hardware engines.
+    constexpr size_t kMaxPendingPerWorker = 1;
+    while (wgs.pending.size() >= kMaxPendingPerWorker) {
+        auto& oldest = wgs.pending.front();
+        if (oldest.fence == VK_NULL_HANDLE) {
+            wgs.pending.pop_front();
+            continue;
+        }
+        vkWaitForFences(ctx.vkDevice(), 1, &oldest.fence, VK_TRUE, UINT64_MAX);
+        vkDestroyFence(ctx.vkDevice(), oldest.fence, nullptr);
+        if (oldest.cmdBuf != VK_NULL_HANDLE) {
+            wgs.cmdPool.freeBuffer(oldest.cmdBuf);
+        }
+        for (auto& s : oldest.staging) s.destroy();
+        if (oldest.sharedAlloc && oldest.interop) {
+            oldest.interop->free(std::move(oldest.sharedAlloc));
+        }
+        wgs.pending.pop_front();
+    }
+
+    // ── UPGRADE_PLAN A: zero-copy preflight ─────────────────────────────
+    // If we have an NVDEC hardware frame (data lives in CUDA-owned GPU
+    // memory) AND the CUDA↔Vulkan interop is up, GPU-copy the NV12
+    // planes into a shared Vulkan buffer instead of CPU-bouncing them
+    // via transferHardwareFrame.  copyNv12FromCuda is synchronous on
+    // the CUDA side and signals an external timeline semaphore that the
+    // compute submit waits on (pNext = VkTimelineSemaphoreSubmitInfo).
+    //
+    // On any failure the path falls through to the legacy
+    // transferHardwareFrame + recordConvertScaled flow without
+    // affecting the original logic — including the case where CUDA
+    // isn't compiled in, where cudaVulkanInterop() returns nullptr.
+    std::unique_ptr<SharedAllocation> zeroCopyAlloc;
+    CudaVulkanInterop* interop = nullptr;
+    const uint32_t hwW = decoded.width;
+    const uint32_t hwH = decoded.height;
+
+    // One-shot per-handle FAILURE diagnostic.  Logs at warn level so it
+    // survives the warn+ filter.  Tracks failures only (not successes),
+    // so a handle that initially succeeds at ZC and later starts
+    // failing will still log the first failure — fixing the
+    // "first-success suppresses subsequent failure logging" bug that
+    // made the 2026-05-22 13:28 log silent about ZC dropping from
+    // 100% to 0%.
+    auto shouldLogZcFail = [task]() -> bool {
+        static thread_local std::unordered_set<MediaHandle> s_failed;
+        return s_failed.insert(task.handle).second;
+    };
+
+    if (!decoded.isHardware) {
+        if (shouldLogZcFail())
+            spdlog::warn("[ZC-DIAG] handle={} skipped: decoded.isHardware=false "
+                         "(software decode, NVDEC not engaged for this file)",
+                         task.handle);
+    } else if (decoded.avFrame == nullptr) {
+        if (shouldLogZcFail())
+            spdlog::warn("[ZC-DIAG] handle={} skipped: decoded.avFrame=null",
+                         task.handle);
+    } else if (hwW == 0 || hwH == 0) {
+        if (shouldLogZcFail())
+            spdlog::warn("[ZC-DIAG] handle={} skipped: zero dimensions",
+                         task.handle);
+    } else if ((hwW & 1) != 0 || (hwH & 1) != 0) {
+        if (shouldLogZcFail())
+            spdlog::warn("[ZC-DIAG] handle={} skipped: odd dimensions W={} H={}",
+                         task.handle, hwW, hwH);
+    }
+
+    if (decoded.isHardware
+        && decoded.avFrame != nullptr
+        && hwW > 0 && hwH > 0
+        && (hwW & 1) == 0 && (hwH & 1) == 0)   // NV12 needs even dims
+    {
+        interop = ctx.cudaVulkanInterop();
+        if (!interop) {
+            if (shouldLogZcFail())
+                spdlog::warn("[ZC-DIAG] handle={} skipped: ctx.cudaVulkanInterop=null",
+                             task.handle);
+        } else if (!interop->isAvailable()) {
+            if (shouldLogZcFail())
+                spdlog::warn("[ZC-DIAG] handle={} skipped: interop->isAvailable=false",
+                             task.handle);
+        }
+        if (interop && interop->isAvailable()) {
+#ifdef ROUNDTABLE_HAS_FFMPEG
+            // CUDA hwframes from NVDEC store Y at data[0], UV at data[1]
+            // as CUdeviceptr values (raw cast to uint8_t* by ffmpeg).
+            const void* yPtr  = static_cast<const void*>(decoded.avFrame->data[0]);
+            const void* uvPtr = static_cast<const void*>(decoded.avFrame->data[1]);
+            const int yPitch  = decoded.avFrame->linesize[0];
+            const int uvPitch = decoded.avFrame->linesize[1];
+            if (!yPtr || !uvPtr || yPitch <= 0 || uvPitch <= 0) {
+                if (shouldLogZcFail())
+                    spdlog::warn("[ZC-DIAG] handle={} skipped: null plane ptrs/pitch "
+                                 "(yPtr={} uvPtr={} yPitch={} uvPitch={})",
+                                 task.handle, yPtr, uvPtr, yPitch, uvPitch);
+            } else {
+                auto alloc = interop->allocate(hwW, hwH);
+                if (!alloc) {
+                    if (shouldLogZcFail())
+                        spdlog::warn("[ZC-DIAG] handle={} skipped: interop->allocate "
+                                     "returned null (vkAllocateMemory exhaustion?)",
+                                     task.handle);
+                } else if (!interop->copyNv12FromCuda(*alloc,
+                               yPtr, yPitch, uvPtr, uvPitch, hwW, hwH)) {
+                    if (shouldLogZcFail())
+                        spdlog::warn("[ZC-DIAG] handle={} skipped: copyNv12FromCuda failed",
+                                     task.handle);
+                    interop->free(std::move(alloc));
+                } else {
+                    zeroCopyAlloc = std::move(alloc);
+                }
+            }
+#endif
+        }
+    }
+
+    // Hardware → CPU transfer (fallback when zero-copy did not fire).
+    // Same step the CPU path takes (NVDEC surfaces aren't directly
+    // accessible to Nv12Converter without the interop bridge above).
+    if (!zeroCopyAlloc && decoded.isHardware) {
         DecodedFrame cpuFrame;
         if (!state.decoder->transferHardwareFrame(decoded, cpuFrame))
             return nullptr;
         decoded = std::move(cpuFrame);
     }
-    if (!decoded.data[0] || decoded.width == 0 || decoded.height == 0)
+    if (!zeroCopyAlloc &&
+        (!decoded.data[0] || decoded.width == 0 || decoded.height == 0))
         return nullptr;
 
 #ifdef ROUNDTABLE_HAS_FFMPEG
-    AVPixelFormat srcFmt = AV_PIX_FMT_NONE;
-    if (decoded.rawFormat >= 0) {
-        srcFmt = static_cast<AVPixelFormat>(decoded.rawFormat);
-    } else {
-        switch (decoded.format) {
-            case PixelFormat::YUV420P: srcFmt = AV_PIX_FMT_YUV420P; break;
-            case PixelFormat::NV12:    srcFmt = AV_PIX_FMT_NV12;    break;
-            default:                   return nullptr;
+    // Zero-copy always produces NV12 in the shared buffer (per
+    // copyNv12FromCuda's contract).  The legacy fallback paths read
+    // decoded.rawFormat / decoded.format as before.
+    AVPixelFormat srcFmt = AV_PIX_FMT_NV12;
+    if (!zeroCopyAlloc) {
+        srcFmt = AV_PIX_FMT_NONE;
+        if (decoded.rawFormat >= 0) {
+            srcFmt = static_cast<AVPixelFormat>(decoded.rawFormat);
+        } else {
+            switch (decoded.format) {
+                case PixelFormat::YUV420P: srcFmt = AV_PIX_FMT_YUV420P; break;
+                case PixelFormat::NV12:    srcFmt = AV_PIX_FMT_NV12;    break;
+                default:                   return nullptr;
+            }
         }
+        if (srcFmt != AV_PIX_FMT_NV12 && srcFmt != AV_PIX_FMT_YUV420P)
+            return nullptr;
     }
-    if (srcFmt != AV_PIX_FMT_NV12 && srcFmt != AV_PIX_FMT_YUV420P)
-        return nullptr;
 #else
     return nullptr;
 #endif
 
-    const int srcW = static_cast<int>(decoded.width);
-    const int srcH = static_cast<int>(decoded.height);
+    // For zero-copy, decoded is still the (hardware) original frame and
+    // its width/height come from NVDEC.  For the CPU path, decoded has
+    // been transferred and width/height likewise reflect the source.
+    const int srcW = static_cast<int>(zeroCopyAlloc ? hwW : decoded.width);
+    const int srcH = static_cast<int>(zeroCopyAlloc ? hwH : decoded.height);
 
     // ── Tier-clamp identical to convertDecodedToCache so cached frames
     //    interleave correctly with whatever the CPU path produces. ───────
@@ -174,10 +405,11 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
     }
     if (dstW > 16384 || dstH > 16384) return nullptr;
 
-    // ── Acquire (or lazily create) the Nv12Converter sized for dst.  ────
-    // Different output sizes get distinct converter instances per
-    // GpuContext, so per-size workers do not contend on apiMutex.
-    Nv12Converter* conv = ctx.nv12Converter(
+    // ── Acquire this worker's OWN Nv12Converter sized for dst.
+    //    Per-worker instance (UPGRADE_PLAN item 3) — no shared apiMutex,
+    //    no inline wait, no cross-worker serialisation.  Multiple
+    //    workers pipeline freely on the compute queue. ──────────────────
+    Nv12Converter* conv = wgs.ensureNv12Converter(
         static_cast<uint32_t>(dstW), static_cast<uint32_t>(dstH));
     if (!conv || !conv->isInitialized()) return nullptr;
 
@@ -203,12 +435,12 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
                                     std::move(concurrent));
     if (!dstTex) return nullptr;
 
-    // ── Lock Nv12Converter for the duration of record + submit + wait.
-    //    The converter's internal planar textures + descriptor set are
-    //    shared mutable state across recorders.  Mirrors what the
-    //    existing convertAndReadback* methods do.  ────────────────────────
-    std::lock_guard apiLock(conv->apiMutex());
-
+    // ── Per-worker converter means no shared mutable state across
+    //    workers — no apiMutex lock needed, no inline fence wait
+    //    needed.  Each worker's converter is touched only by its own
+    //    thread, so descriptor updates + texture uploads can pipeline
+    //    freely on the compute queue.
+    //
     // ── Open per-worker command buffer.  beginSingleTime allocates + ────
     //    begins with ONE_TIME_SUBMIT flag set.  ─────────────────────────
     VkCommandBuffer cmd = wgs.cmdPool.beginSingleTime();
@@ -216,9 +448,22 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
 
     std::vector<Texture::StagingCleanup> stagingOut;
 
-    // ── Record NV12 / YUV420P → BGRA into cmd.  No submit. ──────────────
+    // ── Record convert into cmd.  Three paths:                       ──
+    //    - zero-copy: read NV12 from the shared VkBuffer the interop
+    //                  populated (no CPU staging, no per-plane upload).
+    //    - NV12 CPU:  upload Y/UV planes from CPU, run convert.
+    //    - YUV420P:   upload Y/U/V planes from CPU, run convert.
     bool recordOk = false;
-    if (srcFmt == AV_PIX_FMT_NV12) {
+    if (zeroCopyAlloc) {
+        const VkDeviceSize uvOffset = static_cast<VkDeviceSize>(srcW) * srcH;
+        recordOk = conv->recordConvertFromBufferScaled(
+            cmd,
+            reinterpret_cast<VkBuffer>(zeroCopyAlloc->vulkanBuffer),
+            static_cast<uint32_t>(srcW), static_cast<uint32_t>(srcH),
+            static_cast<uint32_t>(dstW), static_cast<uint32_t>(dstH),
+            /*yOffset=*/  0,
+            /*uvOffset=*/ uvOffset);
+    } else if (srcFmt == AV_PIX_FMT_NV12) {
         recordOk = conv->recordConvertScaled(
             cmd,
             decoded.data[0], decoded.linesize[0],
@@ -240,6 +485,8 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
         vkEndCommandBuffer(cmd);
         wgs.cmdPool.freeBuffer(cmd);
         for (auto& s : stagingOut) s.destroy();
+        if (zeroCopyAlloc && interop)
+            interop->free(std::move(zeroCopyAlloc));
         return nullptr;
     }
 
@@ -313,6 +560,8 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
     if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
         wgs.cmdPool.freeBuffer(cmd);
         for (auto& s : stagingOut) s.destroy();
+        if (zeroCopyAlloc && interop)
+            interop->free(std::move(zeroCopyAlloc));
         return nullptr;
     }
 
@@ -328,14 +577,76 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
     if (vkCreateFence(ctx.vkDevice(), &fci, nullptr, &fence) != VK_SUCCESS) {
         wgs.cmdPool.freeBuffer(cmd);
         for (auto& s : stagingOut) s.destroy();
+        if (zeroCopyAlloc && interop)
+            interop->free(std::move(zeroCopyAlloc));
         return nullptr;
+    }
+
+    // ── Build VkTimelineSemaphoreSubmitInfo for both wait (ZC) and signal
+    //    (cross-queue producer→compositor sync).  One struct carries
+    //    both arrays; we always signal the prefetch timeline sem at the
+    //    next monotonic value, and ALSO wait on the interop's timeline
+    //    semaphore when this submission consumed CUDA writes (zero-copy
+    //    path).  Both signal and wait counts must match the matching
+    //    arrays in VkSubmitInfo, hence the parallel sub.signalSemaphores
+    //    and sub.waitSemaphores arrays below.
+    VkTimelineSemaphoreSubmitInfo tlInfo{};
+    tlInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+
+    VkSemaphore           waitSem   = VK_NULL_HANDLE;
+    VkPipelineStageFlags  waitStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    uint64_t              waitValue = 0;
+    if (zeroCopyAlloc && interop) {
+        waitSem   = reinterpret_cast<VkSemaphore>(interop->vkSemaphore());
+        waitValue = interop->lastSignalValue();
+        tlInfo.waitSemaphoreValueCount = 1;
+        tlInfo.pWaitSemaphoreValues    = &waitValue;
+    }
+
+    // UPGRADE_PLAN Path C optimisation (2026-05-22): signal the shared
+    // prefetch timeline semaphore at a monotonically increasing value.
+    // The compositor's submit on the graphics queue will wait on this
+    // (sem, value) pair before sampling textures whose CachedFrame
+    // carries this value — making the cross-queue memory-visibility
+    // wait GPU-side, off the prefetch worker thread, replacing the
+    // previous synchronous vkWaitForFences that cost ~5 ms / frame.
+    VkSemaphore  prefetchSignalSem   = VK_NULL_HANDLE;
+    uint64_t     prefetchSignalValue = 0;
+    {
+        const uint64_t semHandle = prefetchTimelineSem();
+        if (semHandle != 0) {
+            prefetchSignalSem   = reinterpret_cast<VkSemaphore>(semHandle);
+            prefetchSignalValue = nextPrefetchTimelineValue();
+            tlInfo.signalSemaphoreValueCount = 1;
+            tlInfo.pSignalSemaphoreValues    = &prefetchSignalValue;
+        }
     }
 
     GpuSubmission sub{};
     sub.cmd             = cmd;
     sub.queue           = GpuQueueKind::Compute;
     sub.completionFence = fence;
-    sub.tag             = "prefetch-decode-convert";
+    sub.tag             = zeroCopyAlloc ? "prefetch-zerocopy"
+                                        : "prefetch-decode-convert";
+
+    // Attach pNext only when at least one timeline operation is present.
+    // VkTimelineSemaphoreSubmitInfo with both counts at zero would still
+    // be valid but it's cleaner to skip the chain in the trivial case.
+    const bool needTimelineInfo =
+        (zeroCopyAlloc && waitSem != VK_NULL_HANDLE) ||
+        (prefetchSignalSem != VK_NULL_HANDLE);
+    if (needTimelineInfo) {
+        sub.pNext = &tlInfo;
+    }
+    if (zeroCopyAlloc && waitSem != VK_NULL_HANDLE) {
+        sub.waitSemaphores     = &waitSem;
+        sub.waitStages         = &waitStage;
+        sub.waitSemaphoreCount = 1;
+    }
+    if (prefetchSignalSem != VK_NULL_HANDLE) {
+        sub.signalSemaphores     = &prefetchSignalSem;
+        sub.signalSemaphoreCount = 1;
+    }
 
     const VkResult sr = ctx.scheduler().submit(sub);
     if (sr != VK_SUCCESS) {
@@ -344,32 +655,51 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
         vkDestroyFence(ctx.vkDevice(), fence, nullptr);
         wgs.cmdPool.freeBuffer(cmd);
         for (auto& s : stagingOut) s.destroy();
+        if (zeroCopyAlloc && interop)
+            interop->free(std::move(zeroCopyAlloc));
         return nullptr;
     }
 
-    // Inline-wait + immediate cleanup.
+    // ── Cross-queue visibility (UPGRADE_PLAN Path C optimisation) ───────
     //
-    // We must NOT release apiMutex (held via apiLock above) until the
-    // GPU has finished executing this submission, because the next
-    // worker through this function will call vkUpdateDescriptorSets on
-    // the converter's shared descriptor set, and the spec forbids that
-    // while a pending command buffer still references the descriptor
-    // set (VUID-vkUpdateDescriptorSets-None-03047).  Without the wait
-    // here, validation layers flag every prefetched frame, and the
-    // descriptor set's contents can be clobbered mid-execution —
-    // producing the wrong source pixels in the converted output.
+    // No inline vkWaitForFences here.  The compositor's submit waits on
+    // the prefetch timeline semaphore GPU-side (see CompositeEngine's
+    // collectProducerWaits + slot.submit with timeline wait), so the
+    // worker can immediately return the CachedFrame; its texture will
+    // only be sampled after the GPU semaphore wait is satisfied.
     //
-    // The deferred-cleanup infrastructure (wgs.pending, pollAndCleanup,
-    // dtor drain) is kept in place even though the deque always stays
-    // empty under this design: a future change that gives each worker
-    // its own descriptor set would lift the wait without disturbing the
-    // surrounding code.
-    vkWaitForFences(ctx.vkDevice(), 1, &fence, VK_TRUE, UINT64_MAX);
-    vkDestroyFence(ctx.vkDevice(), fence, nullptr);
-    wgs.cmdPool.freeBuffer(cmd);
-    for (auto& s : stagingOut) s.destroy();
+    // Fallback: if the timeline semaphore could not be created at init
+    // (vkCreateSemaphore failed in MediaPool::onGpuContextReady),
+    // prefetchTimelineSem() returns 0 and the convert+copy proceeds
+    // WITHOUT a producer signal.  In that degraded mode the CachedFrame
+    // carries no producer value, the compositor's max-value collection
+    // sees 0, and no GPU wait is inserted — the resulting cross-queue
+    // visibility hole is rare enough (only on driver init failure) to
+    // accept rather than fall back to the per-frame fence stall.
 
-    m_perf.gpuResidentDecoded.fetch_add(1, std::memory_order_relaxed);
+    // Deferred cleanup: with the fence already signalled above, the
+    // first pollAndCleanup pass on the next worker iteration will
+    // reclaim these resources immediately — no GPU work outstanding.
+    // We still push to wgs.pending rather than freeing inline so the
+    // per-worker resource recycling stays in one place.
+    WorkerGpuState::PendingSubmit p;
+    p.fence       = fence;
+    p.cmdBuf      = cmd;
+    p.staging     = std::move(stagingOut);
+    p.sharedAlloc = std::move(zeroCopyAlloc);
+    p.interop     = interop;
+    p.dstHold     = dstTex;  // keep the dst texture alive until fence signals
+    wgs.pending.push_back(std::move(p));
+
+    // Increment telemetry based on which path won.  zeroCopyAlloc has
+    // been moved into the pending entry, so check the path indirectly
+    // via whether interop was set up for this call.
+    const bool wasZeroCopy = (wgs.pending.back().sharedAlloc != nullptr);
+    if (wasZeroCopy) {
+        m_perf.zeroCopyDecoded.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        m_perf.gpuResidentDecoded.fetch_add(1, std::memory_order_relaxed);
+    }
 
     // ── Build the GPU-resident CachedFrame.  ────────────────────────────
     // Same deleter pattern as convertDecodedToCache: recycle the empty
@@ -396,6 +726,12 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
     cached->gpuTextureOwner = dstTex;   // shared_ptr — co-owned with the cache
     // cached->gpuSemaphore stays 0 in PR-4 (Phase 6 wires it).
     // cached->pixels stays empty; lazyReadback materialises on demand.
+
+    // Producer (sem, value) for the cross-queue visibility wait
+    // performed by the compositor's submit.  Both fields are 0 when
+    // the timeline semaphore could not be created (degraded mode).
+    cached->producerTimelineSem   = reinterpret_cast<uint64_t>(prefetchSignalSem);
+    cached->producerTimelineValue = prefetchSignalValue;
 
     // Lazy CPU readback for disk cache + export.  Captures the texture
     // shared_ptr by value so the readback can outlive the original

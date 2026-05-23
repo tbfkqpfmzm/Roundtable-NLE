@@ -83,6 +83,21 @@ public:
     /// Wall-clock timestamp of the last advance call.
     [[nodiscard]] std::chrono::steady_clock::time_point lastAdvanceTime() const noexcept;
 
+    // ── Diagnostics ─────────────────────────────────────────────────────
+
+    /// The raw audio-played position (m_tick) WITHOUT wall-clock
+    /// extrapolation.  Reflects only positions actually consumed by
+    /// audio callbacks.  Use alongside currentTick() to detect whether
+    /// extrapolation is racing ahead of audio (e.g., audio thread
+    /// stalled, or speed multiplier produced a runaway clock).
+    [[nodiscard]] int64_t masterTick() const noexcept {
+        return m_tick.load(std::memory_order_acquire);
+    }
+
+    /// Milliseconds since the most recent advance() call.  >100ms during
+    /// active playback typically indicates the audio thread is blocked.
+    [[nodiscard]] double msSinceLastAdvance() const noexcept;
+
 private:
     std::atomic<int64_t>  m_tick{0};           // Master position in ticks
     std::atomic<int64_t>  m_lastVideoTick{0};  // Last displayed video PTS

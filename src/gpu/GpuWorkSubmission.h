@@ -67,6 +67,23 @@ public:
     /// Submit with an optional semaphore to signal after command completion.
     bool submit(VkQueue queue, VkSemaphore signalSemaphore, std::mutex* queueLock = nullptr);
 
+    /// Submit with an external signal semaphore AND an optional
+    /// producer-side timeline wait (UPGRADE_PLAN Path C optimisation,
+    /// 2026-05-22).  When `waitSem != VK_NULL_HANDLE`, the submission's
+    /// VkSubmitInfo is given a VkTimelineSemaphoreSubmitInfo pNext that
+    /// waits on `waitSem` at `waitValue` at the COMPUTE_SHADER stage,
+    /// so the GPU does not begin executing this submission's compute
+    /// dispatches until the producer's signal has reached `waitValue`.
+    ///
+    /// `waitSem` must be a timeline semaphore (VK_SEMAPHORE_TYPE_TIMELINE).
+    /// `waitValue == 0` is treated as "no wait" since 0 is the timeline
+    /// semaphore's initial value and waiting for it is meaningless.
+    bool submitWithTimelineWait(VkQueue queue,
+                                 VkSemaphore signalSemaphore,
+                                 VkSemaphore waitSem,
+                                 uint64_t    waitValue,
+                                 std::mutex* queueLock = nullptr);
+
     /// Submit and wait for completion (legacy single-shot usage).
     bool submitAndWait(VkQueue queue, std::mutex* queueLock = nullptr);
 

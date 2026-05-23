@@ -65,14 +65,17 @@
 namespace rt {
 
 std::atomic<bool> CompositeService::s_modalDialogActive{false};
-std::atomic<bool> CompositeService::s_gpuResidentDecode{false};
+// UPGRADE_PLAN: GPU-resident decode + CUDA↔Vulkan zero-copy default-on.
+// Set ROUNDTABLE_GPU_RESIDENT_DECODE=0 (or "false"/"off"/"no") in the
+// environment to force the legacy CPU upload path — the env var is
+// now a kill switch, not an opt-in.
+std::atomic<bool> CompositeService::s_gpuResidentDecode{true};
 
 namespace {
-// UPGRADE_PLAN: env-var toggle for the GPU-resident decode flag so it
-// can be flipped at startup without recompiling.  Read once at first
-// CompositeService construction.  Accepts "1", "true", "TRUE", "on",
-// "yes" as true; anything else (including unset) leaves the flag at
-// its compile-time default of false.
+// Env-var kill switch.  Read once at first CompositeService construction.
+// Empty / unset → leave at compile-time default (ON).
+// "0"/"false"/"FALSE"/"off"/"no" → force OFF.
+// Anything else → leave at compile-time default (ON).
 void initGpuResidentDecodeFromEnv()
 {
     static std::once_flag once;
@@ -82,24 +85,27 @@ void initGpuResidentDecodeFromEnv()
         size_t len = 0;
         if (getenv_s(&len, buf, sizeof(buf),
                      "ROUNDTABLE_GPU_RESIDENT_DECODE") != 0 || len == 0)
-            return;
+            return;  // unset → keep default (ON)
         const std::string v(buf);
 #else
         const char* e = std::getenv("ROUNDTABLE_GPU_RESIDENT_DECODE");
-        if (!e) return;
+        if (!e) return;  // unset → keep default (ON)
         const std::string v(e);
 #endif
-        const bool on = v == "1" || v == "true" || v == "TRUE"
-                     || v == "on" || v == "yes";
-        if (on) {
-            CompositeService::setGpuResidentDecode(true);
-            // warn so it survives the warn+ logger filter and you can
-            // confirm at a glance that the flag actually flipped.
-            spdlog::warn("UPGRADE_PLAN: GPU-resident decode ENABLED "
-                         "via ROUNDTABLE_GPU_RESIDENT_DECODE={}", v);
+        const bool kill = v == "0" || v == "false" || v == "FALSE"
+                       || v == "off" || v == "OFF"
+                       || v == "no"  || v == "NO";
+        if (kill) {
+            CompositeService::setGpuResidentDecode(false);
+            // warn so it survives the warn+ logger filter — flag changes
+            // at startup are operationally important.
+            spdlog::warn("UPGRADE_PLAN: GPU-resident decode DISABLED "
+                         "via ROUNDTABLE_GPU_RESIDENT_DECODE={} "
+                         "(legacy CPU upload path)", v);
         } else {
-            spdlog::warn("UPGRADE_PLAN: ROUNDTABLE_GPU_RESIDENT_DECODE={} "
-                         "(not enabled — set to 1/true/on to flip)", v);
+            spdlog::warn("UPGRADE_PLAN: GPU-resident decode ENABLED "
+                         "(ROUNDTABLE_GPU_RESIDENT_DECODE={}; "
+                         "set =0 to force the legacy path)", v);
         }
     });
 }

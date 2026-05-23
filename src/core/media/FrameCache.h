@@ -105,6 +105,23 @@ struct CachedFrame
     mutable std::atomic<uint64_t> gpuSemaphore{0};
     bool     gpuReady{false};
 
+    /// Producer-side timeline semaphore + value used for cross-queue
+    /// memory visibility (UPGRADE_PLAN Path C optimisation, 2026-05-22).
+    /// When this frame's GPU texture was written by a prefetch worker
+    /// on the compute queue and is now going to be sampled by the
+    /// compositor on the graphics queue, the compositor must wait on
+    /// this (semaphore, value) pair before its sample reads.  The
+    /// wait is added to the compositor's VkSubmitInfo via a
+    /// VkTimelineSemaphoreSubmitInfo in pNext, so the synchronisation
+    /// happens GPU-side without blocking the prefetch worker thread.
+    ///
+    /// Storage as uint64_t (instead of VkSemaphore) keeps Vulkan
+    /// headers out of FrameCache.h; the GPU layer reinterprets the
+    /// handle on use.  0 = no producer semaphore (CPU-decode path,
+    /// composite output, or scaled / lazyReadback-only frames).
+    uint64_t producerTimelineSem{0};
+    uint64_t producerTimelineValue{0};
+
     /// Opaque shared ownership of GPU resources (e.g., shared_ptr<Texture>).
     /// When all CachedFrame copies referencing this owner are destroyed,
     /// the GPU texture is released.  Keeps gpuImageView/gpuSampler valid.
@@ -132,14 +149,30 @@ struct CachedFrame
         return !pixels.empty();
     }
 
-    /// Total memory used by this frame (CPU pixels + estimated GPU VRAM)
+    /// CPU memory footprint of this frame: pixel data + struct overhead.
+    ///
+    /// IMPORTANT (2026-05-22 architectural fix): the GPU texture VRAM
+    /// is intentionally NOT counted here.  Co-owning a GPU texture via
+    /// gpuTextureOwner is transient — the compositor moves sole
+    /// ownership to GpuTextureCache on first use (see
+    /// CompositeServiceLayerBuild's putShared + reset sequence), so a
+    /// FrameCache entry typically holds the texture for ≤ one composite
+    /// cycle.  Counting W*H*4 against this cache's budget produced two
+    /// bad outcomes:
+    ///
+    ///   1. A 32 GB FrameCache budget on a 64 GB system tried to keep
+    ///      ~32 GB of VRAM alive on a 24 GB GPU → driver paged or
+    ///      evicted textures from under us → vkQueueSubmit access
+    ///      violation → VK_ERROR_DEVICE_LOST.
+    ///   2. The dual ownership (FrameCache + GpuTextureCache) meant
+    ///      VRAM could not be released until BOTH caches evicted the
+    ///      same entry, defeating GpuTextureCache's LRU.
+    ///
+    /// VRAM is now managed solely by GpuTextureCache.  This function
+    /// reports only what FrameCache actually controls: CPU bytes.
     [[nodiscard]] size_t memoryUsage() const noexcept
     {
-        size_t mem = pixels.size() + sizeof(*this);
-        // Account for GPU texture VRAM so the LRU cache can evict properly
-        if (gpuTextureOwner)
-            mem += static_cast<size_t>(width) * height * 4;
-        return mem;
+        return pixels.size() + sizeof(*this);
     }
 
 private:
@@ -261,6 +294,32 @@ public:
     /// Set the capacity in bytes. May trigger evictions.
     void setCapacity(size_t capacityBytes);
 
+    /// Set an upper bound on entry count.  GPU-resident frames have
+    /// near-zero memoryUsage() (empty CPU pixel vectors + struct
+    /// overhead ≈ 200 bytes) but each still pins an 8 MB VkImage via
+    /// CachedFrame::gpuTextureOwner if the compositor has not yet
+    /// consumed the frame to transfer ownership to GpuTextureCache.
+    /// Without an entry-count ceiling, byte-based eviction never fires
+    /// for GPU-resident-only workloads — orphan textures pile up in
+    /// FrameCache and exhaust VRAM after ~45 s of continuous playback,
+    /// producing the "playback slows to a crawl" symptom documented
+    /// in logs around the 13:40-13:41 perf window.
+    ///
+    /// When the live entry count exceeds this cap, evictUntilFits runs
+    /// pass 1 (behind-playhead) and falls through to pass 2 (pure LRU)
+    /// just as it does for byte-pressure.  May trigger evictions when
+    /// called.  Pass 0 leaves the count uncapped (legacy behaviour).
+    void setMaxEntries(size_t maxEntries);
+
+    /// Current max-entries cap.  0 = uncapped.
+    [[nodiscard]] size_t maxEntries() const noexcept;
+
+    /// Number of entries whose CachedFrame still holds gpuTextureOwner —
+    /// each pins an 8 MB VkImage (1080p BGRA) in VRAM.  Reported in the
+    /// CACHE-DUMP perf line so an operator can spot orphan-texture
+    /// accumulation directly.
+    [[nodiscard]] size_t gpuCoOwnedCount() const;
+
     // ── Statistics ──────────────────────────────────────────────────────
 
     [[nodiscard]] CacheStats stats() const;
@@ -299,6 +358,19 @@ private:
     {
         std::shared_ptr<CachedFrame> frame;
         LruIterator                  lruIt;
+        // Memory footprint recorded AT PUT TIME (immutable for the
+        // lifetime of this entry).  CachedFrame::pixels can grow after
+        // insertion when lazyReadback materialises GPU pixels into CPU
+        // memory (e.g., DiskFrameCache's writer thread requesting CPU
+        // pixels for a GPU-resident frame).  If the cache used a live
+        // memoryUsage() at evict time, the eviction would subtract a
+        // LARGER number than was added at put, underflowing m_used and
+        // triggering catastrophic "cache thinks it has 17.6 TB"
+        // eviction storms — observed in perf_log.txt at 2026-05-22
+        // 13:17:56 (frameMB=17592186033566/1023 frameN=1).  Recording
+        // the size once locks the accounting symmetric regardless of
+        // later pixel materialisation.
+        size_t                       sizeBytes{0};
     };
 
     void evictUntilFits(size_t neededBytes);
@@ -308,6 +380,11 @@ private:
     LruList                                                    m_lru;
     size_t                                                     m_capacity;
     size_t                                                     m_used{0};
+    // Hard ceiling on entry count.  See setMaxEntries() for rationale.
+    // Default 2000 — at 30 fps single-track this covers ~67 s of
+    // prefetch/follow-up state; multi-track projects share the same
+    // budget.  CacheCoordinator tunes this per GPU VRAM.  0 = uncapped.
+    size_t                                                     m_maxEntries{2000};
 
     // Playhead positions per media handle (for smart eviction)
     std::unordered_map<uint64_t, int64_t>                      m_playheads;

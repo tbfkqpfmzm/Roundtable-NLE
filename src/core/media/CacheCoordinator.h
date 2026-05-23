@@ -92,6 +92,21 @@ public:
     /// 5% of free space on the cache drive, clamped 4-32 GB.
     [[nodiscard]] size_t recommendedDiskCacheBudget() const noexcept;
 
+    /// Recommended hard cap on FrameCache entry count.  Derived from VRAM
+    /// budget: each GPU-resident CachedFrame may hold an 8 MB VkImage via
+    /// CachedFrame::gpuTextureOwner, so the cap bounds VRAM exposure to
+    /// roughly half the GpuTextureCache budget.  Falls back to a safe
+    /// default when VRAM is unknown.
+    [[nodiscard]] size_t recommendedFrameCacheMaxEntries(
+        size_t deviceVramBytes) const noexcept;
+
+    /// Recommended hard cap on GpuTextureCache entry count
+    /// (UPGRADE_PLAN 2026-05-22 v3 — Premiere-style bounded working set).
+    /// See implementation for the rationale; in short: small number,
+    /// not a percentage of VRAM.
+    [[nodiscard]] size_t recommendedGpuTexCacheMaxEntries(
+        size_t deviceVramBytes) const noexcept;
+
     // ── Per-frame hook ─────────────────────────────────────────────────────
 
     /// Called after each composited frame (from the composite thread).
