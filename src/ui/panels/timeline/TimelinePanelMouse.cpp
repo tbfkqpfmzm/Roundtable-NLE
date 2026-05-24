@@ -11,6 +11,8 @@
 #include "timeline/Timeline.h"
 #include "timeline/Track.h"
 #include "timeline/Clip.h"
+#include "timeline/VideoClip.h"
+#include "timeline/AudioClip.h"
 #include "timeline/GraphicClip.h"
 #include "timeline/EditOperations.h"
 #include "timeline/Transition.h"
@@ -45,6 +47,8 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
         if (m_ghostOverlay) m_ghostOverlay->hide();
         if (m_marqueeScrollTimer) m_marqueeScrollTimer->stop();
         m_marqueeLastMovePos = QPointF();
+        if (m_clipDragScrollTimer) m_clipDragScrollTimer->stop();
+        m_clipDragLastMovePos = QPointF();
         if (m_rubberBand) m_rubberBand->hide();
         setCursor(Qt::ArrowCursor);
         for (auto tw : m_trackWidgets)
@@ -412,6 +416,11 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
             }
 
             bool isShift = event->modifiers() & Qt::ShiftModifier;
+            // Alt held at press = "disable smart link" — Premiere uses Alt
+            // to grab just one side of a linked A/V pair for an isolated
+            // drag/select. Alt also triggers the copy-on-release path, so
+            // we just check it here without consuming.
+            bool isAlt = event->modifiers() & Qt::AltModifier;
 
             // If clicking on an already-selected clip WITHOUT shift,
             // defer the decision: if the user drags, move all selected clips;
@@ -420,6 +429,12 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
             bool alreadySelected = m_selection.isSelected(*hitRef);
             if (isShift) {
                 m_selection.toggleClip(*hitRef);
+                // Carry the link partner along with the toggle: if the
+                // clicked clip is now selected, add its partners; if it
+                // was just deselected, drop them too. Alt skips this so
+                // shift+alt+click peels off just one side of the pair.
+                if (!isAlt)
+                    setLinkPartnersSelected(*hitRef, m_selection.isSelected(*hitRef));
                 emit selectionChanged();
                 // Shift-click only toggles selection - don't initiate drag/trim
                 m_dragMode = DragMode::None;
@@ -439,6 +454,11 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
             // Not already selected - immediately select just this clip
             m_selection.clear();
             m_selection.selectClip(*hitRef, false);
+            // Premiere A/V link: clicking one side of a linked pair selects
+            // both, so dragging moves them together. Alt at press disables
+            // this so the user can grab just one side.
+            if (!isAlt)
+                setLinkPartnersSelected(*hitRef, true);
             emit selectionChanged();
 
             // Emit clipSelected so the Properties Panel updates
@@ -449,66 +469,15 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
                     emit clipSelected(hitRef->trackIndex, clipIdx);
             }
 
-            // Body of the clip was clicked — initiate a move drag.  Edge
-            // clicks were intercepted by the bracket branch above, so
-            // here we always fall through to ClipMove.
+            // Body of the clip was clicked — defer the drag commit through
+            // PendingClipClick so the cursor must move past ~5 px before the
+            // clip starts following. Edge clicks were intercepted by the
+            // bracket branch above. The promotion path in mouseMoveEvent
+            // does the snap-engine + per-clip snapshot work on first real
+            // move; doing it lazily avoids per-press cost on simple clicks
+            // and lets us share one deadzone with the already-selected case.
             m_dragClipRef = *hitRef;
-
-            Track* track = m_timeline->track(hitRef->trackIndex);
-            size_t idx = track->findClipIndexById(hitRef->clipId);
-            if (idx < track->clipCount())
-            {
-                const Clip* clip = track->clip(idx);
-                m_dragOriginalIn = clip->timelineIn();
-                m_dragOriginalSourceIn = clip->sourceIn();
-                m_dragOriginalDuration = clip->duration();
-                m_dragOriginalTrack = hitRef->trackIndex;
-
-                {
-                    m_dragMode = DragMode::ClipMove;
-                    m_lastClickedEdge.valid = false;
-
-                    // Record original positions of ALL selected clips
-                    // so we can move them together as a group.  Also
-                    // snapshot any transitions referencing each clip
-                    // on its current track — the live-drag preview
-                    // will drop them when it removes+adds the clip
-                    // across tracks, and we replay them on release so
-                    // moveClipToTrack can carry them to the destination.
-                    m_dragSelectedClips.clear();
-                    m_dragTargetTrack = hitRef->trackIndex;
-                    for (const auto& sel : m_selection.clips()) {
-                        Track* selTrack = m_timeline->track(sel.trackIndex);
-                        if (!selTrack) continue;
-                        size_t si = selTrack->findClipIndexById(sel.clipId);
-                        if (si < selTrack->clipCount()) {
-                            DragClipState dcs;
-                            dcs.ref = sel;
-                            dcs.originalIn = selTrack->clip(si)->timelineIn();
-                            dcs.originalTrack = sel.trackIndex;
-                            for (const auto& t : selTrack->transitions()) {
-                                if (t.leftClipId == sel.clipId
-                                 || t.rightClipId == sel.clipId)
-                                    dcs.originalTransitions.push_back(t);
-                            }
-                            m_dragSelectedClips.push_back(dcs);
-                        }
-                    }
-                }
-
-                // Initialize snap engine for this drag operation
-                m_snapEngine.setPixelsPerSecond(m_layoutEngine.pixelsPerSecond());
-                {
-                    std::vector<uint64_t> excludeIds;
-                    if (m_dragMode == DragMode::ClipMove) {
-                        for (const auto& sel : m_selection.clips())
-                            excludeIds.push_back(sel.clipId);
-                    } else {
-                        excludeIds.push_back(m_dragClipRef.clipId);
-                    }
-                    m_snapEngine.buildTargets(*m_timeline, m_playheadTick, 0.0, excludeIds);
-                }
-            }
+            m_dragMode    = DragMode::PendingClipClick;
         }
         else
         {
@@ -692,7 +661,49 @@ void TimelinePanel::mousePressEvent(QMouseEvent* event)
                     m_rollRightOrigIn    = rc->timelineIn();
                     m_rollRightOrigDur   = rc->duration();
                     m_rollRightOrigSrcIn = rc->sourceIn();
+
+                    // Precompute live-drag bounds that match the commit
+                    // clamp — so the seam stops at exactly the tick it
+                    // will land on, not somewhere past and snap back.
+                    int64_t minEP = m_rollLeftOrigIn;
+                    int64_t maxEP = m_rollRightOrigIn + m_rollRightOrigDur;
+
+                    // Right clip's head can't roll past its source's
+                    // start (sourceIn must stay >= 0). Skip for video
+                    // characters which have no finite source media.
+                    bool rightHasSrcLimit = false;
+                    if (auto* vc = dynamic_cast<const VideoClip*>(rc))
+                        rightHasSrcLimit = !vc->isVideoCharacter();
+                    else if (dynamic_cast<const AudioClip*>(rc))
+                        rightHasSrcLimit = true;
+                    if (rightHasSrcLimit && m_rollRightOrigSrcIn > 0)
+                        minEP = std::max(minEP, m_rollRightOrigIn - m_rollRightOrigSrcIn);
+
+                    // Left clip's tail can't extend past its source media.
+                    int64_t leftSrcDur = 0;
+                    if (auto* vc = dynamic_cast<const VideoClip*>(lc)) {
+                        if (!vc->isVideoCharacter()) leftSrcDur = vc->sourceDuration();
+                    } else if (auto* ac = dynamic_cast<const AudioClip*>(lc)) {
+                        leftSrcDur = ac->sourceDuration();
+                    }
+                    if (leftSrcDur > 0)
+                        maxEP = std::min(maxEP, m_rollLeftOrigIn + leftSrcDur - m_rollLeftOrigSrcIn);
+
+                    // Degenerate (no valid roll range) shouldn't crash —
+                    // collapse to the original seam.
+                    if (minEP > maxEP) {
+                        minEP = m_rollOriginalEditPoint;
+                        maxEP = m_rollOriginalEditPoint;
+                    }
+                    m_rollMinEditPoint = minEP;
+                    m_rollMaxEditPoint = maxEP;
                 }
+
+                // Show the edit-point brackets immediately at the seam so
+                // the user has a visible "you grabbed this edit point"
+                // affordance from the first frame of the drag.
+                setEditPointSelection(m_rollTrackIndex, m_rollOriginalEditPoint,
+                                       EditPointSide::Both);
 
                 // Initialize snap engine for rolling edit
                 m_snapEngine.setPixelsPerSecond(m_layoutEngine.pixelsPerSecond());

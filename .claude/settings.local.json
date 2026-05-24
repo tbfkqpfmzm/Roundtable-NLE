@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "PowerShell(powershell -ExecutionPolicy Bypass -File build.ps1 -Config RelWithDebInfo)",
-      "Bash(git log *)"
+      "Bash(git log *)",
+      "Bash(cmake --build build --config Release --target roundtable -- -m)"
     ]
   }
 }

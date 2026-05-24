@@ -245,8 +245,12 @@ void TimelinePanel::setupLayout()
         }
     });
 
-    // Ghost track overlay (not in any layout — positioned absolutely via setGeometry)
+    // Ghost track overlay (not in any layout — positioned absolutely via setGeometry).
+    // A second instance handles the companion side of a video+audio drag, so we
+    // can show individual clip outlines on BOTH the video destination row AND
+    // the audio destination row simultaneously when dragging multi-clip groups.
     m_ghostOverlay = new GhostTrackOverlay(this);
+    m_ghostOverlayAudio = new GhostTrackOverlay(this);
 
     // Playhead overlay — a transparent widget parented to the scroll viewport
     // that draws only the thin playhead line.  Repositioning this tiny widget

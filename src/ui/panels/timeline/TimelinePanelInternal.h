@@ -32,6 +32,12 @@ class GhostTrackOverlay : public QWidget
 public:
     bool isAbove = true;
     bool reorderMode = false;  // when true, paint as thin insertion bar
+    // When true the overlay is positioned over an EXISTING track row
+    // (e.g. multi-clip drop on a current track), so the full-rect tint
+    // and dashed border are suppressed — only the individual clip
+    // outlines are drawn. Premiere doesn't highlight target tracks
+    // during drag; it only previews the clips themselves.
+    bool onExistingTrack = false;
 
     struct GhostClipPreview {
         int x{0};          // left edge in overlay-local coords
@@ -70,18 +76,24 @@ protected:
             return;
         }
 
-        QColor ghostColor = isAbove
-            ? QColor(80, 130, 200, 60)    // video = blue tint
-            : QColor(60, 160, 90, 60);    // audio = green tint
-        QColor borderColor = isAbove
-            ? QColor(80, 130, 200, 140)
-            : QColor(60, 160, 90, 140);
+        // Only paint the track-row tint + dashed border when we're
+        // previewing a brand-new track. On an existing track the
+        // background must stay clean — Premiere shows only the clip
+        // outlines, not a full-row highlight.
+        if (!onExistingTrack) {
+            QColor ghostColor = isAbove
+                ? QColor(80, 130, 200, 60)    // video = blue tint
+                : QColor(60, 160, 90, 60);    // audio = green tint
+            QColor borderColor = isAbove
+                ? QColor(80, 130, 200, 140)
+                : QColor(60, 160, 90, 140);
 
-        p.fillRect(rect(), ghostColor);
+            p.fillRect(rect(), ghostColor);
 
-        QPen pen(borderColor, 2, Qt::DashLine);
-        p.setPen(pen);
-        p.drawRect(rect().adjusted(1, 1, -1, -1));
+            QPen pen(borderColor, 2, Qt::DashLine);
+            p.setPen(pen);
+            p.drawRect(rect().adjusted(1, 1, -1, -1));
+        }
 
         // Draw clip previews within the ghost track
         const int h = rect().height();
@@ -115,8 +127,9 @@ protected:
             }
         }
 
-        // Draw the "+ New Track" label if no clips are showing
-        if (m_clipPreviews.empty()) {
+        // "+ New Track" label only makes sense when we're previewing
+        // a brand-new track row; suppress on existing tracks.
+        if (m_clipPreviews.empty() && !onExistingTrack) {
             p.setPen(QColor(200, 200, 200, 180));
             QFont f = p.font();
             f.setPixelSize(12);

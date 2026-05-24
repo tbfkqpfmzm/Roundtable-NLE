@@ -34,8 +34,14 @@ struct SharedAllocation
     void*    winHandle{nullptr};      // HANDLE (Win32 for export)
     uint32_t width{0};
     uint32_t height{0};
-    size_t   sizeBytes{0};           // Total buffer size (W*H*3/2 for NV12)
+    size_t   sizeBytes{0};           // Total buffer size — NV12 = W*H*3/2,
+                                     // P010 = W*H*3 (samples are 2 bytes)
     size_t   allocSize{0};           // Actual VkDeviceMemory allocation size
+    bool     tenBit{false};          // true = P010/P016 (16-bit samples,
+                                     // upper 10-bit data); false = NV12 8-bit.
+                                     // Pool matching keys on this so an
+                                     // 8-bit alloc never gets handed out to
+                                     // a P010 caller (or vice versa).
     bool     valid{false};
 
     SharedAllocation() = default;
@@ -68,11 +74,12 @@ public:
     /// Check if interop is available and initialized.
     [[nodiscard]] bool isAvailable() const noexcept { return m_available; }
 
-    /// Acquire a shared NV12 buffer accessible from both CUDA and Vulkan.
-    /// Prefers returning a pooled allocation with matching dimensions.
-    /// Size = width * height * 3 / 2 bytes (NV12 format).
+    /// Acquire a shared NV12 / P010 buffer accessible from both CUDA and
+    /// Vulkan.  Prefers returning a pooled allocation with matching
+    /// dimensions AND bit-depth.
+    /// Size: NV12 = W*H*3/2 bytes, P010 = W*H*3 bytes.
     [[nodiscard]] std::unique_ptr<SharedAllocation> allocate(
-        uint32_t width, uint32_t height);
+        uint32_t width, uint32_t height, bool tenBit = false);
 
     /// Release a shared allocation back to the pool (or destroy if pool is full).
     void free(std::unique_ptr<SharedAllocation> alloc);
@@ -89,6 +96,19 @@ public:
     /// Signals an external timeline semaphore when done (no CPU stall).
     /// Use vkSemaphore() / lastSignalValue() to pass to Vulkan wait.
     bool copyNv12FromCuda(SharedAllocation& alloc,
+                          const void* srcY, int yPitch,
+                          const void* srcUV, int uvPitch,
+                          uint32_t width, uint32_t height);
+
+    /// Copy P010 / P016 planes from CUDA device memory to the shared
+    /// Vulkan buffer.  Identical contract to copyNv12FromCuda, but each
+    /// sample is 2 bytes (16-bit word, upper 10 or all 16 bits valid).
+    /// The shared buffer layout matches NV12's plane order but at 2× the
+    /// byte count per sample:
+    ///   Y plane:  offset 0,            W*H*2 bytes, tight pitch = W*2.
+    ///   UV plane: offset W*H*2,        W*H bytes,   tight pitch = W*2.
+    /// The alloc MUST have been obtained via allocate(w,h,/*tenBit=*/true).
+    bool copyP010FromCuda(SharedAllocation& alloc,
                           const void* srcY, int yPitch,
                           const void* srcUV, int uvPitch,
                           uint32_t width, uint32_t height);
@@ -181,7 +201,7 @@ private:
 
     /// Actually create a new shared allocation (bypasses pool).
     [[nodiscard]] std::unique_ptr<SharedAllocation> allocateNew(
-        uint32_t width, uint32_t height);
+        uint32_t width, uint32_t height, bool tenBit = false);
 
     /// Actually destroy a shared allocation (bypasses pool).
     void freeImmediate(std::unique_ptr<SharedAllocation> alloc);

@@ -171,6 +171,22 @@ public:
     /// destroys GPU resources, and prevents new work from starting.
     void shutdown();
 
+    /// Set the shutdown flag WITHOUT destroying GPU resources yet.
+    /// Call this EARLY in App::~App (Phase 1) so any compositeFrame
+    /// invoked during the subsequent Qt widget-tree teardown (via
+    /// signals fired by destroyed widgets) returns nullptr immediately
+    /// instead of running the full composite path on a partially-
+    /// torn-down timeline / project.  The full shutdown() still runs
+    /// later at the normal point.
+    ///
+    /// Without this, the Qt deleteChildren cascade in
+    /// MainWindow::~MainWindow can re-enter compositeFrame, which then
+    /// AVs on stale container state (the May 2026 deterministic crash
+    /// at roundtable.exe+0x3DE88B observed across multiple sessions).
+    void requestShutdown() noexcept {
+        m_shutdown.store(true, std::memory_order_release);
+    }
+
     // ── Cache management ────────────────────────────────────────────────
     /// Invalidate composite result LRU (thread-safe, lock-free flag).
     /// Immediately clears m_lastGoodComposite so stale frames are not

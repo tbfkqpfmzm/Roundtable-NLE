@@ -5,7 +5,9 @@
 #include "Constants.h"
 #include "timeline/Clip.h"
 
+#include <climits>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -157,8 +159,17 @@ public:
     /// The current targets (for UI visualization of snap lines).
     [[nodiscard]] const std::vector<SnapTarget>& targets() const noexcept { return m_targets; }
 
+    /// Drop sticky-snap state. Call when a drag/operation ends so the next
+    /// session starts fresh. Also invoked automatically by buildTargets().
+    void resetHysteresis() const noexcept;
+
     /// Default snap threshold in pixels.
     static constexpr double kDefaultThresholdPx = 10.0;
+
+    /// Release threshold = attract threshold * this. Premiere-style sticky
+    /// snap: once locked onto a seam, the user must drag past a wider zone
+    /// to break free. Prevents twitchy snap-on/snap-off near targets.
+    static constexpr double kReleaseMultiplier = 1.7;
 
 private:
     bool   m_enabled{true};
@@ -166,8 +177,22 @@ private:
     double m_pps{100.0};
     std::vector<SnapTarget> m_targets;
 
+    /// Hysteresis: tick of the target we're currently locked onto (or
+    /// INT64_MIN when not stuck). Mutable so snap() / snapPair() can remain
+    /// logically const while caching per-session lock state.
+    mutable int64_t          m_stuckTick{INT64_MIN};
+    mutable SnapTarget::Type m_stuckType{SnapTarget::Type::GridLine};
+
     /// Convert pixel threshold to a tick threshold.
     [[nodiscard]] int64_t thresholdTicks() const;
+
+    struct AttractHit {
+        int64_t          tick{0};
+        int64_t          dist{std::numeric_limits<int64_t>::max()};
+        SnapTarget::Type type{SnapTarget::Type::GridLine};
+        bool             found{false};
+    };
+    [[nodiscard]] AttractHit findNearestAttract(int64_t tick, int64_t attractTicks) const;
 };
 
 // ─── Clipboard ───────────────────────────────────────────────────────────────
@@ -259,6 +284,15 @@ public:
     [[nodiscard]] static std::unique_ptr<Command> closeGap(
         Timeline& timeline, size_t trackIndex,
         int64_t gapStart, int64_t gapEnd);
+
+    /// Open a gap: shift all clips whose start is at or after insertTick
+    /// right by insertDuration. Used by Ctrl+drop to ripple-push existing
+    /// clips out of the way so the dropped clip inserts rather than
+    /// overwriting. Sync-locked tracks shift too, matching closeGap().
+    /// Returns nullptr if nothing needed to move.
+    [[nodiscard]] static std::unique_ptr<Command> openGap(
+        Timeline& timeline, size_t trackIndex,
+        int64_t insertTick, int64_t insertDuration);
 
     // ── Slip ────────────────────────────────────────────────────────────
 

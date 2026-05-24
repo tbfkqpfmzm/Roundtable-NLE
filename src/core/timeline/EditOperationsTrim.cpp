@@ -717,6 +717,48 @@ std::unique_ptr<Command> EditOperations::closeGap(
     return anyMoved ? std::move(compound) : nullptr;
 }
 
+std::unique_ptr<Command> EditOperations::openGap(
+    Timeline& timeline, size_t trackIndex,
+    int64_t insertTick, int64_t insertDuration)
+{
+    if (trackIndex >= timeline.trackCount() || insertDuration <= 0)
+        return nullptr;
+
+    auto compound = std::make_unique<CompoundCommand>("Insert (open gap)");
+    bool anyMoved = false;
+
+    Track* track = timeline.track(trackIndex);
+    for (size_t ci = 0; ci < track->clipCount(); ++ci) {
+        const Clip* clip = track->clip(ci);
+        // Only shift clips whose START is at or after the insert point.
+        // Clips that straddle the insert tick are left alone; the drop's
+        // existing overwrite-resolve pass trims them as before.
+        if (clip->timelineIn() >= insertTick) {
+            compound->addCommand(std::make_unique<MoveClipCommand>(
+                track, clip->id(), clip->timelineIn() + insertDuration));
+            anyMoved = true;
+        }
+    }
+
+    // Mirror closeGap(): sync-locked tracks ripple along with the edit.
+    for (size_t ti = 0; ti < timeline.trackCount(); ++ti) {
+        if (ti == trackIndex) continue;
+        Track* otherTrack = timeline.track(ti);
+        if (!otherTrack->isSyncLocked()) continue;
+
+        for (size_t ci = 0; ci < otherTrack->clipCount(); ++ci) {
+            const Clip* clip = otherTrack->clip(ci);
+            if (clip->timelineIn() >= insertTick) {
+                compound->addCommand(std::make_unique<MoveClipCommand>(
+                    otherTrack, clip->id(), clip->timelineIn() + insertDuration));
+                anyMoved = true;
+            }
+        }
+    }
+
+    return anyMoved ? std::move(compound) : nullptr;
+}
+
 // ─── Slip ────────────────────────────────────────────────────────────────────
 
 std::unique_ptr<Command> EditOperations::slipClip(

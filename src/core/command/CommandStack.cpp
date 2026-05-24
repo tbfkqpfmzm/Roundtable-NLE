@@ -4,6 +4,7 @@
  */
 
 #include "command/CommandStack.h"
+#include "command/Command.h"  // for MacroCommand
 
 #include <spdlog/spdlog.h>
 
@@ -22,6 +23,12 @@ void CommandStack::execute(std::unique_ptr<Command> cmd)
 
     // Always execute first (apply the change)
     cmd->execute();
+
+    // During a macro, buffer the command instead of pushing directly
+    if (m_macroDepth > 0 && m_activeMacro) {
+        m_activeMacro->addCommand(std::move(cmd));
+        return;
+    }
 
     // Try to merge with the most recent command (absorb into existing)
     if (!m_undoStack.empty() && m_undoStack.back()->typeId() >= 0
@@ -48,6 +55,12 @@ void CommandStack::execute(std::unique_ptr<Command> cmd)
 void CommandStack::pushWithoutExecute(std::unique_ptr<Command> cmd)
 {
     if (!cmd) return;
+
+    // During a macro, buffer the command instead of pushing directly
+    if (m_macroDepth > 0 && m_activeMacro) {
+        m_activeMacro->addCommand(std::move(cmd));
+        return;
+    }
 
     // Push onto undo stack without calling cmd->execute().
     // The caller is responsible for having already applied the change.
@@ -180,6 +193,40 @@ void CommandStack::trimToMaxDepth()
 void CommandStack::notifyChange()
 {
     if (m_callback) m_callback();
+}
+
+void CommandStack::beginMacro(std::string description)
+{
+    if (m_macroDepth == 0) {
+        m_activeMacro = std::make_unique<MacroCommand>(std::move(description));
+    }
+    ++m_macroDepth;
+    spdlog::trace("CommandStack::beginMacro depth={}", m_macroDepth);
+}
+
+void CommandStack::endMacro()
+{
+    if (m_macroDepth <= 0) {
+        spdlog::warn("CommandStack::endMacro called without matching beginMacro");
+        return;
+    }
+    --m_macroDepth;
+    spdlog::trace("CommandStack::endMacro depth={}", m_macroDepth);
+
+    if (m_macroDepth == 0 && m_activeMacro && !m_activeMacro->empty()) {
+        std::string desc = m_activeMacro->description();
+        size_t count = m_activeMacro->size();
+
+        m_undoStack.push_back(std::move(m_activeMacro));
+        m_redoStack.clear();
+        trimToMaxDepth();
+        notifyChange();
+
+        spdlog::trace("Pushed macro command: {} ({} children, undo depth: {})",
+                      desc, count, m_undoStack.size());
+    }
+    // Clean up if empty or after pushing
+    m_activeMacro.reset();
 }
 
 } // namespace rt

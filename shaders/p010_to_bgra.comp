@@ -1,0 +1,63 @@
+#version 450
+// P010 → BGRA color-space conversion compute shader.
+//
+// P010 is the 10-bit equivalent of NV12 — NVDEC's native output for
+// HEVC 10-bit and AV1 10-bit streams.  Layout matches NV12 (Y + interleaved
+// UV, 4:2:0 chroma subsampling) but each sample is stored as a uint16
+// with the actual 10-bit value in the upper 10 bits (bottom 6 bits zero).
+//
+// P010 layout:
+//   Plane 0 (Y):  W × H 16-bit samples  (R16_UNORM)
+//   Plane 1 (UV): W/2 × H/2 16-bit pairs (R16G16_UNORM)
+//
+// Sampling math:
+//   R16_UNORM treats the uint16 as data/65535 in [0,1].
+//   With 10-bit data in upper 10 bits, an N-bit value V is stored as V<<6.
+//   So sampled = (V<<6) / 65535 = V * 64/65535 ≈ V/1024.
+//   For studio swing 10-bit (black=64, white=940):
+//     black point  = 64*64/65535   = 0.0625
+//     white point  = 940*64/65535  = 0.9180
+//     swing factor = 1.0 / (0.9180 - 0.0625) = 1.1690
+//
+// BT.709 color matrix is identical to 8-bit — color primaries are bit-
+// depth independent.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// Input planes (R16_UNORM / R16G16_UNORM — sampler returns float [0,1])
+layout(binding = 0) uniform sampler2D yPlane;
+layout(binding = 1) uniform sampler2D uvPlane;
+
+// Output BGRA8 image
+layout(binding = 2, rgba8) uniform writeonly image2D outputImage;
+
+layout(push_constant) uniform PushConstants {
+    int width;
+    int height;
+} pc;
+
+void main()
+{
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= pc.width || pixel.y >= pc.height) return;
+
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(pc.width, pc.height);
+
+    float y = texture(yPlane, uv).r;
+    vec2 cbcr = texture(uvPlane, uv).rg;
+
+    // 10-bit studio swing: black=0.0625, scale=1.1690
+    float y_scaled = clamp((y - 0.0625) * 1.1690, 0.0, 1.0);
+
+    // Chroma center = 512 (10-bit) → stored 512<<6=32768 → sampled 0.5000
+    float cb = cbcr.r - 0.5;
+    float cr = cbcr.g - 0.5;
+
+    // BT.709 YCbCr → RGB (HDTV standard).  Coefficients are bit-depth
+    // independent — only the studio-swing rescale above changes.
+    float r = clamp(y_scaled + 1.5748 * cr,                       0.0, 1.0);
+    float g = clamp(y_scaled - 0.1873 * cb - 0.4681 * cr,         0.0, 1.0);
+    float b = clamp(y_scaled + 1.8556 * cb,                       0.0, 1.0);
+
+    imageStore(outputImage, pixel, vec4(b, g, r, 1.0));
+}

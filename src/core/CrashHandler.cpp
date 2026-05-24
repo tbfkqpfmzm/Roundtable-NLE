@@ -3,6 +3,7 @@
  */
 
 #include "CrashHandler.h"
+#include "WorkerBreadcrumb.h"
 
 #include <spdlog/spdlog.h>
 
@@ -51,6 +52,15 @@ struct CrashHandlerState
 CrashHandlerState& state()
 {
     static CrashHandlerState s;
+    return s;
+}
+
+// Lock-free flag set by App::~App at the start of Phase 1.  The SEH
+// path consults this to decide whether to write the crash_marker.txt
+// (which triggers the next-launch recovery dialog).  See header.
+std::atomic<bool>& shutdownInProgressFlag() noexcept
+{
+    static std::atomic<bool> s{false};
     return s;
 }
 
@@ -456,6 +466,18 @@ LONG WINAPI crashExceptionFilter(EXCEPTION_POINTERS* exInfo)
     //    can occur when the heap is corrupted by the crash.
     appendCrashLogRawStackSafe(s.crashDirW, info.summary.c_str());
 
+    // 2a. Last worker-thread breadcrumb (set by convertDecodedToCacheGpu
+    //     phases).  Anchors the otherwise frame-pointer-only backtrace
+    //     to a human-readable step name so the next crash dump tells us
+    //     which Vulkan phase blew up without needing PDB symbols.
+    //     readLastWorkerStep() is noexcept + lock-free; safe in SEH.
+    {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "  Worker last step: %s",
+                 readLastWorkerStep());
+        appendCrashLogRawStackSafe(s.crashDirW, buf);
+    }
+
     // 3. Write minidump (SEH-protected via helper)
     auto dumpPath = dumpDir / ("crash_" + timestamp() + ".dmp");
     {
@@ -514,7 +536,20 @@ LONG WINAPI crashExceptionFilter(EXCEPTION_POINTERS* exInfo)
     // ── Crash marker (Phase 7.A) ──────────────────────────────────────
     // Write a marker file so the next launch can detect this crash and
     // offer recovery options (reset dock layout, workspace, etc.).
-    sehCall([&] { CrashHandler::writeCrashMarker(info); });
+    //
+    // EXCEPTION: if App::~App has already started its shutdown sequence,
+    // a worker-thread AV during teardown is a known race we don't want
+    // to surface to the user.  The dump + log entries are still written
+    // for forensics, but the marker (which drives the next-launch
+    // recovery dialog) is suppressed.  Without this, every shutdown-time
+    // background-thread crash would falsely tell the user their last
+    // session crashed.
+    if (shutdownInProgressFlag().load(std::memory_order_acquire)) {
+        appendCrashLogRawStackSafe(s.crashDirW,
+            "  (shutdown in progress — suppressing crash marker)");
+    } else {
+        sehCall([&] { CrashHandler::writeCrashMarker(info); });
+    }
 
     // 5. Post-crash callback (SEH-protected via helper)
     if (s.postCrash) {
@@ -758,6 +793,16 @@ void CrashHandler::writeCrashLog(const std::string& message)
 {
     auto& s = state();
     appendCrashLog(s.crashDir / "crash_log.txt", message);
+}
+
+void CrashHandler::notifyShutdownStarted() noexcept
+{
+    shutdownInProgressFlag().store(true, std::memory_order_release);
+}
+
+bool CrashHandler::isShutdownInProgress() noexcept
+{
+    return shutdownInProgressFlag().load(std::memory_order_acquire);
 }
 
 std::filesystem::path CrashHandler::nextDumpPath()

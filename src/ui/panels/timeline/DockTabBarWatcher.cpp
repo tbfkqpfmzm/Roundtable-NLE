@@ -94,8 +94,15 @@ void DockTabBarWatcher::showTabContextMenu(QTabBar* tabBar, int tabIdx,
     }
     QMenu menu(tabBar);
     QPointer<QDockWidget> dock = foundDock;
-    menu.addAction(QObject::tr("Close Tab"), [dock]() {
-        if (dock) dock->close();
+    QPointer<QTabBar> tb = tabBar;
+    menu.addAction(QObject::tr("Close Tab"), [dock, tb, tabIdx]() {
+        if (dock) {
+            dock->close();
+        } else if (tb) {
+            // Non-dock tab bar (e.g. ProjectBin) — emit the standard
+            // tabCloseRequested signal so the owning widget handles it.
+            emit tb->tabCloseRequested(tabIdx);
+        }
     });
     menu.exec(globalPos);
 }

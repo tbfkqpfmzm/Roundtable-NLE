@@ -32,6 +32,7 @@
 #include "GpuContext.h"
 #include "ShutdownPhases.h"
 #include "HardwareDiagnostics.h"
+#include "CrashHandler.h"
 
 #include "QtHelpers.h"
 
@@ -110,6 +111,14 @@ App::~App()
 {
     auto& sm = ShutdownManager::instance();
 
+    // Tell the crash handler we are intentionally shutting down.  Any
+    // background-thread access violation that fires from this point on
+    // is treated as a benign teardown race: the SEH path still writes
+    // the dump + log, but it does NOT write crash_marker.txt — so the
+    // next launch does not pop a spurious "last session crashed"
+    // recovery dialog at the user.  See CrashHandler::notifyShutdownStarted.
+    CrashHandler::notifyShutdownStarted();
+
     // Phase 1: Stop all background threads.
     // A10: explicitly stop the PlaybackScheduler (clock + producer +
     // presenter threads) so they can't call into the CompositeService
@@ -123,6 +132,18 @@ App::~App()
         if (auto* tw = m_mainWindow->timelineWorkspace()) {
             if (auto* pm = tw->programMonitor())
                 pm->stopPlaybackPipeline();
+
+            // Set CompositeService's m_shutdown EARLY (before Qt widget
+            // teardown begins in Phase 3) so any compositeFrame call
+            // triggered by a Qt destroyed() signal during deleteChildren
+            // returns nullptr immediately instead of running the full
+            // composite path on partially-destroyed state.  Fixes the
+            // deterministic SEH ACCESS_VIOLATION at +0x3DE88B observed
+            // across multiple sessions on app close.  shutdown() proper
+            // (which also tears down GPU resources) is still triggered
+            // later via CompositeService's destructor.
+            if (auto* cs = tw->compositeService())
+                cs->requestShutdown();
         }
     }
     if (m_audioEngine) m_audioEngine->shutdown();

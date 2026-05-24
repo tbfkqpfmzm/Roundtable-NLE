@@ -25,6 +25,66 @@
 
 namespace rt {
 
+// Auto-scroll the timeline while a clip drag (move or trim) pegs against
+// the left/right edge of the viewport. Same proximity-ramped curve as the
+// marquee timer; the only twist is that we have to adjust m_dragStart.x()
+// so the cursor-anchored deltaX in mouseMoveEvent stays correct as scroll
+// moves underneath us, then re-fire the move pipeline to slide the clip.
+void TimelinePanel::updateClipDragAutoScroll(const QPointF& pos)
+{
+    m_clipDragLastMovePos = pos;
+
+    if (!m_clipDragScrollTimer) {
+        m_clipDragScrollTimer = new QTimer(this);
+        m_clipDragScrollTimer->setInterval(16);
+        connect(m_clipDragScrollTimer, &QTimer::timeout, this, [this]() {
+            if (m_dragMode != DragMode::ClipMove
+             && m_dragMode != DragMode::ClipTrimHead
+             && m_dragMode != DragMode::ClipTrimTail) {
+                m_clipDragScrollTimer->stop();
+                return;
+            }
+            const int hdr = headerWidth();
+            constexpr int    kEdge = 40;
+            constexpr double kMaxV = 18.0;
+            double dx = 0.0;
+            const double cx = m_clipDragLastMovePos.x();
+            if (cx < hdr + kEdge)
+                dx = -kMaxV * std::clamp((hdr + kEdge - cx) / kEdge, 0.0, 1.0);
+            else if (cx > width() - kEdge)
+                dx =  kMaxV * std::clamp((cx - (width() - kEdge)) / kEdge, 0.0, 1.0);
+            if (dx == 0.0) return;
+
+            const double oldScroll = m_layoutEngine.scrollX();
+            const double newScroll = std::max(0.0, oldScroll + dx);
+            if (newScroll == oldScroll) return;
+            m_layoutEngine.setScrollX(newScroll);
+            // Keep deltaX = pos.x() - m_dragStart.x() consistent as scroll
+            // advances under the (stationary) cursor.
+            m_dragStart.setX(m_dragStart.x() - (newScroll - oldScroll));
+            onScrollChanged();
+
+            // Re-fire the move pipeline so the clip preview slides along
+            // with the new scroll position. The cursor's local position is
+            // unchanged; the adjusted m_dragStart makes deltaX expand.
+            QMouseEvent fake(QEvent::MouseMove,
+                             m_clipDragLastMovePos,
+                             m_clipDragLastMovePos,
+                             mapToGlobal(m_clipDragLastMovePos.toPoint()),
+                             Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            mouseMoveEvent(&fake);
+        });
+    }
+
+    const int hdr = headerWidth();
+    constexpr int kEdge = 40;
+    const bool atEdge = (pos.x() < hdr + kEdge) || (pos.x() > width() - kEdge);
+    if (atEdge && !m_clipDragScrollTimer->isActive())
+        m_clipDragScrollTimer->start();
+    else if (!atEdge && m_clipDragScrollTimer->isActive())
+        m_clipDragScrollTimer->stop();
+}
+
 void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
 {
     if (!m_timeline)
@@ -273,6 +333,7 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
                 m_ghostTrackY = firstTop.y() - m_ghostTrackHeight;
                 if (m_ghostOverlay) {
                     m_ghostOverlay->isAbove = true;
+                    m_ghostOverlay->onExistingTrack = false;  // new-track preview
                     m_ghostOverlay->setGeometry(ghostX, m_ghostTrackY, ghostW, m_ghostTrackHeight);
                     m_ghostOverlay->raise();
                     m_ghostOverlay->show();
@@ -286,6 +347,7 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
                 m_ghostTrackY = lastBot.y();
                 if (m_ghostOverlay) {
                     m_ghostOverlay->isAbove = false;
+                    m_ghostOverlay->onExistingTrack = false;  // new-track preview
                     m_ghostOverlay->setGeometry(ghostX, m_ghostTrackY, ghostW, m_ghostTrackHeight);
                     m_ghostOverlay->raise();
                     m_ghostOverlay->show();
@@ -308,6 +370,16 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
         constexpr double kTrackShiftDeadzone = 18.0;
         if (std::abs(pos.y() - m_dragStart.y()) < kTrackShiftDeadzone)
             trackDeltaLive = 0;
+
+        // ── Shift held = constrain to current track (Premiere-style) ───
+        // Lets the user nudge a clip horizontally without worrying about
+        // accidentally bumping it to a neighbouring track. Checked live
+        // so toggling Shift mid-drag also toggles the constraint.
+        if (QApplication::keyboardModifiers() & Qt::ShiftModifier) {
+            trackDeltaLive = 0;
+            m_ghostTrackVisible = false;
+            if (m_ghostOverlay) m_ghostOverlay->hide();
+        }
 
         // ── Group-safety clamp ──────────────────────────────────────────
         if (trackDeltaLive != 0) {
@@ -366,12 +438,22 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
         }
         onScrollChanged();
 
-        // Update ghost overlay clip previews when ghost track is visible
+        // Update ghost overlay clip previews when ghost track is visible.
+        // Filter by the GHOST's direction so a linked A/V pair doesn't
+        // stuff both clips into the same row: the audio-below ghost shows
+        // only the audio companion, and video-above shows only the video.
+        // The other side stays drawn on its existing track via normal clip
+        // rendering (it didn't actually move, so the rendering is correct).
         if (m_ghostTrackVisible && m_ghostOverlay) {
+            const TrackType ghostType = m_ghostTrackIsAbove
+                                        ? TrackType::Video
+                                        : TrackType::Audio;
             std::vector<GhostTrackOverlay::GhostClipPreview> previews;
             for (const auto& dcs : m_dragSelectedClips) {
                 Track* trk = m_timeline->track(dcs.ref.trackIndex);
                 if (!trk) continue;
+                if (trk->type() != ghostType) continue;  // wrong side, skip
+                if (trk->isDivider()) continue;
                 size_t idx = trk->findClipIndexById(dcs.ref.clipId);
                 if (idx >= trk->clipCount()) continue;
                 const Clip* clip = trk->clip(idx);
@@ -382,7 +464,7 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
                 GhostTrackOverlay::GhostClipPreview gp;
                 gp.x = static_cast<int>(px);
                 gp.width = static_cast<int>(pw);
-                gp.color = dcs.ref.trackIndex < 2 ? 0x4A90D9FF : 0x3CA05AFF;
+                gp.color = (ghostType == TrackType::Video) ? 0x4A90D9FF : 0x3CA05AFF;
                 gp.label = QString::fromStdString(clip->label());
                 previews.push_back(gp);
             }
@@ -411,6 +493,7 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
                 m_trackWidgets[ti]->setGhostDragActive(m_ghostTrackVisible && !perTrack[ti].empty());
             }
         }
+        updateClipDragAutoScroll(pos);
         break;
     }
     case DragMode::ClipTrimHead:
@@ -488,6 +571,7 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
         for (auto tw : m_trackWidgets)
             tw->setHoverEdgeTick(tw->trackIndex() == m_dragClipRef.trackIndex ? newHead : -1);
         onScrollChanged();
+        updateClipDragAutoScroll(pos);
         break;
     }
     case DragMode::ClipTrimTail:
@@ -558,6 +642,7 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
         for (auto tw : m_trackWidgets)
             tw->setHoverEdgeTick(tw->trackIndex() == m_dragClipRef.trackIndex ? newTail : -1);
         onScrollChanged();
+        updateClipDragAutoScroll(pos);
         break;
     }
     case DragMode::SlipTool:
@@ -578,13 +663,24 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
     }
     case DragMode::RollingEdit:
     {
-        int64_t newEditPoint = m_rollOriginalEditPoint + tickDelta;
-        auto result = m_snapEngine.snap(newEditPoint);
-        if (result.didSnap) {
-            newEditPoint = result.snappedTick;
-            setSnapIndicator(result.snappedTick);
-        } else {
+        // Snap first, but respect the precomputed clamp — never let the
+        // snap drag the seam past a source-content limit, otherwise the
+        // indicator would appear at a tick the seam can't actually reach.
+        const int64_t rawEditPoint = m_rollOriginalEditPoint + tickDelta;
+        int64_t newEditPoint = rawEditPoint;
+        auto snapResult = m_snapEngine.snap(rawEditPoint);
+        if (snapResult.didSnap
+            && snapResult.snappedTick >= m_rollMinEditPoint
+            && snapResult.snappedTick <= m_rollMaxEditPoint)
+        {
+            newEditPoint = snapResult.snappedTick;
+            setSnapIndicator(snapResult.snappedTick);
+        }
+        else
+        {
             setSnapIndicator(-1);
+            newEditPoint = std::clamp(rawEditPoint,
+                                      m_rollMinEditPoint, m_rollMaxEditPoint);
         }
 
         Track* rollTrack = m_timeline->track(m_rollTrackIndex);
@@ -592,16 +688,7 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
             size_t li = rollTrack->findClipIndexById(m_rollLeftClipId);
             size_t ri = rollTrack->findClipIndexById(m_rollRightClipId);
             if (li < rollTrack->clipCount() && ri < rollTrack->clipCount()) {
-                int64_t rightEnd = m_rollRightOrigIn + m_rollRightOrigDur;
-                // Minimum: left clip's original in-point AND right clip's
-                // sourceIn can't go below 0 (head can't roll past source start).
-                int64_t minEditPoint = m_rollLeftOrigIn;
-                if (m_rollRightOrigSrcIn > 0) {
-                    int64_t srcLimit = m_rollRightOrigIn - m_rollRightOrigSrcIn;
-                    if (srcLimit > minEditPoint) minEditPoint = srcLimit;
-                }
-                // Allow rolling all the way to boundaries (no min-duration clamp)
-                newEditPoint = std::clamp(newEditPoint, minEditPoint, rightEnd);
+                const int64_t rightEnd = m_rollRightOrigIn + m_rollRightOrigDur;
                 int64_t leftNewDur = newEditPoint - m_rollLeftOrigIn;
                 int64_t rightNewDur = rightEnd - newEditPoint;
                 int64_t rightSrcDelta = newEditPoint - m_rollRightOrigIn;
@@ -627,6 +714,13 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent* event)
                     if (dissolve || leftFadeOut || rightFadeIn)
                         t.editPointTick = newEditPoint;
                 }
+
+                // Slide the edit-point brackets along with the seam so the
+                // user has a stable visual anchor for where the cut is
+                // landing. setEditPointTick has an internal early-out, so
+                // calling this every move tick is cheap.
+                setEditPointSelection(m_rollTrackIndex, newEditPoint,
+                                       EditPointSide::Both);
             }
         }
         onScrollChanged();

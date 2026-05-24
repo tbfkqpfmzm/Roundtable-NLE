@@ -63,6 +63,13 @@ public:
     [[nodiscard]] uint64_t groupId() const noexcept { return m_groupId; }
     void setGroupId(uint64_t id) noexcept { m_groupId = id; }
 
+    /// Link ID: clips with the same non-zero linkId move and select as
+    /// one unit. Used for the video+audio companion produced when a
+    /// media file with both streams is dropped onto the timeline; users
+    /// can break the link for a single drag by holding Alt at click time.
+    [[nodiscard]] uint64_t linkId() const noexcept { return m_linkId; }
+    void setLinkId(uint64_t id) noexcept { m_linkId = id; }
+
     /// Layer ID within a shot group (e.g. "background_0", "char_0").
     [[nodiscard]] const std::string& layerId() const noexcept { return m_layerId; }
     void setLayerId(const std::string& id) { m_layerId = id; }
@@ -165,6 +172,7 @@ protected:
     std::string m_shotName;   ///< Shot preset name (for grouping)
     std::string m_layerId;    ///< Layer within shot group
     uint64_t m_groupId{0};    ///< Non-zero = part of a shot group
+    uint64_t m_linkId{0};     ///< Non-zero = linked A/V pair (move/select together)
     uint32_t m_color{0xFF888888};
     bool     m_enabled{true};
     bool     m_offline{false};

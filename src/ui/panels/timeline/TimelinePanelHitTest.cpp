@@ -190,4 +190,31 @@ void TimelinePanel::clearEditPointSelection()
             tw->setEditPointTick(-1);
 }
 
+void TimelinePanel::setLinkPartnersSelected(const ClipRef& seed, bool selected)
+{
+    if (!m_timeline) return;
+    Track* seedTrack = m_timeline->track(seed.trackIndex);
+    if (!seedTrack) return;
+    size_t seedIdx = seedTrack->findClipIndexById(seed.clipId);
+    if (seedIdx >= seedTrack->clipCount()) return;
+    const uint64_t linkId = seedTrack->clip(seedIdx)->linkId();
+    if (linkId == 0) return;  // unlinked clip — nothing to do
+
+    for (size_t ti = 0; ti < m_timeline->trackCount(); ++ti) {
+        Track* tr = m_timeline->track(ti);
+        if (!tr) continue;
+        for (size_t ci = 0; ci < tr->clipCount(); ++ci) {
+            const Clip* c = tr->clip(ci);
+            if (!c) continue;
+            if (c->linkId() != linkId) continue;
+            if (c->id() == seed.clipId) continue;  // skip the seed itself
+            ClipRef partner{ ti, c->id() };
+            if (selected)
+                m_selection.selectClip(partner, /*addToSelection*/ true);
+            else
+                m_selection.deselectClip(partner);
+        }
+    }
+}
+
 } // namespace rt

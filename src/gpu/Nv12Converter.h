@@ -174,6 +174,52 @@ public:
                                        VkDeviceSize yOffset  = 0,
                                        VkDeviceSize uvOffset = 0);
 
+    // ── P010 (10-bit NV12) conversion — UPGRADE_PLAN item 4 ──────────
+    //
+    // P010 is NV12 with 10-bit samples stored in the upper bits of 16-bit
+    // words.  NVDEC outputs P010 for HEVC 10-bit and AV1 10-bit streams;
+    // software FFmpeg outputs AV_PIX_FMT_P010LE for the same.  Plane sizes
+    // match NV12 (Y at W×H, UV at W/2 × H/2) but each sample is 2 bytes.
+    //
+    // The shader (p010_to_bgra.comp) applies a 10-bit-aware studio-swing
+    // rescale before the BT.709 matrix; otherwise the GPU path is
+    // structurally identical to NV12 — just R16/R16G16 textures.
+
+    /// Record-only P010→BGRA + downscale.  CPU staging upload path.
+    /// Linesizes are in BYTES (each plane stride from FFmpeg).
+    bool recordConvertP010Scaled(VkCommandBuffer cmd,
+                                  const uint8_t* yData, int yLinesize,
+                                  const uint8_t* uvData, int uvLinesize,
+                                  uint32_t srcW, uint32_t srcH,
+                                  uint32_t dstW, uint32_t dstH,
+                                  std::vector<Texture::StagingCleanup>& stagingOut);
+
+    /// Record-only P010→BGRA + downscale, reading P010 source from a
+    /// Vulkan buffer populated by CudaVulkanInterop::copyP010FromCuda.
+    /// Buffer layout: Y at yOffset (W*H*2 bytes, tightly packed),
+    ///                UV at uvOffset (W*H bytes for 4:2:0 chroma, tightly packed).
+    bool recordConvertP010FromBufferScaled(VkCommandBuffer cmd,
+                                            VkBuffer p010Buffer,
+                                            uint32_t srcW, uint32_t srcH,
+                                            uint32_t dstW, uint32_t dstH,
+                                            VkDeviceSize yOffset  = 0,
+                                            VkDeviceSize uvOffset = 0);
+
+    /// Synchronous P010→BGRA with integrated downscale.  Convenience for
+    /// the non-prefetch fallback path (CPU sws_scale alternative).
+    bool convertP010SyncScaled(const uint8_t* yData, int yLinesize,
+                                const uint8_t* uvData, int uvLinesize,
+                                uint32_t srcW, uint32_t srcH,
+                                uint32_t dstW, uint32_t dstH);
+
+    /// Locked convert + readback (CPU pixels) for the prefetch worker
+    /// fallback path.  Same pattern as convertAndReadbackNV12Scaled.
+    bool convertAndReadbackP010Scaled(const uint8_t* yData, int yLinesize,
+                                       const uint8_t* uvData, int uvLinesize,
+                                       uint32_t srcW, uint32_t srcH,
+                                       uint32_t dstW, uint32_t dstH,
+                                       std::vector<uint8_t>& outPixels);
+
     // ── Resize ──────────────────────────────────────────────────────────
 
     bool resize(uint32_t width, uint32_t height);
@@ -228,7 +274,9 @@ private:
     bool createDescriptorResources();
     bool createPipeline();
     bool createYuv420pPipeline();
+    bool createP010Pipeline();   // UPGRADE_PLAN item 4
     bool ensureOutputSize(uint32_t w, uint32_t h);
+    bool ensureP010Pipeline();   // lazy — first P010 frame triggers init
 
     Device*      m_device{nullptr};
     Allocator*   m_allocator{nullptr};
@@ -264,6 +312,19 @@ private:
     VkPipelineLayout      m_yuv420pPipeLayout{VK_NULL_HANDLE};
     VkPipeline            m_yuv420pPipeline{VK_NULL_HANDLE};
     VkShaderModule        m_yuv420pShaderModule{VK_NULL_HANDLE};
+
+    // P010 (10-bit NV12) — separate textures so the converter can flip
+    // between 8-bit and 10-bit streams without recreating R8/R16 images.
+    // Descriptor set layout matches NV12 (2 samplers + 1 storage image),
+    // but a distinct VkDescriptorSet keeps the R16 image views bound.
+    Texture               m_p010YTexture;   // R16_UNORM,   W × H
+    Texture               m_p010UvTexture;  // R16G16_UNORM, W/2 × H/2
+    VkDescriptorSetLayout m_p010DescSetLayout{VK_NULL_HANDLE};
+    VkDescriptorPool      m_p010DescPool{VK_NULL_HANDLE};
+    VkDescriptorSet       m_p010DescSet{VK_NULL_HANDLE};
+    VkPipelineLayout      m_p010PipeLayout{VK_NULL_HANDLE};
+    VkPipeline            m_p010Pipeline{VK_NULL_HANDLE};
+    VkShaderModule        m_p010ShaderModule{VK_NULL_HANDLE};
 
     // Serialises convertAndReadback* against concurrent prefetch-worker
     // calls. The plain convertSync*/readbackOutput methods are NOT

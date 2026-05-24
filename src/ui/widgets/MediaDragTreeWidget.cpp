@@ -332,40 +332,52 @@ void MediaDragTreeWidget::startDrag(Qt::DropActions /*supportedActions*/)
         mime->setData("application/x-roundtable-tree-item-ptrs", itemPtrData);
 
         const auto& tc = Theme::colors();
-        QString label = (items.size() == 1)
-            ? items.first()->text(0)
-            : QString("%1 items").arg(items.size());
-
-        QFont font = this->font();
-        QFontMetrics fm(font);
-        int textW = fm.horizontalAdvance(label) + 24;
-        int w = qBound(120, textW, 300);
-        int h = 28;
-
-        QPixmap pix(w, h);
-        pix.fill(Qt::transparent);
-
-        QPainter p(&pix);
-        p.setRenderHint(QPainter::Antialiasing);
-
-        QColor bg = tc.surface2;
-        bg.setAlpha(220);
-        p.setPen(Qt::NoPen);
-        p.setBrush(bg);
-        p.drawRoundedRect(QRect(0, 0, w, h), 4, 4);
-
-        p.setBrush(tc.accent);
-        p.drawRoundedRect(QRect(0, 0, 4, h), 2, 2);
-
-        p.setPen(tc.text);
-        p.setFont(font);
-        p.drawText(QRect(10, 0, w - 14, h), Qt::AlignVCenter | Qt::AlignLeft, label);
-        p.end();
+        // Minimal drag pixmap — single item shows name, multi-item shows tiny count badge
+        QPixmap pix;
+        if (items.size() == 1) {
+            QString label = items.first()->text(0);
+            QFont font = this->font();
+            QFontMetrics fm(font);
+            int w = qBound(80, fm.horizontalAdvance(label) + 16, 200);
+            int h = 22;
+            pix = QPixmap(w, h);
+            pix.fill(Qt::transparent);
+            QPainter p(&pix);
+            p.setRenderHint(QPainter::Antialiasing);
+            QColor bg = tc.surface2;
+            bg.setAlpha(200);
+            p.setPen(Qt::NoPen);
+            p.setBrush(bg);
+            p.drawRoundedRect(QRect(0, 0, w, h), 4, 4);
+            p.setBrush(tc.accent);
+            p.drawRoundedRect(QRect(0, 0, 4, h), 2, 2);
+            p.setPen(tc.text);
+            p.setFont(font);
+            p.drawText(QRect(8, 0, w - 12, h), Qt::AlignVCenter | Qt::AlignLeft, label);
+            p.end();
+        } else {
+            // Tiny count badge — stays out of the way
+            int sz = 20;
+            pix = QPixmap(sz, sz);
+            pix.fill(Qt::transparent);
+            QPainter p(&pix);
+            p.setRenderHint(QPainter::Antialiasing);
+            p.setPen(Qt::NoPen);
+            p.setBrush(QColor(80, 130, 200, 200));
+            p.drawEllipse(QRect(0, 0, sz, sz));
+            p.setPen(QColor(255, 255, 255, 240));
+            QFont f = p.font();
+            f.setPixelSize(11);
+            f.setBold(true);
+            p.setFont(f);
+            p.drawText(QRect(0, 0, sz, sz), Qt::AlignCenter, QString::number(items.size()));
+            p.end();
+        }
 
         auto* drag = new QDrag(this);
         drag->setMimeData(mime);
         drag->setPixmap(pix);
-        drag->setHotSpot(QPoint(12, h / 2));
+        drag->setHotSpot(QPoint(pix.width() / 2, pix.height() / 2));
         spdlog::info("ProjectBinDrag: start bin drag ({} selected)", items.size());
         const Qt::DropAction result = drag->exec(Qt::MoveAction | Qt::CopyAction, Qt::CopyAction);
         spdlog::info("ProjectBinDrag: bin drag finished with action {}", static_cast<int>(result));
@@ -436,44 +448,53 @@ void MediaDragTreeWidget::startDrag(Qt::DropActions /*supportedActions*/)
     if (!urls.isEmpty())
         mime->setUrls(urls);
 
-    // Paint drag pixmap showing count
+    // Minimal drag pixmap — single item shows name, multi-item shows tiny count badge
     const auto& tc = Theme::colors();
-    QString label;
-    if (mediaItems.size() == 1)
-        label = mediaItems.first()->text(0);
-    else
-        label = QString("%1 items").arg(mediaItems.size());
-
-    QFont font = this->font();
-    QFontMetrics fm(font);
-    int textW = fm.horizontalAdvance(label) + 24;
-    int w = qBound(120, textW, 300);
-    int h = 28;
-
-    QPixmap pix(w, h);
-    pix.fill(Qt::transparent);
-
-    QPainter p(&pix);
-    p.setRenderHint(QPainter::Antialiasing);
-
-    QColor bg = tc.surface2;
-    bg.setAlpha(220);
-    p.setPen(Qt::NoPen);
-    p.setBrush(bg);
-    p.drawRoundedRect(QRect(0, 0, w, h), 4, 4);
-
-    p.setBrush(tc.accent);
-    p.drawRoundedRect(QRect(0, 0, 4, h), 2, 2);
-
-    p.setPen(tc.text);
-    p.setFont(font);
-    p.drawText(QRect(10, 0, w - 14, h), Qt::AlignVCenter | Qt::AlignLeft, label);
-    p.end();
+    QPixmap pix;
+    if (mediaItems.size() == 1) {
+        QString label = mediaItems.first()->text(0);
+        QFont font = this->font();
+        QFontMetrics fm(font);
+        int w = qBound(80, fm.horizontalAdvance(label) + 16, 200);
+        int h = 22;
+        pix = QPixmap(w, h);
+        pix.fill(Qt::transparent);
+        QPainter p(&pix);
+        p.setRenderHint(QPainter::Antialiasing);
+        QColor bg = tc.surface2;
+        bg.setAlpha(200);
+        p.setPen(Qt::NoPen);
+        p.setBrush(bg);
+        p.drawRoundedRect(QRect(0, 0, w, h), 4, 4);
+        p.setBrush(tc.accent);
+        p.drawRoundedRect(QRect(0, 0, 4, h), 2, 2);
+        p.setPen(tc.text);
+        p.setFont(font);
+        p.drawText(QRect(8, 0, w - 12, h), Qt::AlignVCenter | Qt::AlignLeft, label);
+        p.end();
+    } else {
+        // Tiny count badge — stays out of the way
+        int sz = 20;
+        pix = QPixmap(sz, sz);
+        pix.fill(Qt::transparent);
+        QPainter p(&pix);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(80, 130, 200, 200));
+        p.drawEllipse(QRect(0, 0, sz, sz));
+        p.setPen(QColor(255, 255, 255, 240));
+        QFont f = p.font();
+        f.setPixelSize(11);
+        f.setBold(true);
+        p.setFont(f);
+        p.drawText(QRect(0, 0, sz, sz), Qt::AlignCenter, QString::number(mediaItems.size()));
+        p.end();
+    }
 
     auto* drag = new QDrag(this);
     drag->setMimeData(mime);
     drag->setPixmap(pix);
-    drag->setHotSpot(QPoint(12, h / 2));
+    drag->setHotSpot(QPoint(pix.width() / 2, pix.height() / 2));
     spdlog::info("ProjectBinDrag: start media drag ({} selected)", mediaItems.size());
     const Qt::DropAction result = drag->exec(Qt::MoveAction | Qt::CopyAction, Qt::CopyAction);
     // Clear stale item pointers — drag->exec() entered a nested event loop

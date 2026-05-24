@@ -10,6 +10,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace rt {
 
@@ -33,6 +34,44 @@ public:
 
     /// Unique type ID for merge checking
     [[nodiscard]] virtual int typeId() const { return -1; }
+};
+
+// ── MacroCommand ───────────────────────────────────────────────────────────
+// Groups multiple child commands into a single undoable unit.
+// Used for multi-clip drags, batch operations, etc.
+
+class MacroCommand : public Command
+{
+public:
+    explicit MacroCommand(std::string description)
+        : m_description(std::move(description)) {}
+
+    void addCommand(std::unique_ptr<Command> cmd)
+    {
+        m_children.push_back(std::move(cmd));
+    }
+
+    [[nodiscard]] bool empty() const noexcept { return m_children.empty(); }
+    [[nodiscard]] size_t size() const noexcept { return m_children.size(); }
+
+    void execute() override
+    {
+        for (auto& cmd : m_children)
+            if (cmd) cmd->execute();
+    }
+
+    void undo() override
+    {
+        // Undo in reverse order
+        for (auto it = m_children.rbegin(); it != m_children.rend(); ++it)
+            if (*it) (*it)->undo();
+    }
+
+    [[nodiscard]] std::string description() const override { return m_description; }
+
+private:
+    std::string m_description;
+    std::vector<std::unique_ptr<Command>> m_children;
 };
 
 } // namespace rt

@@ -5,6 +5,8 @@
 #include "media/AVSyncClock.h"
 #include <cmath>
 
+#include <spdlog/spdlog.h>
+
 namespace rt {
 
 AVSyncClock::AVSyncClock()
@@ -49,6 +51,35 @@ void AVSyncClock::advance(int64_t frames, uint32_t sampleRate) noexcept
 
 void AVSyncClock::reset(int64_t tick) noexcept
 {
+    // Diagnostic: log every backwards reset, whether or not the clock
+    // is currently flagged as "running".  Earlier the gate required
+    // m_running=true, but observation (2026-05-23) showed that some
+    // reset() callers fire during play/shuttle transitions when
+    // m_running is briefly false, AND the resulting backward tick is
+    // still visible to the FrameClock once running resumes — producing
+    // a DIAG-CLOCK JUMP delta=-N without a matching DIAG-CLOCK BACK.
+    // The relaxed condition catches every reset that LOWERS the tick.
+    // The `caller` field still pins down which of play / shuttleForward
+    // / shuttleReverse / seekInternal / AudioEngine::stop did it.
+    // We additionally suppress logs where prevTick == 0 (legitimate
+    // initial reset on startup / seek-to-zero) to avoid spam.
+    const int64_t prevTick = m_tick.load(std::memory_order_acquire);
+    if (prevTick > 0 && tick < prevTick) {
+#if defined(_MSC_VER)
+        void* caller = _ReturnAddress();
+#elif defined(__GNUC__) || defined(__clang__)
+        void* caller = __builtin_return_address(0);
+#else
+        void* caller = nullptr;
+#endif
+        // warn-level so it survives the warn+ filter.  Single-line to
+        // stay parseable next to the existing [DIAG-CLOCK] JUMP entries.
+        spdlog::warn("[DIAG-CLOCK BACK] prev={} new={} delta={} running={} caller=0x{:X}",
+                     prevTick, tick, tick - prevTick,
+                     m_running.load(std::memory_order_relaxed) ? 1 : 0,
+                     reinterpret_cast<uintptr_t>(caller));
+    }
+
     m_tick.store(tick, std::memory_order_release);
 
     // Update anchor so extrapolation starts from the new position (seqlock write)

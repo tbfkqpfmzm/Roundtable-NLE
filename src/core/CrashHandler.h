@@ -79,6 +79,26 @@ public:
     /// Write a crash log entry (can also be called manually for non-fatal errors).
     static void writeCrashLog(const std::string& message);
 
+    /// Notify the crash handler that the app has begun a graceful shutdown
+    /// sequence.  Background-thread access violations that fire AFTER
+    /// this point are treated as benign teardown races: the SEH path
+    /// still logs them and writes a minidump (for forensics), but it
+    /// does NOT write the crash marker file — so the next launch does
+    /// not pop the "last session crashed" recovery dialog at the user.
+    ///
+    /// Justification: once the user clicks Close (or otherwise initiates
+    /// shutdown), a worker thread crashing during the brief teardown
+    /// window between Phase 1 (stop) and Phase 4 (destroy GPU) is not
+    /// a session loss — the project has already been saved if the user
+    /// chose to.  Showing a recovery dialog on next launch is then a
+    /// false alarm that erodes trust in the dialog.
+    ///
+    /// Call ONCE, at the start of App::~App.  Cannot be unset.
+    static void notifyShutdownStarted() noexcept;
+
+    /// True after notifyShutdownStarted() has been called.
+    [[nodiscard]] static bool isShutdownInProgress() noexcept;
+
     /// Get the path where the next crash dump would be written.
     [[nodiscard]] static std::filesystem::path nextDumpPath();
 

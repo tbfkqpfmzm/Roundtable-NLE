@@ -115,6 +115,31 @@ void Nv12Converter::shutdown()
         m_yuv420pDescSetLayout = VK_NULL_HANDLE;
     }
 
+    // P010 pipeline cleanup
+    m_p010YTexture.destroy();
+    m_p010UvTexture.destroy();
+    if (m_p010Pipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(dev, m_p010Pipeline, nullptr);
+        m_p010Pipeline = VK_NULL_HANDLE;
+    }
+    if (m_p010PipeLayout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(dev, m_p010PipeLayout, nullptr);
+        m_p010PipeLayout = VK_NULL_HANDLE;
+    }
+    if (m_p010ShaderModule != VK_NULL_HANDLE) {
+        vkDestroyShaderModule(dev, m_p010ShaderModule, nullptr);
+        m_p010ShaderModule = VK_NULL_HANDLE;
+    }
+    if (m_p010DescPool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(dev, m_p010DescPool, nullptr);
+        m_p010DescPool = VK_NULL_HANDLE;
+        m_p010DescSet  = VK_NULL_HANDLE;
+    }
+    if (m_p010DescSetLayout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(dev, m_p010DescSetLayout, nullptr);
+        m_p010DescSetLayout = VK_NULL_HANDLE;
+    }
+
     m_initialized = false;
     m_device      = nullptr;
     m_allocator   = nullptr;

@@ -186,6 +186,15 @@ void ProjectBin::onListItemDoubleClicked(QTreeWidgetItem* item, int /*column*/)
 void ProjectBin::setListView(bool listMode)
 {
     m_listView = listMode;
+
+    // Persist the view preference for the current tab so each tab
+    // remembers its own list/icon choice independently.
+    if (m_binTabBar) {
+        int idx = m_binTabBar->currentIndex();
+        if (idx >= 0 && idx < m_binTabViewModes.size())
+            m_binTabViewModes[idx] = listMode;
+    }
+
     m_btnListView->setChecked(listMode);
     m_btnIconView->setChecked(!listMode);
     m_listWidget->setVisible(listMode);
@@ -212,6 +221,55 @@ void ProjectBin::setListView(bool listMode)
     }
 }
 
+void ProjectBin::focusListViewOnBin()
+{
+    if (m_iconBinPath.isEmpty() || !m_listWidget)
+        return;
+
+    // Walk the tree to find the target bin container.
+    // (The tree was just rebuilt by syncListView(), so items are fresh.)
+    QTreeWidgetItem* container = nullptr;
+    for (const auto& seg : m_iconBinPath) {
+        int count = container ? container->childCount()
+                              : m_listWidget->topLevelItemCount();
+        bool found = false;
+        for (int i = 0; i < count; ++i) {
+            auto* child = container ? container->child(i)
+                                    : m_listWidget->topLevelItem(i);
+            if (child->data(0, Qt::UserRole + 2).toBool() && child->text(0) == seg) {
+                container = child;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            // Bin path segment missing — reset to root.
+            m_iconBinPath.clear();
+            return;
+        }
+    }
+
+    if (!container)
+        return;
+
+    // Take ownership of the target bin's children before clear() deletes them.
+    QList<QTreeWidgetItem*> savedChildren;
+    while (container->childCount() > 0)
+        savedChildren.append(container->takeChild(0));
+
+    // Clear the entire tree (this deletes container and all other items).
+    m_listWidget->clear();
+    m_dropHighlightItem = nullptr;
+
+    // Reparent the bin's children as the new top-level items.
+    for (auto* child : savedChildren)
+        m_listWidget->addTopLevelItem(child);
+
+    // Update the status label to reflect the focused count.
+    int count = m_listWidget->topLevelItemCount();
+    m_statusLabel->setText(QString("%1 items").arg(count));
+}
+
 void ProjectBin::openBinTab(const QStringList& binPath, const QString& name)
 {
     // Check if a tab for this bin already exists
@@ -224,6 +282,7 @@ void ProjectBin::openBinTab(const QStringList& binPath, const QString& name)
     // Create a new tab
     int idx = m_binTabBar->addTab(name);
     m_binTabPaths.append(binPath);
+    m_binTabViewModes.append(m_listView);  // new tab inherits current view mode
     m_binTabBar->setCurrentIndex(idx);
 }
 
@@ -234,16 +293,44 @@ void ProjectBin::onBinTabChanged(int index)
 
     m_iconBinPath = m_binTabPaths[index];
 
+    // Restore this tab's independent list/icon view preference.
+    if (index < m_binTabViewModes.size()) {
+        m_listView = m_binTabViewModes[index];
+        m_btnListView->setChecked(m_listView);
+        m_btnIconView->setChecked(!m_listView);
+        m_listWidget->setVisible(m_listView);
+        m_scrollArea->setVisible(!m_listView);
+        m_iconNavBar->setVisible(!m_listView);
+    }
+
     // Defer the view rebuild so the tab visibly switches first.
-    // syncIconView()/setListView() walk the tree, rebuild grid items, and
+    // syncIconView()/syncListView() walk the tree, rebuild grid items, and
     // kick thumbnail decode — blocking the UI thread. Running on the next
     // event-loop tick lets the tab indicator paint first.
-    const bool goIconView = (index > 0 && m_listView);
-    QTimer::singleShot(0, this, [this, goIconView]() {
-        if (goIconView)
-            setListView(false);
-        else if (!m_listView)
-            syncIconView();
+    //
+    // Preserve the current view mode — don't force icon view for sub-tabs.
+    // The user's list/icon preference should be sticky across tab switches.
+    //
+    // Always rebuild the full QTreeWidget first (via syncListView) so that
+    // both list and icon views read from a correct, untransformed tree.
+    QTimer::singleShot(0, this, [this]() {
+        if (m_iconBinPath.isEmpty()) {
+            // Switching to root — rebuild full tree from saved state.
+            syncListView(m_rootFolderState.empty() ? nullptr : &m_rootFolderState);
+            m_rootFolderState.clear();
+            if (!m_listView)
+                syncIconView();
+        } else {
+            // Switching to sub-bin — save full state before any transform,
+            // rebuild the full tree, then focus on the bin's contents.
+            if (m_rootFolderState.empty())
+                m_rootFolderState = binFolderState();
+            syncListView(m_rootFolderState.empty() ? nullptr : &m_rootFolderState);
+            if (m_listView)
+                focusListViewOnBin();
+            else
+                syncIconView();
+        }
     });
 }
 
@@ -255,6 +342,7 @@ void ProjectBin::onBinTabCloseRequested(int index)
 
     m_binTabBar->removeTab(index);
     m_binTabPaths.removeAt(index);
+    m_binTabViewModes.removeAt(index);
 
     // If we closed the active tab, switch to root
     if (m_binTabBar->currentIndex() < 0)

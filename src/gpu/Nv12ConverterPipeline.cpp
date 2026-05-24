@@ -332,4 +332,148 @@ bool Nv12Converter::createYuv420pPipeline()
     return true;
 }
 
+//══════════════════════════════════════════════════════════════════════════
+//  Internal — create P010 (10-bit NV12) pipeline.  Lazy: first P010 frame.
+//══════════════════════════════════════════════════════════════════════════
+
+bool Nv12Converter::createP010Pipeline()
+{
+    VkDevice dev = m_device->handle();
+
+    // Layout matches NV12: 2 samplers (Y, UV) + 1 storage image (output).
+    // The descriptor type doesn't carry the underlying texture format —
+    // R8 and R16 sampled images use the same descriptor type — so the
+    // layout is identical to NV12, but we keep a separate set so the
+    // bound image views can be R16 while the NV12 set stays R8.
+    VkDescriptorSetLayoutBinding bindings[3]{};
+    bindings[0].binding         = 0;
+    bindings[0].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[0].descriptorCount = 1;
+    bindings[0].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    bindings[1].binding         = 1;
+    bindings[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[1].descriptorCount = 1;
+    bindings[1].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    bindings[2].binding         = 2;
+    bindings[2].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[2].descriptorCount = 1;
+    bindings[2].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    VkDescriptorSetLayoutCreateInfo layoutCI{};
+    layoutCI.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutCI.bindingCount = 3;
+    layoutCI.pBindings    = bindings;
+
+    if (vkCreateDescriptorSetLayout(dev, &layoutCI, nullptr,
+                                     &m_p010DescSetLayout) != VK_SUCCESS)
+    {
+        spdlog::error("Nv12Converter: failed to create P010 descriptor set layout");
+        return false;
+    }
+
+    VkDescriptorPoolSize poolSizes[2]{};
+    poolSizes[0].type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    poolSizes[0].descriptorCount = 2;
+    poolSizes[1].type            = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    poolSizes[1].descriptorCount = 1;
+
+    VkDescriptorPoolCreateInfo poolCI{};
+    poolCI.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolCI.flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    poolCI.maxSets       = 1;
+    poolCI.poolSizeCount = 2;
+    poolCI.pPoolSizes    = poolSizes;
+
+    if (vkCreateDescriptorPool(dev, &poolCI, nullptr,
+                                &m_p010DescPool) != VK_SUCCESS)
+    {
+        spdlog::error("Nv12Converter: failed to create P010 descriptor pool");
+        return false;
+    }
+
+    VkDescriptorSetAllocateInfo allocInfo{};
+    allocInfo.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocInfo.descriptorPool     = m_p010DescPool;
+    allocInfo.descriptorSetCount = 1;
+    allocInfo.pSetLayouts        = &m_p010DescSetLayout;
+
+    if (vkAllocateDescriptorSets(dev, &allocInfo, &m_p010DescSet) != VK_SUCCESS) {
+        spdlog::error("Nv12Converter: failed to allocate P010 descriptor set");
+        return false;
+    }
+
+    VkPushConstantRange pushRange{};
+    pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pushRange.offset     = 0;
+    pushRange.size       = sizeof(int32_t) * 2; // width, height
+
+    VkPipelineLayoutCreateInfo pipeLayoutCI{};
+    pipeLayoutCI.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipeLayoutCI.setLayoutCount         = 1;
+    pipeLayoutCI.pSetLayouts            = &m_p010DescSetLayout;
+    pipeLayoutCI.pushConstantRangeCount = 1;
+    pipeLayoutCI.pPushConstantRanges    = &pushRange;
+
+    if (vkCreatePipelineLayout(dev, &pipeLayoutCI, nullptr,
+                                &m_p010PipeLayout) != VK_SUCCESS)
+    {
+        spdlog::error("Nv12Converter: failed to create P010 pipeline layout");
+        return false;
+    }
+
+    fs::path spvPath = findShader("p010_to_bgra.comp.spv");
+    if (spvPath.empty()) {
+        spdlog::warn("Nv12Converter: p010_to_bgra.comp.spv not found — "
+                     "P010 GPU conversion unavailable (HEVC 10-bit / AV1 10-bit "
+                     "will fall back to CPU sws_scale)");
+        return false;
+    }
+
+    std::ifstream file(spvPath, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) {
+        spdlog::error("Nv12Converter: failed to open {}", spvPath.string());
+        return false;
+    }
+    size_t fileSize = static_cast<size_t>(file.tellg());
+    std::vector<char> spirv(fileSize);
+    file.seekg(0);
+    file.read(spirv.data(), static_cast<std::streamsize>(fileSize));
+
+    VkShaderModuleCreateInfo smCI{};
+    smCI.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    smCI.codeSize = spirv.size();
+    smCI.pCode    = reinterpret_cast<const uint32_t*>(spirv.data());
+
+    if (vkCreateShaderModule(dev, &smCI, nullptr, &m_p010ShaderModule) != VK_SUCCESS) {
+        spdlog::error("Nv12Converter: failed to create P010 shader module");
+        return false;
+    }
+
+    VkComputePipelineCreateInfo pci{};
+    pci.sType        = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    pci.stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    pci.stage.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
+    pci.stage.module = m_p010ShaderModule;
+    pci.stage.pName  = "main";
+    pci.layout       = m_p010PipeLayout;
+
+    if (vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &pci, nullptr,
+                                  &m_p010Pipeline) != VK_SUCCESS)
+    {
+        spdlog::error("Nv12Converter: failed to create P010 compute pipeline");
+        return false;
+    }
+
+    spdlog::info("Nv12Converter: P010 compute pipeline created");
+    return true;
+}
+
+bool Nv12Converter::ensureP010Pipeline()
+{
+    if (m_p010Pipeline != VK_NULL_HANDLE) return true;
+    return createP010Pipeline();
+}
+
 } // namespace rt

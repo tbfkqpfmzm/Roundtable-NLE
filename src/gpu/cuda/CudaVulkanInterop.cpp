@@ -243,23 +243,27 @@ CudaVulkanInterop::Stats CudaVulkanInterop::stats() const
 // ── Pool-based allocator ──────────────────────────────────────────────
 
 std::unique_ptr<SharedAllocation> CudaVulkanInterop::allocate(
-    uint32_t width, uint32_t height)
+    uint32_t width, uint32_t height, bool tenBit)
 {
     if (!m_available) return nullptr;
 
     // Fast path under lock: look for a pooled allocation with matching
-    // dimensions.  Lock is dropped before allocateNew() so the slow
-    // (Vulkan + CUDA import) path doesn't serialise concurrent
+    // dimensions AND bit-depth.  An NV12 alloc must NEVER satisfy a P010
+    // request (size mismatch + the copy routines key on the bit depth
+    // for plane offsets).  Lock is dropped before allocateNew() so the
+    // slow (Vulkan + CUDA import) path doesn't serialise concurrent
     // first-allocations across workers.
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         for (auto it = m_pool.begin(); it != m_pool.end(); ++it) {
-            if ((*it)->width == width && (*it)->height == height) {
+            if ((*it)->width == width && (*it)->height == height
+                && (*it)->tenBit == tenBit)
+            {
                 auto alloc = std::move(*it);
                 m_pool.erase(it);
                 m_liveAllocations.push_back(alloc.get());
-                spdlog::debug("CudaVulkanInterop: reusing pooled {}x{} buffer",
-                              width, height);
+                spdlog::debug("CudaVulkanInterop: reusing pooled {}x{} {}buffer",
+                              width, height, tenBit ? "P010 " : "");
                 return alloc;
             }
         }
@@ -267,7 +271,7 @@ std::unique_ptr<SharedAllocation> CudaVulkanInterop::allocate(
 
     // No match — create a fresh allocation.  allocateNew acquires the
     // mutex internally for its m_liveAllocations.push_back.
-    return allocateNew(width, height);
+    return allocateNew(width, height, tenBit);
 }
 
 void CudaVulkanInterop::free(std::unique_ptr<SharedAllocation> alloc)
@@ -446,7 +450,7 @@ bool CudaVulkanInterop::importIntoCuda(SharedAllocation& alloc)
 // ── allocateNew — orchestrates the helpers ────────────────────────────
 
 std::unique_ptr<SharedAllocation> CudaVulkanInterop::allocateNew(
-    uint32_t width, uint32_t height)
+    uint32_t width, uint32_t height, bool tenBit)
 {
     if (!m_available) return nullptr;
 
@@ -458,7 +462,12 @@ std::unique_ptr<SharedAllocation> CudaVulkanInterop::allocateNew(
     auto alloc = std::make_unique<SharedAllocation>();
     alloc->width     = width;
     alloc->height    = height;
-    alloc->sizeBytes = static_cast<size_t>(width) * height * 3 / 2; // NV12
+    alloc->tenBit    = tenBit;
+    // NV12: Y(W*H) + UV(W*H/2)        = W*H*3/2
+    // P010: Y(W*H*2) + UV(W*H/2 * 2)  = W*H*3 (each sample = 2 bytes)
+    alloc->sizeBytes = tenBit
+        ? static_cast<size_t>(width) * height * 3
+        : static_cast<size_t>(width) * height * 3 / 2;
 
     // Step 1: Create VkBuffer with external memory support
     if (!createVulkanBuffer(*alloc, m_vkDevice)) {
@@ -510,9 +519,9 @@ std::unique_ptr<SharedAllocation> CudaVulkanInterop::allocateNew(
         m_liveAllocations.push_back(alloc.get());
     }
 
-    spdlog::debug("CudaVulkanInterop: allocated {}x{} shared NV12 buffer "
+    spdlog::debug("CudaVulkanInterop: allocated {}x{} shared {} buffer "
                   "({} bytes, CUDA ptr={:#x})",
-                  width, height, alloc->sizeBytes,
+                  width, height, tenBit ? "P010" : "NV12", alloc->sizeBytes,
                   reinterpret_cast<CUdeviceptr>(alloc->cudaDevicePtr));
 
     m_cuda.popContext();
@@ -619,6 +628,107 @@ bool CudaVulkanInterop::copyNv12FromCuda(SharedAllocation& alloc,
 #endif
 }
 
+// ── copyP010FromCuda ──────────────────────────────────────────────────
+//
+// UPGRADE_PLAN item 4: 10-bit twin of copyNv12FromCuda.  Each sample is
+// 2 bytes (P010LE/P016LE — 10/16-bit luma packed in the upper bits of a
+// 16-bit word).  Plane order matches NV12 (Y then interleaved UV at 4:2:0)
+// but every byte count doubles:
+//   Y plane:  W * H * 2 bytes at offset 0,    tight dst pitch = W * 2.
+//   UV plane: W * H     bytes at offset W*H*2, tight dst pitch = W * 2.
+// Source pitches arrive from NVDEC and may include alignment padding —
+// cuMemcpy2D handles that via srcPitch.
+
+bool CudaVulkanInterop::copyP010FromCuda(SharedAllocation& alloc,
+    const void* srcY, int yPitch,
+    const void* srcUV, int uvPitch,
+    uint32_t width, uint32_t height)
+{
+#ifdef ROUNDTABLE_HAS_CUDA
+    if (!alloc.valid || !alloc.tenBit || !alloc.cudaDevicePtr || !srcY || !srcUV)
+        return false;
+
+    m_cuda.pushContext();
+
+    CUdeviceptr dstPtr   = reinterpret_cast<CUdeviceptr>(alloc.cudaDevicePtr);
+    CUdeviceptr srcYPtr  = reinterpret_cast<CUdeviceptr>(srcY);
+    CUdeviceptr srcUVPtr = reinterpret_cast<CUdeviceptr>(srcUV);
+
+    const size_t dstPitchBytes = static_cast<size_t>(width) * 2;
+
+    // ── Copy Y plane: W × H × 2 bytes ───────────────────────────────
+    CUDA_MEMCPY2D copyY{};
+    copyY.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+    copyY.srcDevice     = srcYPtr;
+    copyY.srcPitch      = static_cast<size_t>(yPitch);
+    copyY.dstMemoryType = CU_MEMORYTYPE_DEVICE;
+    copyY.dstDevice     = dstPtr;
+    copyY.dstPitch      = dstPitchBytes;
+    copyY.WidthInBytes  = dstPitchBytes;   // W luma samples × 2 bytes
+    copyY.Height        = height;
+
+    CUresult res = cuMemcpy2D(&copyY);
+    if (res != CUDA_SUCCESS) {
+        spdlog::warn("CudaVulkanInterop: cuMemcpy2D P010 Y plane failed ({})",
+                     static_cast<int>(res));
+        m_cuda.popContext();
+        return false;
+    }
+
+    // ── Copy UV plane: W × H/2 × 2 bytes (interleaved CbCr, 4:2:0) ──
+    //
+    // For P010 the chroma plane is W/2 columns of 16-bit (Cb, Cr) pairs.
+    // Each row therefore occupies (W/2) * 2 * 2 = W * 2 bytes.  Height
+    // is H/2 rows.  Total = W * H bytes — same overall size as the 8-bit
+    // NV12 UV plane, but at half the column count and 16-bit samples.
+    const VkDeviceSize uvOffset = static_cast<VkDeviceSize>(width) * height * 2;
+    CUDA_MEMCPY2D copyUV{};
+    copyUV.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+    copyUV.srcDevice     = srcUVPtr;
+    copyUV.srcPitch      = static_cast<size_t>(uvPitch);
+    copyUV.dstMemoryType = CU_MEMORYTYPE_DEVICE;
+    copyUV.dstDevice     = dstPtr + uvOffset;
+    copyUV.dstPitch      = dstPitchBytes;
+    copyUV.WidthInBytes  = dstPitchBytes;   // W/2 chroma pairs × 4 bytes = W*2
+    copyUV.Height        = height / 2;
+
+    res = cuMemcpy2D(&copyUV);
+    if (res != CUDA_SUCCESS) {
+        spdlog::warn("CudaVulkanInterop: cuMemcpy2D P010 UV plane failed ({})",
+                     static_cast<int>(res));
+        m_cuda.popContext();
+        return false;
+    }
+
+    // ── Signal external semaphore (matches copyNv12FromCuda) ────────
+    if (m_cudaExternalSemaphore) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const uint64_t signalVal =
+            m_semaphoreValue.fetch_add(1, std::memory_order_acq_rel) + 1;
+        CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS signalParams{};
+        signalParams.params.fence.value = signalVal;
+        auto cudaSem = static_cast<CUexternalSemaphore>(m_cudaExternalSemaphore);
+        CUresult sigRes = cuSignalExternalSemaphoresAsync(
+            &cudaSem, &signalParams, 1, nullptr);
+        if (sigRes != CUDA_SUCCESS) {
+            spdlog::warn("CudaVulkanInterop: P010 cuSignalExternalSemaphoresAsync "
+                         "failed ({}) — falling back to sync",
+                         static_cast<int>(sigRes));
+            cuStreamSynchronize(nullptr);
+        }
+    } else {
+        cuStreamSynchronize(nullptr);
+    }
+
+    m_cuda.popContext();
+    return true;
+#else
+    (void)alloc; (void)srcY; (void)yPitch; (void)srcUV; (void)uvPitch;
+    (void)width; (void)height;
+    return false;
+#endif
+}
+
 // ── freeImmediate ─────────────────────────────────────────────────────
 
 void CudaVulkanInterop::freeImmediate(std::unique_ptr<SharedAllocation> alloc)
@@ -667,14 +777,14 @@ bool CudaVulkanInterop::init(void* /*vkDevice*/, void* /*vkPhysicalDevice*/)
 
 void CudaVulkanInterop::shutdown() {}
 
-std::unique_ptr<SharedAllocation> CudaVulkanInterop::allocate(uint32_t, uint32_t)
+std::unique_ptr<SharedAllocation> CudaVulkanInterop::allocate(uint32_t, uint32_t, bool)
 {
     return nullptr;
 }
 
 void CudaVulkanInterop::free(std::unique_ptr<SharedAllocation>) {}
 
-std::unique_ptr<SharedAllocation> CudaVulkanInterop::allocateNew(uint32_t, uint32_t)
+std::unique_ptr<SharedAllocation> CudaVulkanInterop::allocateNew(uint32_t, uint32_t, bool)
 {
     return nullptr;
 }

@@ -166,13 +166,14 @@ void TimelinePanel::wheelEvent(QWheelEvent* event)
 {
     if (event->modifiers() & Qt::ControlModifier)
     {
-        // Ctrl+wheel = zoom centered on cursor, then pan to center
+        // Ctrl+wheel = zoom anchored to cursor (Premiere behavior).
+        // zoomAt() already adjusts scrollX so the tick under the cursor
+        // stays under the cursor — DON'T then re-pan to viewport centre,
+        // that just throws the anchor away and feels like the timeline
+        // is sliding around as you scroll-zoom.
         double factor = (event->angleDelta().y() > 0) ? 1.15 : 1.0 / 1.15;
         double px = event->position().x() - headerWidth();
         m_layoutEngine.zoomAt(px, factor);
-        double centerPx = std::max(m_ruler->width(), 100) / 2.0;
-        double newScroll = m_layoutEngine.scrollX() + (px - centerPx);
-        m_layoutEngine.setScrollX(std::max(newScroll, 0.0));
         onScrollChanged();
         event->accept();
     }

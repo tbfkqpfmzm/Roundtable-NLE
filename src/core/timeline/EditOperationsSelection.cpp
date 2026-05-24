@@ -129,6 +129,8 @@ void SnapEngine::buildTargets(const Timeline& timeline,
                                const std::vector<uint64_t>& excludeClipIds)
 {
     m_targets.clear();
+    // A fresh target set implies a new drag/edit session — start unlocked.
+    resetHysteresis();
 
     // Convert excludeClipIds to a set for O(log n) lookup
     std::set<uint64_t> excludeSet(excludeClipIds.begin(), excludeClipIds.end());
@@ -175,58 +177,107 @@ void SnapEngine::addTarget(const SnapTarget& target)
     m_targets.push_back(target);
 }
 
+void SnapEngine::resetHysteresis() const noexcept
+{
+    m_stuckTick = INT64_MIN;
+    m_stuckType = SnapTarget::Type::GridLine;
+}
+
+SnapEngine::AttractHit
+SnapEngine::findNearestAttract(int64_t tick, int64_t attractTicks) const
+{
+    AttractHit hit;
+    if (attractTicks <= 0) return hit;
+    for (const auto& target : m_targets)
+    {
+        int64_t dist = std::abs(tick - target.tick);
+        if (dist < hit.dist)
+        {
+            hit.dist = dist;
+            hit.tick = target.tick;
+            hit.type = target.type;
+        }
+    }
+    hit.found = (hit.dist <= attractTicks);
+    return hit;
+}
+
 SnapResult SnapEngine::snap(int64_t tick) const
 {
     if (!m_enabled || m_targets.empty())
         return {tick, false, 0, SnapTarget::Type::GridLine};
 
-    int64_t threshold = thresholdTicks();
-    if (threshold <= 0)
+    int64_t attract = thresholdTicks();
+    if (attract <= 0)
         return {tick, false, 0, SnapTarget::Type::GridLine};
 
-    int64_t bestDist = std::numeric_limits<int64_t>::max();
-    int64_t bestTick = tick;
-    SnapTarget::Type bestType = SnapTarget::Type::GridLine;
-
-    for (const auto& target : m_targets)
+    // ── Hysteresis: stay locked on the previously-stuck target until the
+    //    user drags outside the wider release zone. This is the Premiere
+    //    "detent" feel — snapping doesn't flicker as the cursor wiggles.
+    if (m_stuckTick != INT64_MIN)
     {
-        int64_t dist = std::abs(tick - target.tick);
-        if (dist < bestDist)
-        {
-            bestDist = dist;
-            bestTick = target.tick;
-            bestType = target.type;
-        }
+        const int64_t release = static_cast<int64_t>(attract * kReleaseMultiplier);
+        if (std::abs(tick - m_stuckTick) <= release)
+            return {m_stuckTick, true, m_stuckTick - tick, m_stuckType};
+        resetHysteresis();
     }
 
-    if (bestDist <= threshold)
-        return {bestTick, true, bestTick - tick, bestType};
-
+    // ── Fresh attract: nearest target within the (narrower) attract zone.
+    AttractHit hit = findNearestAttract(tick, attract);
+    if (hit.found)
+    {
+        m_stuckTick = hit.tick;
+        m_stuckType = hit.type;
+        return {hit.tick, true, hit.tick - tick, hit.type};
+    }
     return {tick, false, 0, SnapTarget::Type::GridLine};
 }
 
 SnapResult SnapEngine::snapPair(int64_t tickA, int64_t tickB) const
 {
-    SnapResult resultA = snap(tickA);
-    SnapResult resultB = snap(tickB);
-
-    if (!resultA.didSnap && !resultB.didSnap)
+    if (!m_enabled || m_targets.empty())
         return {tickA, false, 0, SnapTarget::Type::GridLine};
 
-    if (resultA.didSnap && !resultB.didSnap)
-        return resultA;
+    int64_t attract = thresholdTicks();
+    if (attract <= 0)
+        return {tickA, false, 0, SnapTarget::Type::GridLine};
 
-    if (!resultA.didSnap && resultB.didSnap)
+    // ── Hysteresis (pair): release if BOTH edges leave the release zone of
+    //    the stuck target. Whichever edge is closer wins, with the delta
+    //    expressed relative to tickA so callers (which translate by delta)
+    //    move the whole clip correctly.
+    if (m_stuckTick != INT64_MIN)
     {
-        // Return the delta that would be applied to tickA
-        return {tickA + resultB.delta, true, resultB.delta, resultB.snapType};
+        const int64_t release = static_cast<int64_t>(attract * kReleaseMultiplier);
+        const int64_t dA = std::abs(tickA - m_stuckTick);
+        const int64_t dB = std::abs(tickB - m_stuckTick);
+        if (dA <= release || dB <= release)
+        {
+            if (dA <= dB)
+                return {m_stuckTick, true, m_stuckTick - tickA, m_stuckType};
+            const int64_t delta = m_stuckTick - tickB;
+            return {tickA + delta, true, delta, m_stuckType};
+        }
+        resetHysteresis();
     }
 
-    // Both snapped — pick the one with smaller delta
-    if (std::abs(resultA.delta) <= std::abs(resultB.delta))
-        return resultA;
-    else
-        return {tickA + resultB.delta, true, resultB.delta, resultB.snapType};
+    // ── Fresh attract: probe both edges, return the smaller delta.
+    AttractHit hitA = findNearestAttract(tickA, attract);
+    AttractHit hitB = findNearestAttract(tickB, attract);
+    if (!hitA.found && !hitB.found)
+        return {tickA, false, 0, SnapTarget::Type::GridLine};
+
+    const bool preferA = hitA.found && (!hitB.found || hitA.dist <= hitB.dist);
+    if (preferA)
+    {
+        m_stuckTick = hitA.tick;
+        m_stuckType = hitA.type;
+        return {hitA.tick, true, hitA.tick - tickA, hitA.type};
+    }
+    m_stuckTick = hitB.tick;
+    m_stuckType = hitB.type;
+    const int64_t delta = hitB.tick - tickB;
+    return {tickA + delta, true, delta, hitB.type};
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

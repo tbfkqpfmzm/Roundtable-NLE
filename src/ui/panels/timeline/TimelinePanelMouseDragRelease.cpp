@@ -440,9 +440,14 @@ void TimelinePanel::mouseReleaseEvent(QMouseEvent* event)
 
     // ── PendingClipClick: user clicked an already-selected clip without dragging ──
     if (m_dragMode == DragMode::PendingClipClick) {
-        // Select just the clicked clip (Premiere Pro behaviour)
+        // Select just the clicked clip (Premiere Pro behaviour) — but
+        // carry its link partner along unless Alt was held, so clicking
+        // a linked video doesn't silently drop its companion audio.
+        const bool isAlt = event->modifiers() & Qt::AltModifier;
         m_selection.clear();
         m_selection.selectClip(m_dragClipRef, false);
+        if (!isAlt)
+            setLinkPartnersSelected(m_dragClipRef, true);
         emit selectionChanged();
         // Emit clipSelected so panels update
         Track* trk = m_timeline ? m_timeline->track(m_dragClipRef.trackIndex) : nullptr;
@@ -471,9 +476,12 @@ void TimelinePanel::mouseReleaseEvent(QMouseEvent* event)
         m_dragTargetTrack = SIZE_MAX;
         m_ghostTrackVisible = false;
         if (m_ghostOverlay) m_ghostOverlay->hide();
+        m_snapEngine.resetHysteresis();
 
         if (m_marqueeScrollTimer) m_marqueeScrollTimer->stop();
         m_marqueeLastMovePos = QPointF();
+        if (m_clipDragScrollTimer) m_clipDragScrollTimer->stop();
+        m_clipDragLastMovePos = QPointF();
 
         if (m_rubberBand) m_rubberBand->hide();
         setCursor(Qt::ArrowCursor);

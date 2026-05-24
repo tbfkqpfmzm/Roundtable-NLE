@@ -18,6 +18,7 @@
 #include "MediaPool.h"
 #include "MediaPoolPrefetchGpu.h"
 #include "PrefetchTexturePool.h"
+#include "WorkerBreadcrumb.h"
 
 #include "CompositeService.h"     // feature flag (gpuResidentDecodeEnabled)
 #include "GpuContext.h"
@@ -41,7 +42,8 @@
 #ifdef ROUNDTABLE_HAS_FFMPEG
 extern "C" {
 #include <libavutil/pixfmt.h>
-#include <libavutil/frame.h>      // AVFrame (CUDA hwframe data ptrs)
+#include <libavutil/frame.h>       // AVFrame (CUDA hwframe data ptrs)
+#include <libavutil/hwcontext.h>   // AVHWFramesContext::sw_format
 }
 #endif
 
@@ -178,6 +180,15 @@ Nv12Converter* WorkerGpuState::ensureNv12Converter(uint32_t w, uint32_t h)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Phase-boundary breadcrumb used by the crash handler.  Stored in a global
+// atomic (rt::lastWorkerStep) so it survives into the minidump as a single
+// known-named symbol, anchoring the otherwise frame-pointer-only crash
+// stacks observed at roundtable.exe+0x3DE56B / +0x3DD70B / +0x3DC3FB.
+// The macro narrows the call-site boilerplate.
+// ─────────────────────────────────────────────────────────────────────────
+#define gWorkerStep ::rt::setLastWorkerStep
+
+// ─────────────────────────────────────────────────────────────────────────
 // MediaPool::convertDecodedToCacheGpu
 // ─────────────────────────────────────────────────────────────────────────
 std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
@@ -187,6 +198,8 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
     int64_t               frameNumber,
     WorkerGpuState&       wgs)
 {
+    gWorkerStep("convertDecodedToCacheGpu/entry");
+
     // ── Eligibility (UPGRADE_PLAN H.2, plus L.1 device-lost check) ──────
     auto& ctx = GpuContext::get();
     if (!ctx.isInitialized() || !ctx.isOperational()) return nullptr;
@@ -232,6 +245,7 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
     // prefetch work).  Once Path C lands, the cap can return to 3 (or
     // higher) because compositor and prefetch run on independent
     // hardware engines.
+    gWorkerStep("convertDecodedToCacheGpu/backpressure-wait");
     constexpr size_t kMaxPendingPerWorker = 1;
     while (wgs.pending.size() >= kMaxPendingPerWorker) {
         auto& oldest = wgs.pending.front();
@@ -267,6 +281,29 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
     CudaVulkanInterop* interop = nullptr;
     const uint32_t hwW = decoded.width;
     const uint32_t hwH = decoded.height;
+
+    // UPGRADE_PLAN item 4: classify the hwframe so the ZC preflight
+    // picks the right copy routine.  NVDEC HEVC 10-bit / AV1 10-bit
+    // outputs sw_format=P010LE; HEVC 12-bit can output P016LE.  Both
+    // share the NV12 plane layout (Y then interleaved UV at 4:2:0) but
+    // every sample is 2 bytes, so the wrong path produces garbage.
+    bool hwIsNv12 = decoded.isHardware;
+    bool hwIsP010 = false;
+#ifdef ROUNDTABLE_HAS_FFMPEG
+    if (decoded.isHardware && decoded.avFrame && decoded.avFrame->hw_frames_ctx) {
+        auto* hwfc = reinterpret_cast<AVHWFramesContext*>(
+            decoded.avFrame->hw_frames_ctx->data);
+        if (hwfc) {
+            hwIsNv12 = (hwfc->sw_format == AV_PIX_FMT_NV12);
+            hwIsP010 = (hwfc->sw_format == AV_PIX_FMT_P010LE)
+                    || (hwfc->sw_format == AV_PIX_FMT_P016LE);
+        }
+    }
+#endif
+    // Tracks which buffer layout zeroCopyAlloc holds, when ZC succeeds.
+    // Needed below so the dispatch picks recordConvertFromBufferScaled vs
+    // recordConvertP010FromBufferScaled.
+    bool zcIsP010 = false;
 
     // One-shot per-(handle, reason) FAILURE diagnostic.  Logs at warn
     // level so it survives the warn+ filter.  Tracks failures only (not
@@ -317,10 +354,12 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
                          task.handle, hwW, hwH);
     }
 
+    gWorkerStep("convertDecodedToCacheGpu/zc-preflight");
     if (decoded.isHardware
+        && (hwIsNv12 || hwIsP010)
         && decoded.avFrame != nullptr
         && hwW > 0 && hwH > 0
-        && (hwW & 1) == 0 && (hwH & 1) == 0)   // NV12 needs even dims
+        && (hwW & 1) == 0 && (hwH & 1) == 0)   // 4:2:0 needs even dims
     {
         interop = ctx.cudaVulkanInterop();
         if (!interop) {
@@ -346,20 +385,30 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
                                  "(yPtr={} uvPtr={} yPitch={} uvPitch={})",
                                  task.handle, yPtr, uvPtr, yPitch, uvPitch);
             } else {
-                auto alloc = interop->allocate(hwW, hwH);
+                auto alloc = interop->allocate(hwW, hwH, /*tenBit=*/hwIsP010);
                 if (!alloc) {
                     if (shouldLogZcFail(ZcFailReason::AllocateFailed))
                         spdlog::warn("[ZC-DIAG] handle={} skipped: interop->allocate "
                                      "returned null (vkAllocateMemory exhaustion?)",
                                      task.handle);
-                } else if (!interop->copyNv12FromCuda(*alloc,
-                               yPtr, yPitch, uvPtr, uvPitch, hwW, hwH)) {
-                    if (shouldLogZcFail(ZcFailReason::CopyFailed))
-                        spdlog::warn("[ZC-DIAG] handle={} skipped: copyNv12FromCuda failed",
-                                     task.handle);
-                    interop->free(std::move(alloc));
                 } else {
-                    zeroCopyAlloc = std::move(alloc);
+                    // Pick the matching copy routine based on hwframe bit depth.
+                    const bool copyOk = hwIsP010
+                        ? interop->copyP010FromCuda(*alloc,
+                              yPtr, yPitch, uvPtr, uvPitch, hwW, hwH)
+                        : interop->copyNv12FromCuda(*alloc,
+                              yPtr, yPitch, uvPtr, uvPitch, hwW, hwH);
+                    if (!copyOk) {
+                        if (shouldLogZcFail(ZcFailReason::CopyFailed))
+                            spdlog::warn("[ZC-DIAG] handle={} skipped: "
+                                         "{} copy failed",
+                                         task.handle,
+                                         hwIsP010 ? "P010" : "NV12");
+                        interop->free(std::move(alloc));
+                    } else {
+                        zeroCopyAlloc = std::move(alloc);
+                        zcIsP010 = hwIsP010;
+                    }
                 }
             }
 #endif
@@ -369,6 +418,7 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
     // Hardware → CPU transfer (fallback when zero-copy did not fire).
     // Same step the CPU path takes (NVDEC surfaces aren't directly
     // accessible to Nv12Converter without the interop bridge above).
+    gWorkerStep("convertDecodedToCacheGpu/hw-transfer");
     if (!zeroCopyAlloc && decoded.isHardware) {
         DecodedFrame cpuFrame;
         if (!state.decoder->transferHardwareFrame(decoded, cpuFrame))
@@ -395,7 +445,15 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
                 default:                   return nullptr;
             }
         }
-        if (srcFmt != AV_PIX_FMT_NV12 && srcFmt != AV_PIX_FMT_YUV420P)
+        // UPGRADE_PLAN item 4: accept P010 / P016 (10/16-bit NV12) on top
+        // of the original NV12 + YUV420P GPU paths.  Bail out for anything
+        // else and let the CPU sws_scale path handle it.
+        const bool acceptedFmt =
+            (srcFmt == AV_PIX_FMT_NV12)    ||
+            (srcFmt == AV_PIX_FMT_YUV420P) ||
+            (srcFmt == AV_PIX_FMT_P010LE)  ||
+            (srcFmt == AV_PIX_FMT_P016LE);
+        if (!acceptedFmt)
             return nullptr;
     }
 #else
@@ -429,6 +487,7 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
     //    Per-worker instance (UPGRADE_PLAN item 3) — no shared apiMutex,
     //    no inline wait, no cross-worker serialisation.  Multiple
     //    workers pipeline freely on the compute queue. ──────────────────
+    gWorkerStep("convertDecodedToCacheGpu/ensure-converter");
     Nv12Converter* conv = wgs.ensureNv12Converter(
         static_cast<uint32_t>(dstW), static_cast<uint32_t>(dstH));
     if (!conv || !conv->isInitialized()) return nullptr;
@@ -447,6 +506,7 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
     constexpr VkImageUsageFlags kDstUsage =
         VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
       | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;  // TRANSFER_SRC for lazy readback
+    gWorkerStep("convertDecodedToCacheGpu/pooled-dst-texture");
     auto dstTex = makePooledTexture(*m_prefetchTexPool, ctx,
                                     static_cast<uint32_t>(dstW),
                                     static_cast<uint32_t>(dstH),
@@ -468,22 +528,41 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
 
     std::vector<Texture::StagingCleanup> stagingOut;
 
-    // ── Record convert into cmd.  Three paths:                       ──
-    //    - zero-copy: read NV12 from the shared VkBuffer the interop
-    //                  populated (no CPU staging, no per-plane upload).
-    //    - NV12 CPU:  upload Y/UV planes from CPU, run convert.
-    //    - YUV420P:   upload Y/U/V planes from CPU, run convert.
+    // ── Record convert into cmd.  Five paths:                       ──
+    //    - zero-copy NV12: read 8-bit NV12 from the shared VkBuffer the
+    //                  interop populated (no CPU staging, no per-plane upload).
+    //    - zero-copy P010: read 16-bit P010 from the shared VkBuffer
+    //                  (UPGRADE_PLAN item 4 — HEVC 10-bit / AV1 10-bit ZC).
+    //                  UV plane lives at offset W*H*2 (twice NV12's offset
+    //                  because each sample is 2 bytes).
+    //    - NV12 CPU:  upload 8-bit Y/UV planes from CPU, run NV12 shader.
+    //    - P010 CPU:  upload 16-bit Y/UV planes from CPU, run P010 shader.
+    //    - YUV420P:   upload Y/U/V planes from CPU, run YUV420P shader.
     bool recordOk = false;
     if (zeroCopyAlloc) {
-        const VkDeviceSize uvOffset = static_cast<VkDeviceSize>(srcW) * srcH;
-        recordOk = conv->recordConvertFromBufferScaled(
-            cmd,
-            reinterpret_cast<VkBuffer>(zeroCopyAlloc->vulkanBuffer),
-            static_cast<uint32_t>(srcW), static_cast<uint32_t>(srcH),
-            static_cast<uint32_t>(dstW), static_cast<uint32_t>(dstH),
-            /*yOffset=*/  0,
-            /*uvOffset=*/ uvOffset);
+        if (zcIsP010) {
+            gWorkerStep("convertDecodedToCacheGpu/record-zc-p010");
+            const VkDeviceSize uvOffset = static_cast<VkDeviceSize>(srcW) * srcH * 2;
+            recordOk = conv->recordConvertP010FromBufferScaled(
+                cmd,
+                reinterpret_cast<VkBuffer>(zeroCopyAlloc->vulkanBuffer),
+                static_cast<uint32_t>(srcW), static_cast<uint32_t>(srcH),
+                static_cast<uint32_t>(dstW), static_cast<uint32_t>(dstH),
+                /*yOffset=*/  0,
+                /*uvOffset=*/ uvOffset);
+        } else {
+            gWorkerStep("convertDecodedToCacheGpu/record-zc-nv12");
+            const VkDeviceSize uvOffset = static_cast<VkDeviceSize>(srcW) * srcH;
+            recordOk = conv->recordConvertFromBufferScaled(
+                cmd,
+                reinterpret_cast<VkBuffer>(zeroCopyAlloc->vulkanBuffer),
+                static_cast<uint32_t>(srcW), static_cast<uint32_t>(srcH),
+                static_cast<uint32_t>(dstW), static_cast<uint32_t>(dstH),
+                /*yOffset=*/  0,
+                /*uvOffset=*/ uvOffset);
+        }
     } else if (srcFmt == AV_PIX_FMT_NV12) {
+        gWorkerStep("convertDecodedToCacheGpu/record-cpu-nv12");
         recordOk = conv->recordConvertScaled(
             cmd,
             decoded.data[0], decoded.linesize[0],
@@ -491,7 +570,17 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
             static_cast<uint32_t>(srcW), static_cast<uint32_t>(srcH),
             static_cast<uint32_t>(dstW), static_cast<uint32_t>(dstH),
             stagingOut);
+    } else if (srcFmt == AV_PIX_FMT_P010LE || srcFmt == AV_PIX_FMT_P016LE) {
+        gWorkerStep("convertDecodedToCacheGpu/record-cpu-p010");
+        recordOk = conv->recordConvertP010Scaled(
+            cmd,
+            decoded.data[0], decoded.linesize[0],
+            decoded.data[1], decoded.linesize[1],
+            static_cast<uint32_t>(srcW), static_cast<uint32_t>(srcH),
+            static_cast<uint32_t>(dstW), static_cast<uint32_t>(dstH),
+            stagingOut);
     } else {
+        gWorkerStep("convertDecodedToCacheGpu/record-cpu-yuv420p");
         recordOk = conv->recordConvertYuv420pScaled(
             cmd,
             decoded.data[0], decoded.linesize[0],
@@ -514,6 +603,7 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
     //    oldLayout=UNDEFINED discards the previous contents — correct
     //    for both freshly created textures and recycled ones (we're
     //    about to overwrite the entire image via vkCmdCopyImage). ───────
+    gWorkerStep("convertDecodedToCacheGpu/image-copy");
     {
         VkImageMemoryBarrier b{};
         b.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -577,6 +667,7 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
     // gpuImageView and GpuContext::readbackTexture (which hardcodes
     // SHADER_READ_ONLY_OPTIMAL as oldLayout) — do not use the tracker.
 
+    gWorkerStep("convertDecodedToCacheGpu/end-cmd-buffer");
     if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
         wgs.cmdPool.freeBuffer(cmd);
         for (auto& s : stagingOut) s.destroy();
@@ -585,12 +676,15 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
         return nullptr;
     }
 
+    gWorkerStep("convertDecodedToCacheGpu/submit");
+
     // ── Per-call fence for deferred CPU-side cleanup of staging
     //    buffers + cmd buffer.  NOT used for compositor ordering:
     //    compositor submits on the same compute queue (via the same
     //    GpuScheduler) so Vulkan's per-queue FIFO ordering already
     //    guarantees this convert+copy completes before the compositor's
     //    later sample.  See WorkerGpuState::pending in MediaPoolPrefetchGpu.h.
+    gWorkerStep("convertDecodedToCacheGpu/submit/create-fence");
     VkFenceCreateInfo fci{};
     fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     VkFence fence = VK_NULL_HANDLE;
@@ -613,6 +707,7 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
     VkTimelineSemaphoreSubmitInfo tlInfo{};
     tlInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
 
+    gWorkerStep("convertDecodedToCacheGpu/submit/wait-semaphore");
     VkSemaphore           waitSem   = VK_NULL_HANDLE;
     VkPipelineStageFlags  waitStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     uint64_t              waitValue = 0;
@@ -630,6 +725,7 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
     // carries this value — making the cross-queue memory-visibility
     // wait GPU-side, off the prefetch worker thread, replacing the
     // previous synchronous vkWaitForFences that cost ~5 ms / frame.
+    gWorkerStep("convertDecodedToCacheGpu/submit/signal-semaphore");
     VkSemaphore  prefetchSignalSem   = VK_NULL_HANDLE;
     uint64_t     prefetchSignalValue = 0;
     {
@@ -668,6 +764,7 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
         sub.signalSemaphoreCount = 1;
     }
 
+    gWorkerStep("convertDecodedToCacheGpu/submit/queue-submit");
     const VkResult sr = ctx.scheduler().submit(sub);
     if (sr != VK_SUCCESS) {
         spdlog::warn("convertDecodedToCacheGpu: submit failed vk={} handle={} frame={}",
@@ -702,6 +799,7 @@ std::shared_ptr<CachedFrame> MediaPool::convertDecodedToCacheGpu(
     // reclaim these resources immediately — no GPU work outstanding.
     // We still push to wgs.pending rather than freeing inline so the
     // per-worker resource recycling stays in one place.
+    gWorkerStep("convertDecodedToCacheGpu/submit/push-pending");
     WorkerGpuState::PendingSubmit p;
     p.fence       = fence;
     p.cmdBuf      = cmd;

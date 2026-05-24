@@ -337,8 +337,13 @@ private:
     // ── UI setup (extracted to ProjectBinUI.cpp) ────────────────────────
 
     void setupUI();
-    void syncListView();
+    void syncListView(const std::vector<BinFolderState>* savedFoldersOverride = nullptr);
     void syncIconView();
+
+    /// After syncListView() builds the full tree, reparent the list widget
+    /// so it shows only the children of the bin at m_iconBinPath (used when
+    /// a sub-bin tab is active in list-view mode).
+    void focusListViewOnBin();
 
     /// Open (or switch to) a tab for the given bin path.
     void openBinTab(const QStringList& binPath, const QString& name);
@@ -374,6 +379,8 @@ private:
     std::vector<ClipboardEntry> m_clipboardItems;  // copied media/matte/bin (non-sequence)
     QTreeWidgetItem* m_dropHighlightItem{nullptr}; // bin highlighted during drag
     QVector<QStringList> m_binTabPaths;  // bin path for each tab (empty = root)
+    QVector<bool> m_binTabViewModes;     // per-tab list (true) / icon (false) preference
+    std::vector<BinFolderState> m_rootFolderState; // full tree snapshot before sub-bin focus
     std::atomic<bool> m_destroying{false};
 };
 

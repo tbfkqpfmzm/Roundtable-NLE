@@ -32,12 +32,12 @@
 
 namespace rt {
 
-void ProjectBin::syncListView()
+void ProjectBin::syncListView(const std::vector<BinFolderState>* savedFoldersOverride)
 {
     // Block itemChanged signals during rebuild to prevent false rename triggers
     m_listWidget->blockSignals(true);
 
-    const auto savedFolders = binFolderState();
+    const auto savedFolders = savedFoldersOverride ? *savedFoldersOverride : binFolderState();
 
     m_listWidget->clear();
     m_dropHighlightItem = nullptr;  // tree items destroyed by clear()

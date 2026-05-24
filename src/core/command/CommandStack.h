@@ -83,11 +83,27 @@ public:
     [[nodiscard]] size_t maxDepth() const noexcept { return m_maxDepth; }
     void setMaxDepth(size_t depth) noexcept { m_maxDepth = depth; }
 
+    /// Begin a macro — subsequent execute() / pushWithoutExecute() calls are
+    /// buffered into a single undo group until endMacro() is called.
+    /// Nested beginMacro() calls are ignored (only outermost matters).
+    void beginMacro(std::string description);
+
+    /// End the current macro and push the grouped command onto the stack.
+    /// If no macro is active, this is a no-op.
+    void endMacro();
+
+    /// Returns true if a macro is currently being recorded.
+    [[nodiscard]] bool isMacroActive() const noexcept { return m_macroDepth > 0; }
+
 private:
     std::deque<std::unique_ptr<Command>> m_undoStack;
     std::deque<std::unique_ptr<Command>> m_redoStack;
     size_t                               m_maxDepth;
     ChangeCallback                       m_callback;
+
+    // Macro recording state
+    int                                   m_macroDepth{0};
+    std::unique_ptr<class MacroCommand>   m_activeMacro;
 
     void trimToMaxDepth();
     void notifyChange();

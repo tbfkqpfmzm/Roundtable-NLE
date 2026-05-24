@@ -210,6 +210,7 @@ void ProjectBin::setupUI()
     // Root "Project" tab — not closeable
     m_binTabBar->addTab("Project");
     m_binTabPaths.append(QStringList{});  // empty path = root
+    m_binTabViewModes.append(true);       // root tab defaults to list view
     m_binTabBar->setTabButton(0, QTabBar::RightSide, nullptr);
     connect(m_binTabBar, &QTabBar::currentChanged,
             this, &ProjectBin::onBinTabChanged);

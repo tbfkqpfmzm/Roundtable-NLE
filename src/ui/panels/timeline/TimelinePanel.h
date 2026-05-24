@@ -487,6 +487,13 @@ private:
     int64_t   m_rollRightOrigIn{0};
     int64_t   m_rollRightOrigDur{0};
     int64_t   m_rollRightOrigSrcIn{0};
+    // Precomputed live-drag bounds for the seam — mirrors the commit
+    // clamp in EditOperations::rollingEdit so the seam stops at the
+    // same tick during drag as it lands on at release. Without this,
+    // the live preview can slide past the source-media or right-clip-
+    // head limits and then snap back on release.
+    int64_t   m_rollMinEditPoint{0};
+    int64_t   m_rollMaxEditPoint{0};
 
     // Transition trim drag state
     size_t  m_transTrimTrackIndex{0};
@@ -517,9 +524,14 @@ private:
     // ── Ghost track (drag-to-create new track, Premiere Pro style) ──
     bool   m_ghostTrackVisible{false};
     bool   m_ghostTrackIsAbove{false}; // true = new video track above topmost, false = new audio below
+    bool   m_ghostTrackOnExisting{false}; // true = ghost overlay positioned on an existing track (multi-clip drag)
     int    m_ghostTrackY{0};           // Y position of ghost track in panel coords
     int    m_ghostTrackHeight{60};     // height of the ghost track
     GhostTrackOverlay* m_ghostOverlay{nullptr};
+    // Second overlay for the companion side of a video+audio drag — so
+    // both the video destination AND the audio destination can show
+    // individual clip outlines simultaneously during multi-clip drags.
+    GhostTrackOverlay* m_ghostOverlayAudio{nullptr};
 
     // Drag-to-reorder state
     size_t m_reorderSrcIndex{SIZE_MAX};
@@ -537,6 +549,13 @@ private:
     // the cursor stays in the edge zone, like Premiere Pro.
     QTimer*  m_marqueeScrollTimer{nullptr};
     QPointF  m_marqueeLastMovePos;
+
+    // Auto-scroll while a clip-move/trim drag pegs against the viewport
+    // edge.  Mirrors the marquee timer so the timeline follows the
+    // cursor when you're dragging a clip off-screen.
+    QTimer*  m_clipDragScrollTimer{nullptr};
+    QPointF  m_clipDragLastMovePos;
+    void     updateClipDragAutoScroll(const QPointF& pos);
 
     // Effect drag-drop highlight: clip under cursor during effect drag
     std::optional<ClipRef> m_effectDropTarget;
@@ -584,12 +603,15 @@ private:
     /// Bigger than the old fixed 6px so edges are easy to grab, but
     /// clamped to a fraction of the clip's on-screen width so the two
     /// edge zones never swallow a short/zoomed-out clip's move region.
+    /// Tightened from 11/35% to 8/28% so a body-click doesn't slip into
+    /// trim mode near the edges — accidental trims were the single
+    /// biggest "feel" complaint vs Premiere.
     /// @param clipPixelWidth  on-screen width of the clip in pixels.
     [[nodiscard]] static double edgeGrabPx(double clipPixelWidth) noexcept
     {
-        constexpr double kBase = 11.0;   // comfortable default handle
+        constexpr double kBase = 8.0;    // comfortable default handle
         constexpr double kMin  = 4.0;    // floor for very thin clips
-        const double cap = clipPixelWidth * 0.35;  // keep a central move zone
+        const double cap = clipPixelWidth * 0.28;  // keep a central move zone
         double v = kBase < cap ? kBase : cap;
         return v < kMin ? kMin : v;
     }
@@ -606,6 +628,13 @@ private:
 
     /// Update snap indicator line across all track widgets and ruler.
     void setSnapIndicator(int64_t tick);
+
+    /// Apply Premiere-style A/V link selection: clips sharing a non-zero
+    /// linkId with `seed` are added to (or removed from) the selection
+    /// alongside it. No-op when the seed has no link. Used so clicking a
+    /// linked video also picks its companion audio (and vice versa), and
+    /// shift-toggling carries the partner along with the toggled clip.
+    void setLinkPartnersSelected(const ClipRef& seed, bool selected);
 
     /// Recompute marquee selection from current m_dragStart/m_marqueeLastMovePos
     /// (additively merging in m_marqueeBaseSelection if Shift+marquee).
