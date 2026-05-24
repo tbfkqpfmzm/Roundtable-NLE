@@ -1285,14 +1285,15 @@ static void renderPreviewFrame(ExportPanel* /*self*/,
                                QLabel* label,
                                const ExportPanel::PreviewCallback& cb,
                                QSpinBox* wSpin, QSpinBox* hSpin,
-                               int64_t tick)
+                               int64_t tick,
+                               bool scrub = true)
 {
     if (!cb || !label) return;
 
     uint32_t fullW = wSpin  ? static_cast<uint32_t>(wSpin->value())  : 1920;
     uint32_t fullH = hSpin ? static_cast<uint32_t>(hSpin->value()) : 1080;
 
-    auto frame = cb(tick, fullW, fullH, true);
+    auto frame = cb(tick, fullW, fullH, scrub);
     if (frame && frame->ensurePixels() && frame->width > 0 && frame->height > 0) {
         uint32_t stride = frame->stride > 0 ? frame->stride : frame->width * 4;
         QImage img(frame->pixels.data(), static_cast<int>(frame->width),
@@ -1344,9 +1345,13 @@ void ExportPanel::onPlayPause()
 
         // Render the FIRST frame immediately so the user sees video
         // without waiting for the timer to fire (~33ms delay).
+        // scrub=false so the settle-window hold engages when layers are
+        // still cold — prevents the partial-composite flash (missing
+        // background / discolored character) on play start.
         renderPreviewFrame(this, m_previewImageLabel, m_previewCallback,
                            m_widthSpin, m_heightSpin,
-                           m_miniTimeline->playhead());
+                           m_miniTimeline->playhead(),
+                           /*scrub=*/false);
 
         // Seek PlaybackController to mini-timeline position and play (audio)
         if (m_playbackController) {
@@ -1400,9 +1405,11 @@ void ExportPanel::onPlaybackTick()
 
     m_miniTimeline->setPlayhead(tick);
 
-    // Render the preview at full output resolution
+    // Render the preview at full output resolution.  scrub=false so the
+    // settle-window hold can engage when a clip's frames aren't ready yet
+    // — playback is real-time, partial composites would flash visible.
     renderPreviewFrame(this, m_previewImageLabel, m_previewCallback,
-                       m_widthSpin, m_heightSpin, tick);
+                       m_widthSpin, m_heightSpin, tick, /*scrub=*/false);
 }
 
 void ExportPanel::onStepForward()

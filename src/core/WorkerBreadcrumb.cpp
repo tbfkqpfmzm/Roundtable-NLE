@@ -7,24 +7,20 @@
 namespace rt {
 
 namespace {
-std::atomic<const char*>& g_lastWorkerStep()
-{
-    // Function-local static so the atomic is zero-initialised before any
-    // worker call site can run (avoids the static-init-order trap of a
-    // file-scope global).  "idle" is a string literal in .rdata.
-    static std::atomic<const char*> s_step{"idle"};
-    return s_step;
-}
+// Per-thread breadcrumb.  Trivial type with a constant initializer, so
+// MSVC uses static TLS — initialized to "idle" on thread start, safe to
+// read from SEH (no thread-local-init machinery to trip over).
+thread_local const char* tl_step = "idle";
 } // namespace
 
-std::atomic<const char*>& lastWorkerStep() noexcept
+void setLastWorkerStep(const char* tag) noexcept
 {
-    return g_lastWorkerStep();
+    tl_step = tag ? tag : "idle";
 }
 
 const char* readLastWorkerStep() noexcept
 {
-    const char* p = g_lastWorkerStep().load(std::memory_order_relaxed);
+    const char* p = tl_step;
     return p ? p : "idle";
 }
 

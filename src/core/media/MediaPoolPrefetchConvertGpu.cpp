@@ -180,11 +180,14 @@ Nv12Converter* WorkerGpuState::ensureNv12Converter(uint32_t w, uint32_t h)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Phase-boundary breadcrumb used by the crash handler.  Stored in a global
-// atomic (rt::lastWorkerStep) so it survives into the minidump as a single
-// known-named symbol, anchoring the otherwise frame-pointer-only crash
-// stacks observed at roundtable.exe+0x3DE56B / +0x3DD70B / +0x3DC3FB.
-// The macro narrows the call-site boilerplate.
+// Phase-boundary breadcrumb used by the crash handler.  Stored per-thread
+// (rt::setLastWorkerStep — see WorkerBreadcrumb.h) so the SEH handler,
+// which runs on the faulting thread, reads THIS thread's last step —
+// not whatever a different thread happened to write most recently.
+// Anchors the otherwise frame-pointer-only crash stacks observed at
+// roundtable.exe+0x3DE56B / +0x3DD70B / +0x3DC3FB to a human-readable
+// step name without needing PDB symbols.  The macro narrows the
+// call-site boilerplate.
 // ─────────────────────────────────────────────────────────────────────────
 #define gWorkerStep ::rt::setLastWorkerStep
 

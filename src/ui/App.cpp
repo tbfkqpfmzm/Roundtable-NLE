@@ -133,17 +133,29 @@ App::~App()
             if (auto* pm = tw->programMonitor())
                 pm->stopPlaybackPipeline();
 
-            // Set CompositeService's m_shutdown EARLY (before Qt widget
-            // teardown begins in Phase 3) so any compositeFrame call
-            // triggered by a Qt destroyed() signal during deleteChildren
-            // returns nullptr immediately instead of running the full
-            // composite path on partially-destroyed state.  Fixes the
-            // deterministic SEH ACCESS_VIOLATION at +0x3DE88B observed
-            // across multiple sessions on app close.  shutdown() proper
-            // (which also tears down GPU resources) is still triggered
-            // later via CompositeService's destructor.
+            // Fully shut down the CompositeService NOW (Phase 1), not
+            // later in Phase 3 via its destructor.  Two reasons:
+            //
+            // 1. Sets m_shutdown so any compositeFrame() call triggered
+            //    by a Qt destroyed() signal during Phase-3 deleteChildren
+            //    returns nullptr immediately instead of running on
+            //    partially-destroyed state.  (The original requestShutdown
+            //    fix for the +0x3DE88B AV — preserved by shutdown(), which
+            //    sets the same flag.)
+            //
+            // 2. CompositeEngine::shutdown() clears m_gpuTexCache and
+            //    m_compositeLru, which transitively hold shared_ptr<Texture>
+            //    issued by MediaPool's PrefetchTexturePool.  If we leave
+            //    this until ~CompositeService runs in Phase 3, MediaPool
+            //    (and its pool) is already gone — the shared_ptr deleter
+            //    fires into a freed unordered_map and AVs.  That was the
+            //    +0x3E1EBB crash (rt::makePooledTexture's lambda hitting
+            //    a destroyed std::_Hash<…PoolKey…>).
+            //
+            // shutdown() is idempotent; the later ~CompositeEngine call
+            // from ~CompositeService is a safe no-op.
             if (auto* cs = tw->compositeService())
-                cs->requestShutdown();
+                cs->shutdown();
         }
     }
     if (m_audioEngine) m_audioEngine->shutdown();

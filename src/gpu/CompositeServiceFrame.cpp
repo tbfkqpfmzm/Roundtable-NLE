@@ -182,15 +182,15 @@ try
     // at every shot boundary.  Also run during export (forceFullRes)
     // so the decode cache stays hot and we don't block on every frame.
     //
-    // Scrub: SKIP.  Prewarm projects ~2s ahead of the playhead in playback
-    // direction; during scrubbing the user's direction/speed isn't known
-    // and the predictive work is mostly wasted.  Worse, the scan can stall
-    // on MediaPool m_mutex (see PRE-LAYER-SLOW > 6s on backward scrub
-    // across clip boundaries) — exactly the latency the user perceives as
-    // unresponsive scrubbing.  The settle window after scrub stops re-fires
-    // a normal composite which re-runs prewarm with the user's landed tick.
+    // Scrub: SKIP during normal playback, but ALWAYS run when exporting
+    // (forceFullResolution).  The Export Panel preview and RenderQueue
+    // export are forward-sequential, not random scrub — prewarm is just
+    // as beneficial as during normal playback.  During scrub the user's
+    // direction/speed isn't known and the predictive work is mostly
+    // wasted.  Worse, the scan can stall on MediaPool m_mutex (see
+    // PRE-LAYER-SLOW > 6s on backward scrub across clip boundaries).
     auto preLayerT0 = std::chrono::high_resolution_clock::now();
-    if (!scrubMode && (playbackNonBlocking || m_forceFullResolution.load())) {
+    if (!scrubMode || m_forceFullResolution.load()) {
         prewarmUpcomingShots(tick);
     }
     auto prewarmT1 = std::chrono::high_resolution_clock::now();
@@ -198,16 +198,15 @@ try
     // Shot-boundary detection: when new clips appear (different from last
     // composite), force blocking decode so the correct character shows
     // immediately instead of flashing the previous shot's frame.
-    // Also run during export so cache isn't polluted by stale clip IDs.
+    // Also run during export (forceFullResolution) so cache isn't
+    // polluted by stale clip IDs and upcoming clips decode promptly.
     //
-    // Scrub: SKIP for the same reason as prewarm above.  The block walks
-    // tracks under m_mutex and schedules urgent prefetch on every new
-    // clip — at scrub speed this fires on every poll tick and floods the
-    // decoder.  We deliberately leave m_lastActiveClipIds untouched so
-    // the first non-scrub composite after the user stops treats every
-    // visible clip as "new" and fires the prefetch once, in the right
-    // place.
-    if (!scrubMode && (playbackNonBlocking || m_forceFullResolution.load())) {
+    // Scrub: SKIP during normal playback for the same reason as prewarm
+    // above, but ALWAYS run during export/Export Preview.
+    // m_lastActiveClipIds is deliberately left untouched when skipped
+    // so the first non-scrub composite after the user stops treats every
+    // visible clip as "new" and fires the prefetch once, in the right place.
+    if (!scrubMode || m_forceFullResolution.load()) {
         std::unordered_set<uint64_t> currentClipIds;
         for (size_t ti = m_timeline->trackCount(); ti > 0; --ti) {
             auto* track = m_timeline->track(ti - 1);
@@ -436,9 +435,15 @@ try
     // if a clip is permanently unresolvable (e.g. missing media file).
     //
     // Skip during scrub (the user wants immediate feedback on every drag
-    // step, partial frames are fine) and during export (forceFullResolution,
-    // which always blocks until full).
-    if (!scrubMode && !m_forceFullResolution.load() &&
+    // step, partial frames are fine).  Previously also skipped when
+    // forceFullResolution was set, but that left the Export Preview's
+    // real-time playback path showing partial composites (missing
+    // background / discolored character) because the actual export and
+    // the Export Preview share the same forceFullResolution=true path —
+    // export tolerates partial frames because it runs non-real-time and
+    // blocks until full, but Export Preview runs on a QTimer and can't.
+    // Export still bypasses this via scrub=true (set by RenderQueue).
+    if (!scrubMode &&
         clipsAtTick > 0 && static_cast<int>(layers.size()) < clipsAtTick)
     {
         using namespace std::chrono;

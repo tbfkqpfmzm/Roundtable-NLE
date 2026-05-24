@@ -21,7 +21,6 @@
 #include "timeline/AudioClip.h"
 #include "timeline/ImageClip.h"
 #include "timeline/SequenceClip.h"
-#include "timeline/SpineClip.h"
 #include "timeline/TitleClip.h"
 #include "timeline/GraphicClip.h"
 #include "timeline/GraphicLayer.h"
@@ -34,7 +33,6 @@
 #include "project/Project.h"
 
 #ifdef ROUNDTABLE_HAS_SPINE
-#include "spine/AnimationVideoCache.h"
 #include "spine/ModelManager.h"
 #include "spine/ShotPreset.h"
 #include "stb_image.h"
@@ -237,63 +235,13 @@ void CompositeService::doPrewarmPlaybackResources(int64_t tick, uint32_t outW, u
                 auto* fx = gpu.effectProcessor(outW, outH);
                 warmedEffectProcessor = fx && fx->isInitialized();
             }
-#ifdef ROUNDTABLE_HAS_SPINE
-            if (auto* spineClip = dynamic_cast<SpineClip*>(clip);
-                spineClip && m_animVideoCache) {
-                const std::string baseAnim = spineClip->animationName();
-                const bool animIsAlreadyTalk =
-                    (baseAnim.size() >= 5 &&
-                     baseAnim.compare(baseAnim.size() - 5, 5, "_talk") == 0);
-                const std::string selectedAnim =
-                    spineClip->isTalking() && !animIsAlreadyTalk
-                        ? (baseAnim + "_talk") : baseAnim;
-                const auto* entry = m_animVideoCache->getEntry(
-                    spineClip->characterName(), spineClip->outfit(), selectedAnim);
-                if (entry) {
-                    const std::string mp = entry->videoPath.string();
-                    uint64_t handle = 0;
-                    auto mit = m_openMediaHandles.find(mp);
-                    if (mit != m_openMediaHandles.end()) {
-                        handle = mit->second;
-                    } else {
-                        handle = m_mediaPool->open(mp);
-                        if (handle != 0) m_openMediaHandles[mp] = handle;
-                    }
-                    if (handle != 0) {
-                        const auto* info = m_mediaPool->getInfo(handle);
-                        if (info && info->frameCount > 1) {
-                            const auto warmTier = ResolutionTier::Half;
-                            int64_t animFrame = 0;
-                            if (info->fps > 0.0 && info->frameCount > 0) {
-                                const int64_t localTick =
-                                    spineClip->useGlobalTime() ? tick
-                                                               : (tick - clip->timelineIn());
-                                const double animTime =
-                                    ticksToSeconds(localTick) *
-                                    static_cast<double>(spineClip->animationSpeed());
-                                int64_t f = static_cast<int64_t>(animTime * info->fps);
-                                if (spineClip->isLooping()) {
-                                    f = ((f % info->frameCount) + info->frameCount) % info->frameCount;
-                                } else {
-                                    f = std::clamp(f, int64_t(0), info->frameCount - 1);
-                                }
-                                animFrame = f;
-                            }
-                            m_mediaPool->schedulePrefetch(
-                                handle, animFrame, /*count=*/30, /*urgent=*/true, warmTier);
-                            prerollTargets.push_back({handle, animFrame, warmTier});
-                            if (info->frameCount <= MediaPool::LOOP_PREDECODE_MAX_FRAMES) {
-                                m_mediaPool->startLoopPreDecode(handle, warmTier, clip->timelineIn());
-                                spdlog::info("[PREWARM] Spine loop pre-decode: clip {} '{}' ({} frames), startFrame={}",
-                                             clip->id(),
-                                             std::filesystem::path(mp).filename().string(),
-                                             info->frameCount, animFrame);
-                            }
-                        }
-                    }
-                }
-            }
-#endif
+            // SpineClips render via GPU live Spine (the H264 pre-rendered
+            // path at CompositeServiceLayerBuild.cpp is hardcoded off).
+            // Prefetching their AnimVideoCache entries here was burning
+            // NVDEC sessions + queueing 30 urgent prefetches per Spine
+            // character per shot for frames nothing samples — visible as
+            // COMPOSITE-SLOW / DIAG-CLOCK JUMP cascades on constrained
+            // GPUs (GTX 1070) once a project had been converted.
         }
     }
 
@@ -464,29 +412,16 @@ void CompositeService::prewarmUpcomingShots(int64_t tick)
             if (m_lastActiveClipIds.count(clip->id())) continue;
             if (!m_prewarmedClipIds.insert(clip->id()).second) continue;
 
-            // Resolve which media path this clip decodes from.  VideoClip
-            // has a direct mediaPath; SpineClip routes through the
-            // animation video cache for its pre-rendered .mp4/.webm.
+            // Resolve which media path this clip decodes from.  Only
+            // VideoClip has one — SpineClips render via GPU live Spine and
+            // do NOT decode the AnimVideoCache .mp4/.webm even when
+            // present (see CompositeServiceLayerBuild.cpp `if (false)`).
             std::string mp;
             bool isCharacter = false;
             if (auto* videoClip = dynamic_cast<VideoClip*>(clip)) {
                 mp = videoClip->mediaPath();
                 isCharacter = videoClip->isVideoCharacter();
             }
-#ifdef ROUNDTABLE_HAS_SPINE
-            else if (auto* spineClip = dynamic_cast<SpineClip*>(clip)) {
-                if (m_animVideoCache) {
-                    const auto* entry = m_animVideoCache->getEntry(
-                        spineClip->characterName(),
-                        spineClip->outfit(),
-                        spineClip->animationName());
-                    if (entry) {
-                        mp = entry->videoPath.string();
-                        isCharacter = true;
-                    }
-                }
-            }
-#endif
             if (mp.empty()) {
                 // Either a non-media clip or a Spine clip with no
                 // pre-rendered video.  Drop the prewarm mark so it can be

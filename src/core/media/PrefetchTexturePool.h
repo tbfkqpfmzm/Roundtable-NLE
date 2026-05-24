@@ -128,9 +128,19 @@ private:
 // without an explicit queue-ownership-transfer barrier.
 //
 // Lifetime invariant: `pool` must outlive every shared_ptr<Texture>
-// returned. MediaPool owns the pool and the FrameCache that holds the
-// shared_ptr (via CachedFrame::gpuTextureOwner), so member-destruction
-// order guarantees this for the normal shutdown path.
+// returned.  MediaPool owns the pool and ALL containers that hold the
+// returned shared_ptrs (via CachedFrame::gpuTextureOwner):
+//   • FrameCache       (m_cache)
+//   • DiskFrameCache   (m_diskCache, including its write-behind queue
+//                       drained on the writer thread during shutdown)
+//   • GpuTextureCache  (held by CompositeEngine, not by MediaPool — but
+//                       cleared in CompositeService::shutdown(), which
+//                       App.cpp invokes before MediaPool is destroyed)
+//
+// MediaPool's member layout puts m_prefetchTexPool BEFORE m_cache and
+// m_diskCache so reverse-order destruction destroys the pool LAST,
+// after every shared_ptr<Texture> it ever issued has been released.
+// See the DECLARATION-ORDER NOTE in MediaPool.h.
 class GpuContext;
 
 std::shared_ptr<Texture> makePooledTexture(

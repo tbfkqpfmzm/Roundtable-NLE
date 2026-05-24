@@ -69,10 +69,20 @@ if(MSVC)
         $<$<CONFIG:Release>:/O2>
         $<$<CONFIG:Release>:/Oi>
         $<$<CONFIG:Release>:/Gy>
+        # /Zi: emit debug info into a PDB.  Does NOT disable optimizations.
+        # Needed so the in-process SEH crash handler can resolve
+        # roundtable.exe frames to function names — without it every
+        # frame in crash_log.txt is a raw "+0xNNNN" offset.
+        $<$<CONFIG:Release>:/Zi>
     )
     add_link_options(
         $<$<CONFIG:Release>:/OPT:REF>
         $<$<CONFIG:Release>:/OPT:ICF>
+        # /DEBUG (implicitly /DEBUG:FULL with /LTCG) writes the matching
+        # PDB next to the EXE.  Compatible with /OPT:REF + /OPT:ICF;
+        # those strip unreferenced code from the EXE but keep the PDB
+        # complete.  PDB ships with the build but is not redistributed.
+        $<$<CONFIG:Release>:/DEBUG>
     )
     # Link-Time Code Generation (very slow — only for final distribution builds)
     option(ROUNDTABLE_LTO "Enable /GL + /LTCG for whole-program optimization (slow)" ON)

@@ -498,17 +498,27 @@ private:
     std::unordered_map<std::string, MediaHandle>    m_pathToHandle; // canonical path → handle
     std::function<void(std::filesystem::path)>      m_onMediaOpened; // live-swap watcher hook
     std::unordered_set<std::string>                 m_failedPaths;  // paths that failed to open (no retry)
-    std::shared_ptr<FrameCache>                     m_cache;
-    std::shared_ptr<DiskFrameCache>                 m_diskCache;
-    std::shared_ptr<PixelBufferPool>                m_pixelPool;
-    FrameScheduler                                  m_scheduler;
-    uint64_t                                        m_nextHandle{1};
 
     // UPGRADE_PLAN Phase 3: recycled VkImage pool for the GPU-resident
     // prefetch decode path. Null when GpuContext is not initialised
     // (headless / no-Vulkan builds) — prefetch workers must tolerate
     // null and fall back to the CPU path. Phase 4 is the first consumer.
+    //
+    // DECLARATION-ORDER NOTE (2026-05-24): m_prefetchTexPool MUST be
+    // declared BEFORE m_cache and m_diskCache so reverse-order
+    // destruction destroys it LAST.  Both caches transitively own
+    // shared_ptr<Texture>s whose deleter (makePooledTexture's lambda)
+    // recycles into this pool — destroying the pool first would AV in
+    // the DiskFrameCache writer thread on shutdown as it drained its
+    // queue, hitting the pool's already-freed unordered_map.  See the
+    // lifetime invariant in PrefetchTexturePool.h.
     std::unique_ptr<PrefetchTexturePool>            m_prefetchTexPool;
+
+    std::shared_ptr<FrameCache>                     m_cache;
+    std::shared_ptr<DiskFrameCache>                 m_diskCache;
+    std::shared_ptr<PixelBufferPool>                m_pixelPool;
+    FrameScheduler                                  m_scheduler;
+    uint64_t                                        m_nextHandle{1};
 
     // UPGRADE_PLAN Path C: shared timeline semaphore for cross-queue
     // memory visibility between prefetch (compute queue) and

@@ -137,14 +137,11 @@ CompositeService::CompositeService()
 
 CompositeService::~CompositeService()
 {
-    // ── Signal prewarm thread to exit ─────────────────────────────────
-    m_destroying.store(true);
-    {
-        std::lock_guard lock(m_prewarmMutex);
-        m_prewarmCv.notify_one();
-    }
-    if (m_prewarmThread.joinable())
-        m_prewarmThread.join();
+    // Belt-and-braces: App.cpp Phase 1 calls shutdown() before MediaPool
+    // is destroyed, but if anyone constructs a CompositeService outside
+    // App (tests, future code), the destructor still does the full
+    // teardown.  shutdown() is idempotent.
+    shutdown();
 
     // Destroy the composite engine — it drains GPU queues and frees all
     // GPU resources (submission, staging ring, texture cache, layers).
@@ -336,10 +333,43 @@ void CompositeService::setCacheCoordinator(rt::CacheCoordinator* coordinator)
 
 void CompositeService::shutdown()
 {
+    // Idempotent: App.cpp Phase 1 calls this, and ~CompositeService
+    // calls it again as a safety net.  Use a dedicated guard atomic
+    // (not m_shutdown) — requestShutdown() also flips m_shutdown, so
+    // a prior requestShutdown call would otherwise make us skip the
+    // real teardown here.
+    if (m_shutdownDone.exchange(true, std::memory_order_acq_rel))
+        return;
     m_shutdown.store(true, std::memory_order_release);
 
-    // Shut down the composite engine — waits for GPU idle, destroys
-    // all GPU resources (submission, staging ring, texture cache, layers).
+    // 1. Stop the prewarm thread BEFORE we clear the containers it
+    //    reads.  Without this, calling reset() below races a live
+    //    prewarm iteration that's walking m_stickyLastClipFrame /
+    //    m_spineCache / etc.
+    m_destroying.store(true);
+    {
+        std::lock_guard lock(m_prewarmMutex);
+        m_prewarmCv.notify_one();
+    }
+    if (m_prewarmThread.joinable())
+        m_prewarmThread.join();
+
+    // 2. Drop every shared_ptr<CachedFrame> this service holds.
+    //    Each CachedFrame's gpuTextureOwner is a shared_ptr<Texture>
+    //    issued by MediaPool's PrefetchTexturePool — letting these
+    //    refs survive into Phase 3 (when MediaPool is already gone)
+    //    fires the recycle-into-dead-pool AV.  reset() clears:
+    //    m_lastGoodComposite, m_stickyLastClipFrame,
+    //    m_stickyLastCharFrame, m_lastPreRenderedSpineFrame,
+    //    m_spineCache (transitively SpineCPUState::cachedFrame),
+    //    m_videoFallbackCache, and the engine's composite LRU.
+    reset();
+
+    // 3. Tear down the composite engine — waits for GPU idle, frees
+    //    GPU resources (submission, staging ring, texture cache,
+    //    layer textures).  After this, the engine is unusable but
+    //    its destructor (running from ~CompositeService later) is
+    //    a safe no-op because everything is already torn down.
     if (m_engine) {
         m_engine->shutdown();
     }

@@ -573,6 +573,14 @@ private:
     bool m_gpuDisplayMode{false};
     std::atomic<bool> m_shutdown{false};
 
+    // Distinct from m_shutdown: this guards CompositeService::shutdown()
+    // itself against re-entry, so the prewarm-thread join + container
+    // teardown don't run twice (which would be wrong even though every
+    // individual step is idempotent — we don't want to log "shutdown
+    // complete" twice, and using m_shutdown for the guard would let
+    // requestShutdown() falsely satisfy it).
+    std::atomic<bool> m_shutdownDone{false};
+
     // Playback resolution tier (set via setPlaybackTier, read in compositeFrame).
     // Default Half matches the dropdown default (1/2) and the source monitor.
     std::atomic<uint8_t> m_playbackTier{static_cast<uint8_t>(ResolutionTier::Half)};

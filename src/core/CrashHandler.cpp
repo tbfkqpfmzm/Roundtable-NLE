@@ -466,14 +466,16 @@ LONG WINAPI crashExceptionFilter(EXCEPTION_POINTERS* exInfo)
     //    can occur when the heap is corrupted by the crash.
     appendCrashLogRawStackSafe(s.crashDirW, info.summary.c_str());
 
-    // 2a. Last worker-thread breadcrumb (set by convertDecodedToCacheGpu
-    //     phases).  Anchors the otherwise frame-pointer-only backtrace
-    //     to a human-readable step name so the next crash dump tells us
-    //     which Vulkan phase blew up without needing PDB symbols.
-    //     readLastWorkerStep() is noexcept + lock-free; safe in SEH.
+    // 2a. Last breadcrumb FOR THIS (faulting) thread (set by
+    //     convertDecodedToCacheGpu phases on prefetch workers).
+    //     Per-thread TLS, so "idle" means the crash was NOT on a worker
+    //     thread that participates in the breadcrumb scheme — a useful
+    //     signal in itself (typically points at a UI-thread shutdown
+    //     race rather than a Vulkan worker bug).  readLastWorkerStep()
+    //     is noexcept and reads its own TLS slot; safe in SEH.
     {
         char buf[256];
-        snprintf(buf, sizeof(buf), "  Worker last step: %s",
+        snprintf(buf, sizeof(buf), "  Last step (this thread): %s",
                  readLastWorkerStep());
         appendCrashLogRawStackSafe(s.crashDirW, buf);
     }
